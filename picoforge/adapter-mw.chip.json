@@ -1,0 +1,14 @@
+{
+  "name": "Microwire Adapter (MODE 3)",
+  "author": "Universal Chip Lab",
+  "pins": [
+    "CS",
+    "SK",
+    "DI",
+    "DO",
+    "GND",
+    "ORG",
+    "NC",
+    "VCC"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "AT24C32 (I2C EEPROM 4KB)",
+  "author": "Universal Chip Lab",
+  "pins": [
+    "A0",
+    "A1",
+    "A2",
+    "GND",
+    "SDA",
+    "SCL",
+    "WP",
+    "VCC"
+  ]
+}

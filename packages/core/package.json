@@ -1,0 +1,24 @@
+{
+  "name": "@ecu/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@ecu/adapters": "workspace:*",
+    "@ecu/chip-db": "workspace:*",
+    "@ecu/dump-tools": "workspace:*",
+    "@ecu/vehicle-db": "workspace:*",
+    "@ecu/workspace": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "typescript": "^5.6.3"
+  }
+}

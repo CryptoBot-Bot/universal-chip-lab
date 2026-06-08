@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "../dist-electron",
+    "rootDir": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "jsx": "preserve",
+    "verbatimModuleSyntax": false,
+    "esModuleInterop": true,
+    "isolatedModules": false
+  },
+  "include": ["main.ts", "preload.ts", "updater.ts", "publish.ts", "ipc/**/*.ts", "resolver/**/*.ts", "serial/**/*.ts"]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "AT93C86 (Microwire EEPROM 2KB)",
+  "author": "Universal Chip Lab",
+  "pins": [
+    "CS",
+    "SK",
+    "DI",
+    "DO",
+    "GND",
+    "ORG",
+    "NC",
+    "VCC"
+  ]
+}

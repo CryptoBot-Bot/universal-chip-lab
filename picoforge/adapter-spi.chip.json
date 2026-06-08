@@ -1,0 +1,14 @@
+{
+  "name": "SPI Adapter (MODE 0/1)",
+  "author": "Universal Chip Lab",
+  "pins": [
+    "CS",
+    "DO",
+    "WP",
+    "GND",
+    "DI",
+    "CLK",
+    "HOLD",
+    "VCC"
+  ]
+}

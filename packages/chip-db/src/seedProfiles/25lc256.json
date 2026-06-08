@@ -1,0 +1,41 @@
+{
+  "chipProfileId": "microchip_25lc256",
+  "displayName": "Microchip 25LC256",
+  "manufacturer": "Microchip",
+  "family": "25xxx_spi_eeprom",
+  "memoryType": "serial_eeprom",
+  "protocol": "spi",
+  "package": "SOIC-8",
+  "sizeBytes": 32768,
+  "voltage": {
+    "min": 2.5,
+    "typical": 3.3,
+    "max": 5.5
+  },
+  "pinout": [
+    { "pin": 1, "name": "CS",   "role": "chip_select" },
+    { "pin": 2, "name": "SO",   "role": "miso", "note": "Serial data out from chip" },
+    { "pin": 3, "name": "WP",   "role": "write_protect", "note": "Tie high to allow writes" },
+    { "pin": 4, "name": "GND",  "role": "ground" },
+    { "pin": 5, "name": "SI",   "role": "mosi", "note": "Serial data in to chip" },
+    { "pin": 6, "name": "SCK",  "role": "clock" },
+    { "pin": 7, "name": "HOLD", "role": "hold", "note": "Tie high in normal operation" },
+    { "pin": 8, "name": "VCC",  "role": "power" }
+  ],
+  "operations": {
+    "read": true,
+    "write": true,
+    "erase": false,
+    "verify": true
+  },
+  "readAlgorithm": {
+    "opcode": "0x03",
+    "addressBytes": 2,
+    "pageSize": 64
+  },
+  "warnings": [
+    "Always read twice and compare before writing.",
+    "In-circuit reading may fail if the host MCU holds the SPI bus.",
+    "Tie HOLD high and WP high before any read attempt."
+  ]
+}

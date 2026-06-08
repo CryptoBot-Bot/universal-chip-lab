@@ -1,0 +1,40 @@
+node_modules/
+dist/
+dist-electron/
+out/
+build/
+.cache/
+.turbo/
+.vite/
+
+# Runtime workspace — generated jobs, dumps, logs, reports
+.runtime/
+workspace/jobs/
+workspace/dumps/
+workspace/logs/
+workspace/reports/
+workspace/photos/
+
+# Env & local config
+.env
+.env.local
+*.local
+
+# Challenge secret — keep the claim code out of the repo
+eeprom_secret.txt
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Electron build artefacts
+release/
+electron-builder.cache/

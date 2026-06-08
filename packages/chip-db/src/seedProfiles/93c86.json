@@ -1,0 +1,41 @@
+{
+  "chipProfileId": "atmel_93c86",
+  "displayName": "Atmel 93C86",
+  "manufacturer": "Atmel",
+  "family": "93xxx_microwire_eeprom",
+  "memoryType": "serial_eeprom",
+  "protocol": "microwire",
+  "package": "SOIC-8",
+  "sizeBytes": 2048,
+  "voltage": {
+    "min": 2.7,
+    "typical": 5.0,
+    "max": 5.5
+  },
+  "pinout": [
+    { "pin": 1, "name": "CS",  "role": "chip_select", "note": "Active high" },
+    { "pin": 2, "name": "SK",  "role": "clock" },
+    { "pin": 3, "name": "DI",  "role": "di",  "note": "Data in to chip" },
+    { "pin": 4, "name": "DO",  "role": "do",  "note": "Data out from chip" },
+    { "pin": 5, "name": "GND", "role": "ground" },
+    { "pin": 6, "name": "ORG", "role": "org", "note": "Tie low for x8, high for x16 organisation" },
+    { "pin": 7, "name": "NC",  "role": "nc" },
+    { "pin": 8, "name": "VCC", "role": "power" }
+  ],
+  "operations": {
+    "read": true,
+    "write": true,
+    "erase": true,
+    "verify": true
+  },
+  "readAlgorithm": {
+    "opcode": "0x06",
+    "addressBytes": 2,
+    "pageSize": 2
+  },
+  "warnings": [
+    "Always read twice and compare before writing.",
+    "Confirm ORG pin matches the host's expected x8/x16 organisation.",
+    "Programming/erase requires VCC; do not power the chip below 4.5 V for writes."
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "name": "@ecu/desktop",
+  "version": "0.1.0",
+  "description": "Universal Chip Lab — lawful EEPROM/FLASH read, write, clone and analysis, driven by PicoForge.",
+  "author": "Universal Chip Lab",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev:vite": "vite",
+    "dev:electron": "node scripts/build-electron.mjs && wait-on tcp:5173 && electron .",
+    "dev": "concurrently -k -n vite,electron \"pnpm dev:vite\" \"pnpm dev:electron\"",
+    "build": "node scripts/build-electron.mjs && vite build",
+    "dist": "pnpm build && electron-builder --win",
+    "release": "pnpm build && electron-builder --win --publish always",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
+    "clean": "rimraf dist dist-electron release"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.102.0",
+    "@ecu/adapters": "workspace:*",
+    "@ecu/chip-db": "workspace:*",
+    "@ecu/core": "workspace:*",
+    "@ecu/dump-tools": "workspace:*",
+    "@ecu/vehicle-db": "workspace:*",
+    "@ecu/workspace": "workspace:*",
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "concurrently": "^9.0.1",
+    "electron": "^33.0.2",
+    "electron-builder": "^25.1.8",
+    "electron-updater": "^6.3.9",
+    "esbuild": "^0.24.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.9",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.universalchiplab.app",
+    "productName": "Universal Chip Lab",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "buildResources"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "CryptoBot-Bot",
+        "repo": "universal-chip-lab",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Universal-Chip-Lab-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Universal Chip Lab",
+      "uninstallDisplayName": "Universal Chip Lab",
+      "differentialPackage": true
+    }
+  }
+}

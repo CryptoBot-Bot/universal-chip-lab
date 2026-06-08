@@ -1,0 +1,14 @@
+{
+  "name": "W25Q32 (SPI NOR 4MB)",
+  "author": "Universal Chip Lab",
+  "pins": [
+    "CS",
+    "DO",
+    "WP",
+    "GND",
+    "DI",
+    "CLK",
+    "HOLD",
+    "VCC"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "ecu-clone-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Universal Chip Lab — guided desktop application for lawful EEPROM/Flash backup, verification and repair workflows.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24.0.0 <25.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "pnpm --filter @ecu/desktop dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

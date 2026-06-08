@@ -1,0 +1,41 @@
+{
+  "chipProfileId": "microchip_24lc256",
+  "displayName": "Microchip 24LC256",
+  "manufacturer": "Microchip",
+  "family": "24xxx_i2c_eeprom",
+  "memoryType": "serial_eeprom",
+  "protocol": "i2c",
+  "package": "SOIC-8",
+  "sizeBytes": 32768,
+  "voltage": {
+    "min": 2.5,
+    "typical": 3.3,
+    "max": 5.5
+  },
+  "pinout": [
+    { "pin": 1, "name": "A0", "role": "address", "note": "I2C slave address bit 0" },
+    { "pin": 2, "name": "A1", "role": "address", "note": "I2C slave address bit 1" },
+    { "pin": 3, "name": "A2", "role": "address", "note": "I2C slave address bit 2" },
+    { "pin": 4, "name": "GND", "role": "ground" },
+    { "pin": 5, "name": "SDA", "role": "sda", "note": "Open-drain, pull-up required" },
+    { "pin": 6, "name": "SCL", "role": "scl", "note": "I2C clock" },
+    { "pin": 7, "name": "WP", "role": "write_protect", "note": "Tie low to allow writes" },
+    { "pin": 8, "name": "VCC", "role": "power" }
+  ],
+  "operations": {
+    "read": true,
+    "write": true,
+    "erase": false,
+    "verify": true
+  },
+  "readAlgorithm": {
+    "opcode": "0xA0",
+    "addressBytes": 2,
+    "pageSize": 64
+  },
+  "warnings": [
+    "Always read twice and compare before writing.",
+    "I2C bus requires pull-up resistors on SDA and SCL.",
+    "In-circuit reads may fail if another master holds the bus."
+  ]
+}
