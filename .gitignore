@@ -29,6 +29,7 @@ eeprom_secret.txt
 .idea/
 .DS_Store
 Thumbs.db
+.history/
 
 # Logs
 *.log
