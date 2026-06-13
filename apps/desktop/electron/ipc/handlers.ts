@@ -17,7 +17,8 @@ import { createModuleRegistry } from "@ecu/vehicle-db";
 import { JobFileManager, WorkspaceManager } from "@ecu/workspace";
 
 import { deleteDump, exportDump, listDumps, readDumpSlice, type DumpFormat } from "../dumps";
-import { resolveChip, type ResolveChipInput } from "../resolver/chipResolver";
+import { resolveChip, testApiKey, type ResolveChipInput } from "../resolver/chipResolver";
+import { clearApiKey, getKeyStatus, setApiKey } from "../settings";
 import { findPicoPort } from "../serial/picoSerial";
 import { picoSessionCommand, stopPicoSession } from "../serial/picoSession";
 
@@ -92,6 +93,18 @@ export async function registerIpcHandlers(
   // ---- chips
   register("chips:list", () => chipRegistry.list());
   register("chips:resolve", (_e, input: ResolveChipInput) => resolveChip(input));
+
+  // ---- settings (Anthropic API key)
+  register("settings:getKeyStatus", () => getKeyStatus());
+  register("settings:setApiKey", (_e, p: { key: string }) => {
+    setApiKey(p.key);
+    return getKeyStatus();
+  });
+  register("settings:clearApiKey", () => {
+    clearApiKey();
+    return getKeyStatus();
+  });
+  register("settings:testApiKey", (_e, p: { key?: string }) => testApiKey(p?.key));
   register("chips:saveProfile", async (_e, profile: ChipProfile) => {
     chipRegistry.register(profile); // validates; throws on a bad profile
     await saveStoredProfile(layout.chipDbDir, profile, new Date().toISOString());

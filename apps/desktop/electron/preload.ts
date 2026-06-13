@@ -67,6 +67,12 @@ const api = {
   tools: {
     detect: () => invoke("tools:detect"),
   },
+  settings: {
+    getKeyStatus: () => invoke("settings:getKeyStatus"),
+    setApiKey: (key: string) => invoke("settings:setApiKey", { key }),
+    clearApiKey: () => invoke("settings:clearApiKey"),
+    testApiKey: (key?: string) => invoke("settings:testApiKey", { key }),
+  },
   pico: {
     findPort: () => invoke("pico:findPort"),
     command: (input: { port: string; command: string; reboot?: boolean; timeoutMs?: number }) =>

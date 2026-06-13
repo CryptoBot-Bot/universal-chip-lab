@@ -83,6 +83,14 @@ export interface DumpEntry {
   meta: Record<string, unknown>;
 }
 
+export interface KeyStatus {
+  hasKey: boolean;
+  source: "env" | "stored" | "none";
+  masked: string | null;
+  encryptionAvailable: boolean;
+  storedUnencrypted: boolean;
+}
+
 async function unwrap<T>(promise: Promise<IpcResponse<T>>): Promise<T> {
   const resp = await promise;
   if (!resp.ok) throw new Error(resp.error);
@@ -170,6 +178,13 @@ export const Api = {
   },
   tools: {
     detect: () => unwrap<ToolStatus[]>(api.tools.detect() as never),
+  },
+  settings: {
+    getKeyStatus: () => unwrap<KeyStatus>(api.settings.getKeyStatus() as never),
+    setApiKey: (key: string) => unwrap<KeyStatus>(api.settings.setApiKey(key) as never),
+    clearApiKey: () => unwrap<KeyStatus>(api.settings.clearApiKey() as never),
+    testApiKey: (key?: string) =>
+      unwrap<{ ok: boolean; error?: string }>(api.settings.testApiKey(key) as never),
   },
   pico: {
     findPort: () => unwrap<string | null>(api.pico.findPort() as never),

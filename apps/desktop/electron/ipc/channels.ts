@@ -47,6 +47,10 @@ export type IpcChannel =
   | "moduleJobs:ceremony"
   | "moduleJobs:cloneWrite"
   | "moduleJobs:ceremonyReport"
-  | "tools:detect";
+  | "tools:detect"
+  | "settings:getKeyStatus"
+  | "settings:setApiKey"
+  | "settings:clearApiKey"
+  | "settings:testApiKey";
 
 export type IpcResponse<T> = { ok: true; data: T } | { ok: false; error: string };

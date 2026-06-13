@@ -7,6 +7,7 @@ import { PicoProvider } from "./lib/pico-connection";
 import { ChipDatabase } from "./routes/ChipDatabase";
 import { DumpsTab } from "./routes/DumpsTab";
 import { ReadTab } from "./routes/ReadTab";
+import { SettingsTab } from "./routes/SettingsTab";
 import { WriteTab } from "./routes/WriteTab";
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="/write" element={<WriteTab />} />
           <Route path="/chips" element={<ChipDatabase />} />
           <Route path="/dumps" element={<DumpsTab />} />
+          <Route path="/settings" element={<SettingsTab />} />
           <Route path="*" element={<Navigate to="/read" />} />
         </Routes>
       </Layout>

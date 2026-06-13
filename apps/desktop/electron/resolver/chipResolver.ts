@@ -6,6 +6,8 @@ import {
   RESOLVER_PROTOCOLS,
 } from "@ecu/chip-db";
 
+import { getApiKey } from "../settings";
+
 /**
  * AI chip-resolver — identification pass (Phase 4).
  *
@@ -113,11 +115,27 @@ function coerceIdentification(raw: unknown): ChipIdentification {
   };
 }
 
+/**
+ * Validates an Anthropic key with a cheap, no-generation models.list() call.
+ * If `key` is omitted, tests the currently effective key (env or stored).
+ */
+export async function testApiKey(key?: string): Promise<{ ok: boolean; error?: string }> {
+  const apiKey = (key && key.trim()) || getApiKey();
+  if (!apiKey) return { ok: false, error: "No API key to test." };
+  try {
+    const client = new Anthropic({ apiKey });
+    await client.models.list();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function resolveChip(input: ResolveChipInput): Promise<ChipIdentification> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = getApiKey();
   if (!apiKey || apiKey.trim().length === 0) {
     throw new Error(
-      "ANTHROPIC_API_KEY is not set. Add it to your .env file to use the AI chip resolver.",
+      "No Anthropic API key set. Open Settings and paste your key to use the AI chip resolver.",
     );
   }
   if (!input.images || input.images.length === 0) {
