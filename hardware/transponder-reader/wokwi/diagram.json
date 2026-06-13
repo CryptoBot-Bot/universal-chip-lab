@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "author": "Universal Chip Lab",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-pi-pico", "id": "pico", "top": 0, "left": 0, "attrs": {} },
+    { "type": "chip-shifter4", "id": "shift", "top": -40, "left": 320, "attrs": {} },
+    { "type": "chip-em4095", "id": "em", "top": 180, "left": 320, "attrs": {} },
+    { "type": "chip-antenna", "id": "ant", "top": 200, "left": 560, "attrs": {} },
+    { "type": "wokwi-led", "id": "led", "top": -120, "left": 180, "attrs": { "color": "green" } },
+    { "type": "wokwi-resistor", "id": "rled", "top": -120, "left": 60, "attrs": { "value": "330" } }
+  ],
+  "connections": [
+    [ "pico:VBUS", "em:VDD", "red", [] ],
+    [ "em:VSS", "pico:GND.1", "black", [] ],
+    [ "pico:3V3", "shift:LV", "red", [] ],
+    [ "pico:VBUS", "shift:HV", "orange", [] ],
+    [ "shift:GND", "pico:GND.2", "black", [] ],
+
+    [ "em:ANT1", "ant:ANT1", "gold", [] ],
+    [ "em:ANT2", "ant:ANT2", "gold", [] ],
+
+    [ "em:DEMOD", "shift:HV1", "green", [] ],
+    [ "shift:LV1", "pico:GP10", "green", [] ],
+    [ "em:RDYCLK", "shift:HV2", "blue", [] ],
+    [ "shift:LV2", "pico:GP11", "blue", [] ],
+    [ "pico:GP12", "shift:LV3", "violet", [] ],
+    [ "shift:HV3", "em:SHD", "violet", [] ],
+    [ "pico:GP13", "shift:LV4", "purple", [] ],
+    [ "shift:HV4", "em:MOD", "purple", [] ],
+
+    [ "pico:GP15", "rled:1", "green", [] ],
+    [ "rled:2", "led:A", "green", [] ],
+    [ "led:C", "pico:GND.3", "black", [] ]
+  ]
+}

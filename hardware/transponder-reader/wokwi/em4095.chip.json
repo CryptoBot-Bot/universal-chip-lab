@@ -1,0 +1,5 @@
+{
+  "name": "em4095",
+  "author": "Universal Chip Lab",
+  "pins": ["VDD", "VSS", "ANT1", "ANT2", "CFCAP", "CDEC", "DEMOD", "RDYCLK", "SHD", "MOD"]
+}

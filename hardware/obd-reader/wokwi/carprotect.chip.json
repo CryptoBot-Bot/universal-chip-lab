@@ -1,0 +1,5 @@
+{
+  "name": "carprotect",
+  "author": "Universal Chip Lab",
+  "pins": ["IN", "OUT", "GND"]
+}

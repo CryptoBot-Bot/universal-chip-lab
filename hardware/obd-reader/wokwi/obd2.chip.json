@@ -1,0 +1,5 @@
+{
+  "name": "obd2",
+  "author": "Universal Chip Lab",
+  "pins": ["P16_12V", "P6_CANH", "P14_CANL", "P5_GND", "P3_MSCANH", "P11_MSCANL", "P7_KLINE"]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "debugport",
+  "author": "Universal Chip Lab",
+  "pins": ["VTREF", "TCK", "TMS", "TDI", "TDO", "RESET", "TRST_BKGD", "UART_TX", "UART_RX", "GND"]
+}

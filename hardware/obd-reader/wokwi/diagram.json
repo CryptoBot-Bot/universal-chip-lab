@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "author": "Universal Chip Lab",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-pi-pico", "id": "pico", "top": 0, "left": 0, "attrs": {} },
+    { "type": "chip-obd2", "id": "obd", "top": -240, "left": -380, "attrs": { "battery_voltage": "12.6" } },
+    { "type": "chip-carprotect", "id": "prot", "top": -60, "left": -380, "attrs": { "vout": "12.2" } },
+    { "type": "chip-lm2596", "id": "buck", "top": 110, "left": -380, "attrs": { "vout": "5.1" } },
+    { "type": "wokwi-resistor", "id": "r1", "top": 220, "left": -180, "attrs": { "value": "47000" } },
+    { "type": "wokwi-resistor", "id": "r2", "top": 300, "left": -180, "attrs": { "value": "10000" } },
+    { "type": "chip-sn65hvd230", "id": "can", "top": -40, "left": 360, "attrs": {} },
+    { "type": "chip-sn65hvd230", "id": "mscan", "top": 140, "left": 360, "attrs": {} },
+    { "type": "chip-kline", "id": "kline", "top": -220, "left": 360, "attrs": {} }
+  ],
+  "connections": [
+    [ "obd:P16_12V", "prot:IN", "red", [] ],
+    [ "prot:OUT", "buck:IN+", "red", [] ],
+    [ "obd:P5_GND", "prot:GND", "black", [] ],
+    [ "prot:GND", "buck:IN-", "black", [] ],
+    [ "buck:IN-", "pico:GND.1", "black", [] ],
+    [ "buck:OUT+", "pico:VSYS", "red", [] ],
+    [ "buck:OUT-", "pico:GND.2", "black", [] ],
+
+    [ "obd:P16_12V", "r1:1", "green", [] ],
+    [ "r1:2", "pico:GP28", "green", [] ],
+    [ "r1:2", "r2:1", "green", [] ],
+    [ "r2:2", "pico:GND.3", "black", [] ],
+
+    [ "pico:3V3", "can:VCC", "red", [] ],
+    [ "pico:GP5", "can:D", "orange", [] ],
+    [ "can:R", "pico:GP4", "blue", [] ],
+    [ "can:RS", "pico:GND.4", "black", [] ],
+    [ "can:GND", "pico:GND.5", "black", [] ],
+    [ "can:CANH", "obd:P6_CANH", "gold", [] ],
+    [ "can:CANL", "obd:P14_CANL", "gray", [] ],
+
+    [ "pico:3V3", "mscan:VCC", "red", [] ],
+    [ "pico:GP7", "mscan:D", "orange", [] ],
+    [ "mscan:R", "pico:GP6", "blue", [] ],
+    [ "mscan:RS", "pico:GND.6", "black", [] ],
+    [ "mscan:GND", "pico:GND.7", "black", [] ],
+    [ "mscan:CANH", "obd:P3_MSCANH", "gold", [] ],
+    [ "mscan:CANL", "obd:P11_MSCANL", "gray", [] ],
+
+    [ "pico:3V3", "kline:VCC", "red", [] ],
+    [ "prot:OUT", "kline:V12", "red", [] ],
+    [ "pico:GP8", "kline:TX", "violet", [] ],
+    [ "kline:RX", "pico:GP9", "green", [] ],
+    [ "kline:GND", "pico:GND.8", "black", [] ],
+    [ "kline:K", "obd:P7_KLINE", "yellow", [] ]
+  ]
+}

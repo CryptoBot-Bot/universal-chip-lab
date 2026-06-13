@@ -11,6 +11,8 @@ export type MemoryClass = "eeprom" | "flash";
 const FLASH_MEMORY_TYPES: ReadonlySet<MemoryType> = new Set<MemoryType>([
   "serial_flash",
   "parallel_flash",
+  "eprom",
+  "nand_flash",
   "mcu_flash",
 ]);
 

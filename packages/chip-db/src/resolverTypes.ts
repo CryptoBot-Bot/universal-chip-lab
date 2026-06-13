@@ -35,6 +35,10 @@ export const RESOLVER_FAMILIES: readonly (ChipFamily | "unknown")[] = [
   "25xxx_spi_eeprom",
   "93xxx_microwire_eeprom",
   "spi_nor_flash",
+  "parallel_nor_flash",
+  "parallel_eeprom",
+  "parallel_eprom",
+  "nand_flash",
   "mcu_internal_flash",
   "mcu_internal_eeprom",
   "unknown",
@@ -45,6 +49,7 @@ export const RESOLVER_PROTOCOLS: readonly (Protocol | "unknown")[] = [
   "i2c",
   "spi",
   "microwire",
+  "parallel",
   "uart",
   "can",
   "jtag",
@@ -61,6 +66,14 @@ export function memoryTypeForFamily(family: ChipFamily): MemoryType {
       return "serial_eeprom";
     case "spi_nor_flash":
       return "serial_flash";
+    case "parallel_nor_flash":
+      return "parallel_flash";
+    case "parallel_eeprom":
+      return "parallel_eeprom";
+    case "parallel_eprom":
+      return "eprom";
+    case "nand_flash":
+      return "nand_flash";
     case "mcu_internal_flash":
       return "mcu_flash";
     case "mcu_internal_eeprom":

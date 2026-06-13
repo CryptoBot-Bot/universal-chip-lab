@@ -1,0 +1,28 @@
+import Power from "generics/interfaces.ato"
+import CAN from "generics/interfaces.ato"
+from "generics/resistors.ato" import Resistor
+from "generics/leds.ato" import LEDIndicatorGreen
+
+module CanSniffer:
+    """
+    Phase 1a — the simplest real CAN board, as code.
+    A 120 ohm bus-termination resistor across CAN-H / CAN-L, plus a
+    power-on indicator LED. Builds to real JLCPCB parts. We'll grow this
+    into the full Pico + SN65HVD230 CAN node next.
+    """
+    # --- nets ---
+    power = new Power          # vcc + gnd rail
+    can = new CAN              # CANH + CANL bus
+
+    # --- 120 ohm CAN bus termination (across CAN-H and CAN-L) ---
+    term = new Resistor
+    term.value = 120ohm +/- 5%
+    term.package = "0805"
+    can.CANH ~ term.p1
+    term.p2 ~ can.CANL
+
+    # --- power-on indicator LED (green) ---
+    led = new LEDIndicatorGreen
+    led.input ~ power.vcc
+    led.gnd ~ power.gnd
+    led.resistor.value = 330ohm +/- 20%

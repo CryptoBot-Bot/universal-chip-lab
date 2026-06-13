@@ -1,0 +1,5 @@
+{
+  "name": "antenna",
+  "author": "Universal Chip Lab",
+  "pins": ["ANT1", "ANT2"]
+}

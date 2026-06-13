@@ -1,0 +1,31 @@
+# Wokwi project manifest — OBD-II CAN Reader
+# Used by the Wokwi VS Code / CLI extension. (The wokwi.com web editor does not
+# read this file — see README.md for the web-upload steps.)
+
+[wokwi]
+version = 1
+firmware = 'main.py'
+elf = 'main.py'
+
+# Custom chips. For VS Code these .chip.c sources are compiled to .wasm by the
+# Wokwi chips build (https://github.com/wokwi/wokwi-chips-api); the web editor
+# compiles them automatically when you add the .chip.c / .chip.json files.
+[[chip]]
+name = 'obd2'
+binary = 'obd2.chip.wasm'
+
+[[chip]]
+name = 'carprotect'
+binary = 'carprotect.chip.wasm'
+
+[[chip]]
+name = 'lm2596'
+binary = 'lm2596.chip.wasm'
+
+[[chip]]
+name = 'sn65hvd230'
+binary = 'sn65hvd230.chip.wasm'
+
+[[chip]]
+name = 'kline'
+binary = 'kline.chip.wasm'

@@ -1,0 +1,5 @@
+{
+  "name": "sn65hvd230",
+  "author": "Universal Chip Lab",
+  "pins": ["VCC", "GND", "D", "R", "RS", "CANL", "CANH"]
+}

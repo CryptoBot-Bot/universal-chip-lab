@@ -1,0 +1,17 @@
+# Wokwi manifest — 125 kHz Transponder Reader (Layer 2)
+[wokwi]
+version = 1
+firmware = 'main.py'
+elf = 'main.py'
+
+[[chip]]
+name = 'em4095'
+binary = 'em4095.chip.wasm'
+
+[[chip]]
+name = 'antenna'
+binary = 'antenna.chip.wasm'
+
+[[chip]]
+name = 'shifter4'
+binary = 'shifter4.chip.wasm'

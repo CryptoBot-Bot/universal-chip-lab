@@ -1,0 +1,13 @@
+# Wokwi manifest — MCU Debugger / internal-memory reader (Layer 3)
+[wokwi]
+version = 1
+firmware = 'main.py'
+elf = 'main.py'
+
+[[chip]]
+name = 'shifter4'
+binary = 'shifter4.chip.wasm'
+
+[[chip]]
+name = 'debugport'
+binary = 'debugport.chip.wasm'

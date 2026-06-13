@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChipConfidence, ChipProfile } from "@ecu/chip-db";
-import { effectiveProvenance, picoModeForChip } from "@ecu/chip-db";
+import type { ChipConfidence, ChipProfile, ChipTool } from "@ecu/chip-db";
+import {
+  TOOLS,
+  effectiveProvenance,
+  primaryToolForChip,
+  toolsForChip,
+} from "@ecu/chip-db";
 
 import { Topbar } from "../components/Topbar";
 import { Api } from "../lib/api";
@@ -20,9 +25,18 @@ const CONFIDENCE_LABEL: Record<ChipConfidence, string> = {
   clone_proven: "clone-proven",
 };
 
+type ToolFilter = "all" | ChipTool;
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+}
+
 export function ChipDatabase() {
   const [chips, setChips] = useState<ChipProfile[]>([]);
   const [query, setQuery] = useState("");
+  const [toolFilter, setToolFilter] = useState<ToolFilter>("all");
   const [message, setMessage] = useState<string | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
 
@@ -33,16 +47,33 @@ export function ChipDatabase() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return chips;
-    return chips.filter((c) =>
-      [c.chipProfileId, c.displayName, c.manufacturer ?? "", c.family, c.protocol]
+    return chips.filter((c) => {
+      if (toolFilter !== "all" && primaryToolForChip(c) !== toolFilter) return false;
+      if (!q) return true;
+      return [c.chipProfileId, c.displayName, c.manufacturer ?? "", c.family, c.protocol, c.package]
         .join(" ")
         .toLowerCase()
-        .includes(q),
-    );
-  }, [chips, query]);
+        .includes(q);
+    });
+  }, [chips, query, toolFilter]);
+
+  // Group the filtered chips under their primary tool, in TOOLS order.
+  const groups = useMemo(() => {
+    return TOOLS.map((tool) => ({
+      tool,
+      chips: filtered.filter((c) => primaryToolForChip(c) === tool.id),
+    })).filter((g) => g.chips.length > 0);
+  }, [filtered]);
 
   const customCount = chips.filter((c) => effectiveProvenance(c).source !== "seed").length;
+  const toolCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const c of chips) {
+      const t = primaryToolForChip(c);
+      m[t] = (m[t] ?? 0) + 1;
+    }
+    return m;
+  }, [chips]);
 
   async function exportLibrary() {
     try {
@@ -118,67 +149,111 @@ export function ChipDatabase() {
           <label htmlFor="chip-search">Search</label>
           <input
             id="chip-search"
-            placeholder="e.g. 25LC, microwire, SOIC-8"
+            placeholder="e.g. 25LC, microwire, PLCC, 29F, TriCore"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
+
+          {/* Tool filter — the database is organised by the tool that reads/writes each chip. */}
+          <div className="row gap-8 mt-8" style={{ flexWrap: "wrap" }}>
+            <button
+              className={`tiny ${toolFilter === "all" ? "" : "ghost"}`}
+              onClick={() => setToolFilter("all")}
+            >
+              All tools ({chips.length})
+            </button>
+            {TOOLS.map((t) => (
+              <button
+                key={t.id}
+                className={`tiny ${toolFilter === t.id ? "" : "ghost"}`}
+                onClick={() => setToolFilter(t.id)}
+                title={t.blurb}
+              >
+                {t.label} ({toolCounts[t.id] ?? 0})
+              </button>
+            ))}
+          </div>
+
           <p className="tiny dim mt-8">
-            Built-in profiles are bench-verified. Profiles you resolve from a photo are
-            saved as <strong>AI-suggested</strong> until you verify them on real silicon —
-            only bench-verified profiles can drive a write. Export shares your custom
-            profiles as a JSON file; import merges a library back in.
+            Chips are grouped by the <strong>tool</strong> that reads/writes them.{" "}
+            <strong>PicoForge</strong> reaches serial memories (SPI/I²C/Microwire);{" "}
+            <strong>the T48</strong> adds parallel NOR/EEPROM, EPROM, NAND and socketed MCUs;{" "}
+            <strong>the MCU debugger</strong> is the only way into a microcontroller's internal
+            memory. Built-in profiles are bench-verified; photo-resolved ones stay AI-suggested
+            until you verify them on real silicon.
           </p>
           {message && <p className="tiny mt-8" style={{ color: "var(--accent)" }}>{message}</p>}
         </div>
 
-        <table className="table mt-8">
-          <thead>
-            <tr>
-              <th>Chip</th>
-              <th>Trust</th>
-              <th>PicoForge</th>
-              <th>Family</th>
-              <th>Size</th>
-              <th>Voltage</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((c) => {
-              const prov = effectiveProvenance(c);
-              const isCustom = prov.source !== "seed";
-              const mode = picoModeForChip(c);
-              return (
-                <tr key={c.chipProfileId}>
-                  <td>
-                    <div style={{ fontWeight: 600 }}>{c.displayName}</div>
-                    <div className="tiny dim mono">{c.chipProfileId}</div>
-                  </td>
-                  <td>
-                    <span className={`badge tiny ${CONFIDENCE_TONE[prov.confidence]}`}>
-                      {CONFIDENCE_LABEL[prov.confidence]}
-                    </span>
-                  </td>
-                  <td>
-                    {mode ? (
-                      <span className="badge tiny info">MODE {mode.mode} · {mode.label}</span>
-                    ) : (
-                      <span className="tiny dim">— internal MCU</span>
-                    )}
-                  </td>
-                  <td className="tiny mono">{c.family}</td>
-                  <td className="mono">{(c.sizeBytes / 1024).toFixed(0)} KB</td>
-                  <td className="mono tiny">{c.voltage.min}–{c.voltage.max} V</td>
-                  <td>
-                    {isCustom && (
-                      <button className="tiny" onClick={() => remove(c)}>Delete</button>
-                    )}
-                  </td>
+        {groups.map(({ tool, chips: groupChips }) => (
+          <div key={tool.id} className="mt-16">
+            <div className="row gap-8" style={{ alignItems: "baseline" }}>
+              <h3 style={{ margin: 0 }}>{tool.label}</h3>
+              <span className="tiny dim">{groupChips.length} chips · {tool.blurb}</span>
+            </div>
+            <table className="table mt-8">
+              <thead>
+                <tr>
+                  <th>Chip</th>
+                  <th>Trust</th>
+                  <th>Access</th>
+                  <th>Family</th>
+                  <th>Package</th>
+                  <th>Size</th>
+                  <th>Voltage</th>
+                  <th />
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {groupChips.map((c) => {
+                  const prov = effectiveProvenance(c);
+                  const isCustom = prov.source !== "seed";
+                  const caps = toolsForChip(c);
+                  const primary = caps[0];
+                  const secondary = caps[1];
+                  return (
+                    <tr key={c.chipProfileId}>
+                      <td>
+                        <div style={{ fontWeight: 600 }}>{c.displayName}</div>
+                        <div className="tiny dim mono">{c.chipProfileId}</div>
+                      </td>
+                      <td>
+                        <span className={`badge tiny ${CONFIDENCE_TONE[prov.confidence]}`}>
+                          {CONFIDENCE_LABEL[prov.confidence]}
+                        </span>
+                      </td>
+                      <td>
+                        {primary && (
+                          <span className="badge tiny info" title={primary.note ?? ""}>
+                            {primary.label} · {primary.canWrite ? "R/W" : "R-only"}
+                          </span>
+                        )}
+                        {secondary && (
+                          <span className="badge tiny dim" style={{ marginLeft: 4 }}>
+                            +{TOOLS.find((t) => t.id === secondary.tool)?.label ?? secondary.tool}
+                          </span>
+                        )}
+                      </td>
+                      <td className="tiny mono">{c.family}</td>
+                      <td className="tiny mono">{c.package}</td>
+                      <td className="mono">{humanSize(c.sizeBytes)}</td>
+                      <td className="mono tiny">{c.voltage.min}–{c.voltage.max} V</td>
+                      <td>
+                        {isCustom && (
+                          <button className="tiny" onClick={() => remove(c)}>Delete</button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+
+        {groups.length === 0 && (
+          <p className="tiny dim mt-16">No chips match this filter.</p>
+        )}
       </div>
     </>
   );

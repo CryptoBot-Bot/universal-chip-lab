@@ -1,0 +1,5 @@
+{
+  "name": "kline",
+  "author": "Universal Chip Lab",
+  "pins": ["K", "V12", "VCC", "GND", "TX", "RX"]
+}

@@ -34,6 +34,11 @@ export const PIN_ROLES: readonly PinRole[] = [
   "address",
   "data",
   "control",
+  "chip_enable",
+  "output_enable",
+  "write_enable",
+  "ready_busy",
+  "vpp",
 ];
 
 export type PinoutTemplateId = "i2c_eeprom" | "spi_eeprom" | "microwire" | "spi_nor";
@@ -74,8 +79,15 @@ function templateForFamily(family: ChipFamily): PinoutTemplateId {
     case "93xxx_microwire_eeprom":
       return "microwire";
     case "spi_nor_flash":
+    case "parallel_nor_flash":
+    case "parallel_eeprom":
+    case "parallel_eprom":
+    case "nand_flash":
     case "mcu_internal_flash":
     case "mcu_internal_eeprom":
+      // The photo-resolver drafts serial profiles; non-serial families fall back
+      // to a neutral template the operator edits. (Parallel/MCU chips are added
+      // from the catalog, not the resolver.)
       return "spi_nor";
   }
 }

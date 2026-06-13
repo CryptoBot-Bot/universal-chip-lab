@@ -33,12 +33,86 @@ export const Pico = {
     Api.pico.command({ port, command, reboot, timeoutMs }),
 };
 
+/** EEPROM modes (1/2/3) are byte-writable; flash (0) needs erase-before-write. */
+export function isEeprom(mode: PicoMode): boolean {
+  return mode !== 0;
+}
+
+function throwIfErr(reply: string): void {
+  if (reply.startsWith("ERR")) throw new Error(reply.replace(/^ERR\s*/, "PicoForge: "));
+}
+
 /** Erases a flash chip (MODE 0) to 0xFF. Slow — give it a long timeout. */
 export async function eraseFlash(port: string): Promise<void> {
-  const m = await Pico.command(port, "MODE 0");
-  if (m.startsWith("ERR")) throw new Error(m.replace(/^ERR\s*/, "PicoForge: "));
-  const reply = await Pico.command(port, "ERASE", false, 135000);
-  if (reply.startsWith("ERR")) throw new Error(reply.replace(/^ERR\s*/, "PicoForge: "));
+  throwIfErr(await Pico.command(port, "MODE 0"));
+  throwIfErr(await Pico.command(port, "ERASE", false, 135000));
+}
+
+/**
+ * Clears block-protect on an SPI EEPROM (MODE 1) so its full array is writable.
+ * No-op for other modes: I2C write-protect is the WP pin (hardware), Microwire
+ * EWEN is issued by its driver, and flash has no such latch. Safe to call before
+ * any EEPROM write — harmless on chips that aren't protected.
+ */
+export async function unlockChip(port: string, mode: PicoMode): Promise<void> {
+  throwIfErr(await Pico.command(port, `MODE ${mode}`));
+  if (mode === 1) throwIfErr(await Pico.command(port, "UNLOCK"));
+}
+
+/**
+ * Erases a chip to 0xFF. Flash uses chip-erase; SPI EEPROM uses the firmware
+ * FILL (one fast command); I2C/Microwire are filled by writing 0xFF (FILL is
+ * SPI-only in firmware). Give EEPROM fills a generous timeout for big parts.
+ */
+export async function eraseChip(
+  port: string,
+  mode: PicoMode,
+  sizeBytes: number,
+  onProgress?: (done: number, total: number) => void,
+  timeoutMs = 135000,
+): Promise<void> {
+  if (mode === 0) return eraseFlash(port);
+  await unlockChip(port, mode);
+  if (mode === 1) {
+    throwIfErr(await Pico.command(port, `FILL 0 ${sizeBytes} ff`, false, timeoutMs));
+    onProgress?.(sizeBytes, sizeBytes);
+    return;
+  }
+  // I2C / Microwire: write a 0xFF buffer through the normal page-aware write path.
+  const ff = new Uint8Array(sizeBytes).fill(0xff);
+  await writeAt(port, mode, 0, ff, onProgress);
+}
+
+/**
+ * Writes `bytes` at an absolute chip address (for surgical/range edits).
+ * Sets the mode, then issues page-aware WRITE commands. Caller should
+ * unlockChip() first for SPI EEPROM targets.
+ */
+export async function writeAt(
+  port: string,
+  mode: PicoMode,
+  addr: number,
+  bytes: Uint8Array,
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  throwIfErr(await Pico.command(port, `MODE ${mode}`));
+  for (let off = 0; off < bytes.length; off += WRITE_CHUNK) {
+    const slice = bytes.subarray(off, off + WRITE_CHUNK);
+    throwIfErr(await Pico.command(port, `WRITE ${addr + off} ${bytesToHex(slice)}`));
+    onProgress?.(Math.min(off + slice.length, bytes.length), bytes.length);
+  }
+}
+
+/** Groups a set of byte offsets into contiguous [start, endExclusive) runs. */
+export function dirtyRuns(offsets: Iterable<number>): Array<[number, number]> {
+  const sorted = Array.from(offsets).sort((a, b) => a - b);
+  const runs: Array<[number, number]> = [];
+  for (const off of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && off === last[1]) last[1] = off + 1;
+    else runs.push([off, off + 1]);
+  }
+  return runs;
 }
 
 /** Sets the mode, then reads the whole chip in chunks. Returns the bytes. */

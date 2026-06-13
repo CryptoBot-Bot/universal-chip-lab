@@ -6,5 +6,6 @@ export * from "./resolverTypes.js";
 export * from "./draftProfile.js";
 export * from "./profileVerify.js";
 export * from "./picoMode.js";
+export * from "./tooling.js";
 export * from "./factories.js";
 export { CATALOG_PROFILES } from "./catalog.js";

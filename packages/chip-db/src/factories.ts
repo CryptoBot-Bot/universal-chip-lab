@@ -269,6 +269,296 @@ export function buildPin({
   return note !== undefined ? { pin, name, role, note } : { pin, name, role };
 }
 
+// --------------------------------------------------------------------------------------
+// Generic SPI 25xx EEPROM (Microchip 25LC/25AA, Atmel/Renesas AT25). Same SOIC-8
+// SPI pinout & 0x03 read opcode as the ST M95 family, different vendor naming.
+// --------------------------------------------------------------------------------------
+
+export interface Spi25Spec {
+  manufacturer: string;
+  variant: string;        // "25LC256", "AT25320", …
+  sizeBytes: number;
+  pageSize: number;
+  addressBytes: 1 | 2 | 3;
+  voltage?: ChipVoltage;
+}
+
+export function spi25EepromProfile(spec: Spi25Spec): ChipProfile {
+  return {
+    chipProfileId: `${slug(spec.manufacturer)}_${slug(spec.variant)}`,
+    displayName: `${spec.manufacturer.split(" ")[0]} ${spec.variant}`,
+    manufacturer: spec.manufacturer,
+    family: "25xxx_spi_eeprom",
+    memoryType: "serial_eeprom",
+    protocol: "spi",
+    package: "SOIC-8",
+    sizeBytes: spec.sizeBytes,
+    voltage: spec.voltage ?? { min: 2.5, typical: 3.3, max: 5.5 },
+    pinout: SOIC8_SPI_PINOUT,
+    operations: { read: true, write: true, erase: false, verify: true },
+    readAlgorithm: { opcode: "0x03", addressBytes: spec.addressBytes, pageSize: spec.pageSize },
+    warnings: [
+      "Always read twice and compare before writing.",
+      "WP and HOLD must be tied HIGH (VCC) before powering for any read.",
+    ],
+  };
+}
+
+// --------------------------------------------------------------------------------------
+// PARALLEL memory pinouts (JEDEC standard). These need the address+data bus of a
+// universal programmer (T48) — a 4-wire PicoForge clip cannot reach them.
+// --------------------------------------------------------------------------------------
+
+/** JEDEC 28-pin EPROM (27C256-style). Pin 1 = VPP, pin 27 = A14. */
+export const EPROM_DIP28_PINOUT: ChipPin[] = [
+  { pin: 1, name: "VPP", role: "vpp", note: "Programming voltage (read: tie to VCC)" },
+  { pin: 2, name: "A12", role: "address" }, { pin: 3, name: "A7", role: "address" },
+  { pin: 4, name: "A6", role: "address" }, { pin: 5, name: "A5", role: "address" },
+  { pin: 6, name: "A4", role: "address" }, { pin: 7, name: "A3", role: "address" },
+  { pin: 8, name: "A2", role: "address" }, { pin: 9, name: "A1", role: "address" },
+  { pin: 10, name: "A0", role: "address" }, { pin: 11, name: "D0", role: "data" },
+  { pin: 12, name: "D1", role: "data" }, { pin: 13, name: "D2", role: "data" },
+  { pin: 14, name: "GND", role: "ground" }, { pin: 15, name: "D3", role: "data" },
+  { pin: 16, name: "D4", role: "data" }, { pin: 17, name: "D5", role: "data" },
+  { pin: 18, name: "D6", role: "data" }, { pin: 19, name: "D7", role: "data" },
+  { pin: 20, name: "CE#", role: "chip_enable" }, { pin: 21, name: "A10", role: "address" },
+  { pin: 22, name: "OE#", role: "output_enable" }, { pin: 23, name: "A11", role: "address" },
+  { pin: 24, name: "A9", role: "address" }, { pin: 25, name: "A8", role: "address" },
+  { pin: 26, name: "A13", role: "address" }, { pin: 27, name: "A14", role: "address" },
+  { pin: 28, name: "VCC", role: "power" },
+];
+
+/** JEDEC 28-pin parallel EEPROM (28C256-style). Pin 1 = A14, pin 27 = WE#. */
+export const PEEPROM_DIP28_PINOUT: ChipPin[] = [
+  { pin: 1, name: "A14", role: "address" },
+  { pin: 2, name: "A12", role: "address" }, { pin: 3, name: "A7", role: "address" },
+  { pin: 4, name: "A6", role: "address" }, { pin: 5, name: "A5", role: "address" },
+  { pin: 6, name: "A4", role: "address" }, { pin: 7, name: "A3", role: "address" },
+  { pin: 8, name: "A2", role: "address" }, { pin: 9, name: "A1", role: "address" },
+  { pin: 10, name: "A0", role: "address" }, { pin: 11, name: "D0", role: "data" },
+  { pin: 12, name: "D1", role: "data" }, { pin: 13, name: "D2", role: "data" },
+  { pin: 14, name: "GND", role: "ground" }, { pin: 15, name: "D3", role: "data" },
+  { pin: 16, name: "D4", role: "data" }, { pin: 17, name: "D5", role: "data" },
+  { pin: 18, name: "D6", role: "data" }, { pin: 19, name: "D7", role: "data" },
+  { pin: 20, name: "CE#", role: "chip_enable" }, { pin: 21, name: "A10", role: "address" },
+  { pin: 22, name: "OE#", role: "output_enable" }, { pin: 23, name: "A11", role: "address" },
+  { pin: 24, name: "A9", role: "address" }, { pin: 25, name: "A8", role: "address" },
+  { pin: 26, name: "A13", role: "address" }, { pin: 27, name: "WE#", role: "write_enable" },
+  { pin: 28, name: "VCC", role: "power" },
+];
+
+/** JEDEC 32-pin parallel NOR flash (29F010/39SF0x0-style). */
+export const PNOR_DIP32_PINOUT: ChipPin[] = [
+  { pin: 1, name: "A18", role: "address" }, { pin: 2, name: "A16", role: "address" },
+  { pin: 3, name: "A15", role: "address" }, { pin: 4, name: "A12", role: "address" },
+  { pin: 5, name: "A7", role: "address" }, { pin: 6, name: "A6", role: "address" },
+  { pin: 7, name: "A5", role: "address" }, { pin: 8, name: "A4", role: "address" },
+  { pin: 9, name: "A3", role: "address" }, { pin: 10, name: "A2", role: "address" },
+  { pin: 11, name: "A1", role: "address" }, { pin: 12, name: "A0", role: "address" },
+  { pin: 13, name: "D0", role: "data" }, { pin: 14, name: "D1", role: "data" },
+  { pin: 15, name: "D2", role: "data" }, { pin: 16, name: "GND", role: "ground" },
+  { pin: 17, name: "D3", role: "data" }, { pin: 18, name: "D4", role: "data" },
+  { pin: 19, name: "D5", role: "data" }, { pin: 20, name: "D6", role: "data" },
+  { pin: 21, name: "D7", role: "data" }, { pin: 22, name: "CE#", role: "chip_enable" },
+  { pin: 23, name: "A10", role: "address" }, { pin: 24, name: "OE#", role: "output_enable" },
+  { pin: 25, name: "A11", role: "address" }, { pin: 26, name: "A9", role: "address" },
+  { pin: 27, name: "A8", role: "address" }, { pin: 28, name: "A13", role: "address" },
+  { pin: 29, name: "A14", role: "address" }, { pin: 30, name: "A17", role: "address" },
+  { pin: 31, name: "WE#", role: "write_enable" }, { pin: 32, name: "VCC", role: "power" },
+];
+
+/** JEDEC 32-pin EPROM (27C010-style). Pin 1 = VPP, pin 31 = PGM#. */
+export const EPROM_DIP32_PINOUT: ChipPin[] = [
+  { pin: 1, name: "VPP", role: "vpp", note: "read: tie to VCC" },
+  { pin: 2, name: "A16", role: "address" }, { pin: 3, name: "A15", role: "address" },
+  { pin: 4, name: "A12", role: "address" }, { pin: 5, name: "A7", role: "address" },
+  { pin: 6, name: "A6", role: "address" }, { pin: 7, name: "A5", role: "address" },
+  { pin: 8, name: "A4", role: "address" }, { pin: 9, name: "A3", role: "address" },
+  { pin: 10, name: "A2", role: "address" }, { pin: 11, name: "A1", role: "address" },
+  { pin: 12, name: "A0", role: "address" }, { pin: 13, name: "D0", role: "data" },
+  { pin: 14, name: "D1", role: "data" }, { pin: 15, name: "D2", role: "data" },
+  { pin: 16, name: "GND", role: "ground" }, { pin: 17, name: "D3", role: "data" },
+  { pin: 18, name: "D4", role: "data" }, { pin: 19, name: "D5", role: "data" },
+  { pin: 20, name: "D6", role: "data" }, { pin: 21, name: "D7", role: "data" },
+  { pin: 22, name: "CE#", role: "chip_enable" }, { pin: 23, name: "A10", role: "address" },
+  { pin: 24, name: "OE#", role: "output_enable" }, { pin: 25, name: "A11", role: "address" },
+  { pin: 26, name: "A9", role: "address" }, { pin: 27, name: "A8", role: "address" },
+  { pin: 28, name: "A13", role: "address" }, { pin: 29, name: "A14", role: "address" },
+  { pin: 30, name: "NC", role: "nc" }, { pin: 31, name: "PGM#", role: "control" },
+  { pin: 32, name: "VCC", role: "power" },
+];
+
+/** Representative x8 NAND (TSOP-48) — functional pins only. */
+export const NAND_TSOP48_PINOUT: ChipPin[] = [
+  { pin: 1, name: "IO0", role: "data" }, { pin: 2, name: "IO1", role: "data" },
+  { pin: 3, name: "IO2", role: "data" }, { pin: 4, name: "IO3", role: "data" },
+  { pin: 5, name: "IO4", role: "data" }, { pin: 6, name: "IO5", role: "data" },
+  { pin: 7, name: "IO6", role: "data" }, { pin: 8, name: "IO7", role: "data" },
+  { pin: 9, name: "CLE", role: "control", note: "Command latch enable" },
+  { pin: 10, name: "ALE", role: "control", note: "Address latch enable" },
+  { pin: 11, name: "CE#", role: "chip_enable" }, { pin: 12, name: "RE#", role: "output_enable" },
+  { pin: 13, name: "WE#", role: "write_enable" }, { pin: 14, name: "WP#", role: "write_protect" },
+  { pin: 15, name: "R/B#", role: "ready_busy" }, { pin: 16, name: "VCC", role: "power" },
+  { pin: 17, name: "VSS", role: "ground" },
+];
+
+/** BDM single-wire debug header (Freescale/NXP S12/HC12). */
+export const MCU_BDM_PINOUT: ChipPin[] = [
+  { pin: 1, name: "BKGD", role: "control", note: "Single-wire background debug" },
+  { pin: 2, name: "GND", role: "ground" },
+  { pin: 4, name: "RESET", role: "reset" },
+  { pin: 6, name: "VDD", role: "power", note: "VTref sense" },
+];
+
+/** JTAG/SWD debug header (ARM Cortex, TriCore, …). */
+export const MCU_JTAG_PINOUT: ChipPin[] = [
+  { pin: 1, name: "VREF", role: "power", note: "Target IO voltage" },
+  { pin: 2, name: "TMS/SWDIO", role: "control" },
+  { pin: 3, name: "GND", role: "ground" },
+  { pin: 4, name: "TCK/SWCLK", role: "clock" },
+  { pin: 6, name: "TDO/SWO", role: "do" },
+  { pin: 8, name: "TDI", role: "di" },
+  { pin: 10, name: "RESET", role: "reset" },
+];
+
+// --------------------------------------------------------------------------------------
+// PARALLEL / EPROM / NAND / MCU factories.
+// --------------------------------------------------------------------------------------
+
+const T48_PARALLEL_WARNINGS = [
+  "Parallel memory — read/write with the T48 (XGecu) universal programmer, not PicoForge.",
+  "PLCC packages: use the matching PLCC→DIP adapter; mind pin-1 (chamfered corner). Verify the exact device in the T48 software.",
+  "Always read twice and compare before writing.",
+];
+
+export interface ParallelSpec {
+  manufacturer: string;
+  variant: string;
+  sizeBytes: number;
+  package?: string;        // "DIP-32", "PLCC-32", "TSOP-32"…
+  voltage?: ChipVoltage;
+  extraWarnings?: string[];
+}
+
+export function parallelNorProfile(spec: ParallelSpec): ChipProfile {
+  return {
+    chipProfileId: `${slug(spec.manufacturer)}_${slug(spec.variant)}_${slug(spec.package ?? "dip32")}`,
+    displayName: `${spec.manufacturer.split(" ")[0]} ${spec.variant}`,
+    manufacturer: spec.manufacturer,
+    family: "parallel_nor_flash",
+    memoryType: "parallel_flash",
+    protocol: "parallel",
+    package: spec.package ?? "DIP-32",
+    sizeBytes: spec.sizeBytes,
+    voltage: spec.voltage ?? { min: 4.5, typical: 5.0, max: 5.5 },
+    pinout: PNOR_DIP32_PINOUT,
+    operations: { read: true, write: true, erase: true, verify: true },
+    warnings: [...T48_PARALLEL_WARNINGS, ...(spec.extraWarnings ?? [])],
+  };
+}
+
+export function parallelEepromProfile(spec: ParallelSpec): ChipProfile {
+  return {
+    chipProfileId: `${slug(spec.manufacturer)}_${slug(spec.variant)}_${slug(spec.package ?? "dip28")}`,
+    displayName: `${spec.manufacturer.split(" ")[0]} ${spec.variant}`,
+    manufacturer: spec.manufacturer,
+    family: "parallel_eeprom",
+    memoryType: "parallel_eeprom",
+    protocol: "parallel",
+    package: spec.package ?? "DIP-28",
+    sizeBytes: spec.sizeBytes,
+    voltage: spec.voltage ?? { min: 4.5, typical: 5.0, max: 5.5 },
+    pinout: PEEPROM_DIP28_PINOUT,
+    operations: { read: true, write: true, erase: false, verify: true },
+    warnings: [...T48_PARALLEL_WARNINGS, ...(spec.extraWarnings ?? [])],
+  };
+}
+
+export function epromProfile(spec: ParallelSpec): ChipProfile {
+  const pkg = spec.package ?? "DIP-28";
+  const pinout = pkg.includes("32") ? EPROM_DIP32_PINOUT : EPROM_DIP28_PINOUT;
+  return {
+    chipProfileId: `${slug(spec.manufacturer)}_${slug(spec.variant)}_${slug(pkg)}`,
+    displayName: `${spec.manufacturer.split(" ")[0]} ${spec.variant}`,
+    manufacturer: spec.manufacturer,
+    family: "parallel_eprom",
+    memoryType: "eprom",
+    protocol: "parallel",
+    package: pkg,
+    sizeBytes: spec.sizeBytes,
+    voltage: spec.voltage ?? { min: 4.5, typical: 5.0, max: 5.5 },
+    pinout,
+    operations: { read: true, write: false, erase: false, verify: true },
+    warnings: [
+      ...T48_PARALLEL_WARNINGS,
+      "EPROM is read-only on the T48: a windowed (CERDIP) part is erased only by UV light; OTP plastic parts cannot be erased at all.",
+      ...(spec.extraWarnings ?? []),
+    ],
+  };
+}
+
+export function nandProfile(spec: ParallelSpec): ChipProfile {
+  return {
+    chipProfileId: `${slug(spec.manufacturer)}_${slug(spec.variant)}_${slug(spec.package ?? "tsop48")}`,
+    displayName: `${spec.manufacturer.split(" ")[0]} ${spec.variant}`,
+    manufacturer: spec.manufacturer,
+    family: "nand_flash",
+    memoryType: "nand_flash",
+    protocol: "parallel",
+    package: spec.package ?? "TSOP-48",
+    sizeBytes: spec.sizeBytes,
+    voltage: spec.voltage ?? { min: 2.7, typical: 3.3, max: 3.6 },
+    pinout: NAND_TSOP48_PINOUT,
+    operations: { read: true, write: true, erase: true, verify: true },
+    warnings: [
+      "NAND flash — T48 with a TSOP-48 adapter. Dumps include spare/OOB bytes.",
+      "Has bad blocks and needs ECC handling; a raw dump is not directly a filesystem.",
+      "Always read twice and compare before writing.",
+      ...(spec.extraWarnings ?? []),
+    ],
+  };
+}
+
+export type McuInterface = "bdm" | "jtag" | "swd" | "bootloader";
+
+export interface McuSpec {
+  manufacturer: string;
+  variant: string;
+  sizeBytes: number;
+  package: string;          // "PLCC-44", "QFP-144", "LQFP-100"…
+  iface: McuInterface;
+  family?: "mcu_internal_flash" | "mcu_internal_eeprom";
+  voltage?: ChipVoltage;
+  note?: string;
+}
+
+export function mcuProfile(spec: McuSpec): ChipProfile {
+  const protocol: Protocol =
+    spec.iface === "swd" ? "swd" :
+    spec.iface === "bootloader" ? "uart" :
+    spec.iface === "bdm" ? "jtag" : "jtag"; // BDM modelled under the jtag/debug umbrella
+  const pinout = spec.iface === "bdm" ? MCU_BDM_PINOUT : MCU_JTAG_PINOUT;
+  const ifaceLabel = spec.iface.toUpperCase();
+  return {
+    chipProfileId: `${slug(spec.manufacturer)}_${slug(spec.variant)}`,
+    displayName: `${spec.manufacturer.split(" ")[0]} ${spec.variant}`,
+    manufacturer: spec.manufacturer,
+    family: spec.family ?? "mcu_internal_flash",
+    memoryType: spec.family === "mcu_internal_eeprom" ? "mcu_eeprom" : "mcu_flash",
+    protocol,
+    package: spec.package,
+    sizeBytes: spec.sizeBytes,
+    voltage: spec.voltage ?? { min: 3.0, typical: 3.3, max: 5.25 },
+    pinout,
+    operations: { read: true, write: true, erase: true, verify: true },
+    warnings: [
+      `Internal MCU memory — NOT on external pins. Read via ${ifaceLabel} using the mcu-debugger board (BDM/JTAG/bootloader), or a T48 socket if the device is in its list.`,
+      "May be read-protected / locked — needs a chip-specific unlock or boot-mode procedure before the memory is readable.",
+      ...(spec.note ? [spec.note] : []),
+    ],
+  };
+}
+
 export function customProfile(p: {
   id: string;
   displayName: string;

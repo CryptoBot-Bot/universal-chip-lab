@@ -2,6 +2,7 @@ export type Protocol =
   | "i2c"
   | "spi"
   | "microwire"
+  | "parallel"
   | "uart"
   | "can"
   | "jtag"
@@ -12,6 +13,10 @@ export type ChipFamily =
   | "25xxx_spi_eeprom"
   | "93xxx_microwire_eeprom"
   | "spi_nor_flash"
+  | "parallel_nor_flash"
+  | "parallel_eeprom"
+  | "parallel_eprom"
+  | "nand_flash"
   | "mcu_internal_flash"
   | "mcu_internal_eeprom";
 
@@ -20,6 +25,8 @@ export type MemoryType =
   | "parallel_eeprom"
   | "serial_flash"
   | "parallel_flash"
+  | "eprom"
+  | "nand_flash"
   | "mcu_flash"
   | "mcu_eeprom";
 
@@ -41,7 +48,12 @@ export type PinRole =
   | "nc"
   | "address"
   | "data"
-  | "control";
+  | "control"
+  | "chip_enable"
+  | "output_enable"
+  | "write_enable"
+  | "ready_busy"
+  | "vpp";
 
 export interface ChipPin {
   pin: number;

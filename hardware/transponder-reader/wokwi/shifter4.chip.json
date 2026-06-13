@@ -1,0 +1,5 @@
+{
+  "name": "shifter4",
+  "author": "Universal Chip Lab",
+  "pins": ["LV", "HV", "GND", "LV1", "HV1", "LV2", "HV2", "LV3", "HV3", "LV4", "HV4"]
+}

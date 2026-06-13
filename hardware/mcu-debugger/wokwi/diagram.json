@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "author": "Universal Chip Lab",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-pi-pico", "id": "pico", "top": 0, "left": 0, "attrs": {} },
+    { "type": "chip-shifter4", "id": "shA", "top": -80, "left": 320, "attrs": {} },
+    { "type": "chip-shifter4", "id": "shB", "top": 180, "left": 320, "attrs": {} },
+    { "type": "chip-debugport", "id": "tgt", "top": 40, "left": 580, "attrs": {} }
+  ],
+  "connections": [
+    [ "pico:3V3", "shA:LV", "red", [] ],
+    [ "pico:3V3", "shB:LV", "red", [] ],
+    [ "tgt:VTREF", "shA:HV", "orange", [] ],
+    [ "tgt:VTREF", "shB:HV", "orange", [] ],
+    [ "shA:GND", "pico:GND.1", "black", [] ],
+    [ "shB:GND", "pico:GND.2", "black", [] ],
+    [ "tgt:GND", "pico:GND.3", "black", [] ],
+
+    [ "pico:GP2", "shA:LV1", "green", [] ],
+    [ "shA:HV1", "tgt:TCK", "green", [] ],
+    [ "pico:GP3", "shA:LV2", "blue", [] ],
+    [ "shA:HV2", "tgt:TMS", "blue", [] ],
+    [ "pico:GP4", "shA:LV3", "violet", [] ],
+    [ "shA:HV3", "tgt:TDI", "violet", [] ],
+    [ "tgt:TDO", "shA:HV4", "yellow", [] ],
+    [ "shA:LV4", "pico:GP5", "yellow", [] ],
+
+    [ "pico:GP6", "shB:LV1", "purple", [] ],
+    [ "shB:HV1", "tgt:RESET", "purple", [] ],
+    [ "pico:GP7", "shB:LV2", "gold", [] ],
+    [ "shB:HV2", "tgt:TRST_BKGD", "gold", [] ],
+    [ "pico:GP0", "shB:LV3", "cyan", [] ],
+    [ "shB:HV3", "tgt:UART_TX", "cyan", [] ],
+    [ "tgt:UART_RX", "shB:HV4", "magenta", [] ],
+    [ "shB:LV4", "pico:GP1", "magenta", [] ]
+  ]
+}

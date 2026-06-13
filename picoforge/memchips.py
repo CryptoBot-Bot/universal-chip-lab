@@ -17,6 +17,7 @@ _RDID = 0x9F   # JEDEC ID (NOR flash; M95/25-EEPROM usually ignore this)
 _READ = 0x03   # read data
 _WREN = 0x06   # write enable
 _RDSR = 0x05   # read status register
+_WRSR = 0x01   # write status register (clears BP block-protect bits)
 _PP = 0x02     # page program / byte write
 _SE = 0x20     # sector erase (4 KB)
 _CE = 0xC7     # chip erase (whole device -> 0xFF)
@@ -79,6 +80,25 @@ class SpiMem:
             self._wait_ready()
             i += chunk
         return len(data)
+
+    def write_status(self, value=0x00):
+        # Clears block-protect (BP0/BP1) so the whole EEPROM array is writable.
+        # WP# must be tied HIGH for this to take when WPEN is set.
+        self._sel(); self.spi.write(bytes([_WREN])); self._desel()
+        self._sel(); self.spi.write(bytes([_WRSR, value & 0xFF])); self._desel()
+        self._wait_ready()
+
+    def read_status(self):
+        self._sel()
+        self.spi.write(bytes([_RDSR]))
+        sr = self.spi.read(1)[0]
+        self._desel()
+        return sr
+
+    def fill(self, addr, length, value=0xFF):
+        # "Erase" for an EEPROM = write a constant byte (0xFF by convention).
+        # Reuses the page-aware write(), so it respects the chip's page size.
+        return self.write(addr, bytes([value & 0xFF]) * length)
 
     def erase_chip(self, timeout_ms=120000):
         # Whole-device erase to 0xFF. Slow on big parts (4 MB ~ 20-60 s).

@@ -33,7 +33,7 @@ try:
 except ImportError:
     HAVE_OLED = False
 
-FIRMWARE = "PicoForge v1.2"
+FIRMWARE = "PicoForge v1.4"
 
 # ---- pin map (see README.md / BUILD.md) ----
 OLED_SDA, OLED_SCL = 8, 9                                # I2C0 -> OLED
@@ -47,6 +47,12 @@ BTN_MODE = 22
 BTN_ACTION = 21
 
 MODES = ["SPI Flash", "SPI EEPROM", "I2C EEPROM", "Microwire"]
+
+# SPI EEPROM (MODE 1) write page. 32 is the safe minimum across the small
+# 25-series EEPROM family (S-25A320A=32, 25320=32, 95128=64, 25LC512=128...).
+# Writing in chunks <= the chip's real page can never corrupt; chunks LARGER
+# than it wrap inside the page and silently corrupt. So we default low.
+SPI_EE_PAGE = 32
 
 
 class PicoForge:
@@ -127,6 +133,12 @@ class PicoForge:
             return memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT)).jedec_id()
         return "n/a (SPI only)"
 
+    def i2c_scan(self):
+        # Lists every I2C address that ACKs. 100 kHz for robustness on a
+        # marginal bus. A 24Cxx with A0/A1/A2=GND shows up at 0x50.
+        i2c = I2C(1, sda=Pin(I2C_SDA), scl=Pin(I2C_SCL), freq=100000)
+        return i2c.scan()
+
     def read(self, start, length):
         if self.mode == 0:
             return memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT), addr_bytes=3).read(start, length)
@@ -143,7 +155,8 @@ class PicoForge:
         if self.mode == 0:
             memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT), addr_bytes=3).write(start, data)
         elif self.mode == 1:
-            memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT), addr_bytes=2).write(start, data)
+            memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT),
+                            addr_bytes=2, page_size=SPI_EE_PAGE).write(start, data)
         elif self.mode == 2:
             i2c = I2C(1, sda=Pin(I2C_SDA), scl=Pin(I2C_SCL), freq=400000)
             memchips.I2cEeprom(i2c).write(start, data)
@@ -160,6 +173,25 @@ class PicoForge:
             memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT), addr_bytes=3).erase_chip()
             return "chip"
         return "n/a (EEPROM is byte-writable)"
+
+    def _spi_mem(self):
+        # SpiMem for the current SPI mode: 0=flash (3 addr, 256B page),
+        # 1=EEPROM (2 addr, 32B page). Raises for non-SPI modes.
+        if self.mode == 0:
+            return memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT), addr_bytes=3, page_size=256)
+        if self.mode == 1:
+            return memchips.SpiMem(self._spi(), Pin(SPI_CS, Pin.OUT), addr_bytes=2, page_size=SPI_EE_PAGE)
+        raise OSError("SPI modes only (set MODE 0 or 1)")
+
+    def unlock(self):
+        # Clear status-register block-protect bits so the whole array is writable.
+        m = self._spi_mem()
+        m.write_status(0x00)
+        return m.read_status()
+
+    def fill(self, start, length, value=0xFF):
+        # "Erase" an EEPROM by writing a constant byte (0xFF) over a range.
+        return self._spi_mem().fill(start, length, value)
 
     def action(self):
         """ACTION button: quick 16-byte preview read of the current mode."""
@@ -185,7 +217,9 @@ class PicoForge:
             if cmd == "PING":
                 print("OK " + FIRMWARE)
             elif cmd == "HELP":
-                print("OK cmds: PING INFO MODE<0-3> ID READ<start><len> WRITE<start><hex> ERASE")
+                print("OK cmds: PING INFO MODE<0-3> ID SCAN READ<start><len> "
+                      "WRITE<start><hex> WRITES<start><text> "
+                      "FILL<start><len>[<hexbyte>] UNLOCK ERASE")
             elif cmd == "INFO":
                 print("OK mode=%d %s | 3V3 safe" % (self.mode, MODES[self.mode]))
             elif cmd == "MODE":
@@ -194,6 +228,13 @@ class PicoForge:
             elif cmd == "ID":
                 self.status = "id"; self.refresh()
                 print("OK " + self.chip_id())
+            elif cmd == "SCAN":
+                if self.mode == 2:
+                    found = self.i2c_scan()
+                    self.status = "scan %d" % len(found); self.refresh()
+                    print("OK i2c: " + (" ".join("0x%02X" % a for a in found) if found else "(none responded)"))
+                else:
+                    print("ERR SCAN is I2C only (set MODE 2)")
             elif cmd == "READ":
                 data = self.read(int(parts[1]), int(parts[2]))
                 self.status = "read %d" % len(data); self.refresh()
@@ -202,6 +243,24 @@ class PicoForge:
                 n = self.write(int(parts[1]), bytes.fromhex(parts[2]))
                 self.status = "wrote %d" % n; self.refresh()
                 print("OK wrote %d" % n)
+            elif cmd == "WRITES":
+                # WRITES <start> <text...> : write the rest of the line as ASCII.
+                p = line.rstrip("\r\n").split(None, 2)
+                text = p[2] if len(p) > 2 else ""
+                n = self.write(int(p[1]), text.encode())
+                self.status = "wrote %d" % n; self.refresh()
+                print("OK wrote %d" % n)
+            elif cmd == "UNLOCK":
+                sr = self.unlock()
+                self.status = "unlocked"; self.refresh()
+                print("OK unlocked, SR=0x%02X" % sr)
+            elif cmd == "FILL":
+                start = int(parts[1]); length = int(parts[2])
+                val = int(parts[3], 16) if len(parts) > 3 else 0xFF
+                self.status = "filling"; self.refresh()
+                self.fill(start, length, val)
+                self.status = "filled %d" % length; self.refresh()
+                print("OK filled %d bytes @ %d = 0x%02X" % (length, start, val))
             elif cmd == "ERASE":
                 self.status = "erasing"; self.refresh()
                 kind = self.erase()

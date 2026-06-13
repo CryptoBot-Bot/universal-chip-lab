@@ -22,6 +22,11 @@ export function picoModeForChip(profile: ChipProfile): PicoModeInfo | null {
       return { mode: 2, label: "I2C EEPROM" };
     case "93xxx_microwire_eeprom":
       return { mode: 3, label: "Microwire" };
+    case "parallel_nor_flash":
+    case "parallel_eeprom":
+    case "parallel_eprom":
+    case "nand_flash":
+      return null; // parallel memory — needs the T48's address/data bus, not a 4-wire clip
     case "mcu_internal_flash":
     case "mcu_internal_eeprom":
       return null; // internal-MCU memory — not reachable via PicoForge clips
