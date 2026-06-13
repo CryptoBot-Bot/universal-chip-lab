@@ -13,7 +13,7 @@ A documented, ESD-safe bench that any session can use to:
 3. **Voltage-shift safely** between 5 V programmer logic and 3.3 V chip logic — always on, never an afterthought.
 4. **Hot-swap chips** without touching upstream wiring.
 5. **Tap the logic analyzer** on any DUT signal without re-wiring.
-6. **Maintain ESD safety** throughout.
+6. **Maintain ESD safety** throughout...
 
 The design philosophy is **standardised pinouts + hot-swappable modules**, not "wire it from scratch every time."
 
