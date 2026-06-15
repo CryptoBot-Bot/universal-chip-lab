@@ -42,9 +42,37 @@ function throwIfErr(reply: string): void {
   if (reply.startsWith("ERR")) throw new Error(reply.replace(/^ERR\s*/, "PicoForge: "));
 }
 
+/**
+ * Sets the SPI clock (Hz) on the device. Returns the effective (clamped) clock
+ * the firmware reports. Best-effort: firmware older than v1.5 doesn't know the
+ * SPEED command and replies ERR — callers that just want to nudge the clock
+ * before an op use {@link selectMode}, which swallows that.
+ */
+export async function setSpeed(port: string, hz: number): Promise<number> {
+  const reply = await Pico.command(port, `SPEED ${Math.round(hz)}`);
+  throwIfErr(reply);
+  const m = reply.match(/speed=(\d+)/);
+  return m ? Number(m[1]) : Math.round(hz);
+}
+
+/**
+ * Sets the firmware MODE and, for SPI modes (0/1) with a clock given, the SPI
+ * speed too. The SPEED is best-effort (ignored on pre-v1.5 firmware) since it
+ * only tunes throughput/tolerance, never correctness of the protocol. I2C and
+ * Microwire have their own fixed clocks in firmware, so clockHz is ignored there.
+ */
+async function selectMode(port: string, mode: PicoMode, clockHz?: number): Promise<void> {
+  throwIfErr(await Pico.command(port, `MODE ${mode}`));
+  if (clockHz && clockHz > 0 && (mode === 0 || mode === 1)) {
+    const reply = await Pico.command(port, `SPEED ${Math.round(clockHz)}`);
+    // Don't fail the whole op if the firmware predates SPEED — just skip it.
+    if (reply.startsWith("ERR") && !/unknown/i.test(reply)) throwIfErr(reply);
+  }
+}
+
 /** Erases a flash chip (MODE 0) to 0xFF. Slow — give it a long timeout. */
-export async function eraseFlash(port: string): Promise<void> {
-  throwIfErr(await Pico.command(port, "MODE 0"));
+export async function eraseFlash(port: string, clockHz?: number): Promise<void> {
+  await selectMode(port, 0, clockHz);
   throwIfErr(await Pico.command(port, "ERASE", false, 135000));
 }
 
@@ -54,8 +82,8 @@ export async function eraseFlash(port: string): Promise<void> {
  * EWEN is issued by its driver, and flash has no such latch. Safe to call before
  * any EEPROM write — harmless on chips that aren't protected.
  */
-export async function unlockChip(port: string, mode: PicoMode): Promise<void> {
-  throwIfErr(await Pico.command(port, `MODE ${mode}`));
+export async function unlockChip(port: string, mode: PicoMode, clockHz?: number): Promise<void> {
+  await selectMode(port, mode, clockHz);
   if (mode === 1) throwIfErr(await Pico.command(port, "UNLOCK"));
 }
 
@@ -70,9 +98,10 @@ export async function eraseChip(
   sizeBytes: number,
   onProgress?: (done: number, total: number) => void,
   timeoutMs = 135000,
+  clockHz?: number,
 ): Promise<void> {
-  if (mode === 0) return eraseFlash(port);
-  await unlockChip(port, mode);
+  if (mode === 0) return eraseFlash(port, clockHz);
+  await unlockChip(port, mode, clockHz);
   if (mode === 1) {
     throwIfErr(await Pico.command(port, `FILL 0 ${sizeBytes} ff`, false, timeoutMs));
     onProgress?.(sizeBytes, sizeBytes);
@@ -94,8 +123,9 @@ export async function writeAt(
   addr: number,
   bytes: Uint8Array,
   onProgress?: (done: number, total: number) => void,
+  clockHz?: number,
 ): Promise<void> {
-  throwIfErr(await Pico.command(port, `MODE ${mode}`));
+  await selectMode(port, mode, clockHz);
   for (let off = 0; off < bytes.length; off += WRITE_CHUNK) {
     const slice = bytes.subarray(off, off + WRITE_CHUNK);
     throwIfErr(await Pico.command(port, `WRITE ${addr + off} ${bytesToHex(slice)}`));
@@ -121,9 +151,9 @@ export async function readChip(
   mode: PicoMode,
   sizeBytes: number,
   onProgress?: (done: number, total: number) => void,
+  clockHz?: number,
 ): Promise<Uint8Array> {
-  const modeReply = await Pico.command(port, `MODE ${mode}`);
-  if (modeReply.startsWith("ERR")) throw new Error(modeReply.replace(/^ERR\s*/, "PicoForge: "));
+  await selectMode(port, mode, clockHz);
 
   const out = new Uint8Array(sizeBytes);
   const chunk = readChunkFor(mode);
@@ -152,9 +182,9 @@ export async function writeChip(
   bytes: Uint8Array,
   onProgress?: (done: number, total: number) => void,
   skipBlank = false,
+  clockHz?: number,
 ): Promise<void> {
-  const modeReply = await Pico.command(port, `MODE ${mode}`);
-  if (modeReply.startsWith("ERR")) throw new Error(modeReply.replace(/^ERR\s*/, "PicoForge: "));
+  await selectMode(port, mode, clockHz);
   for (let off = 0; off < bytes.length; off += WRITE_CHUNK) {
     const slice = bytes.subarray(off, off + WRITE_CHUNK);
     if (!(skipBlank && slice.every((b) => b === 0xff))) {

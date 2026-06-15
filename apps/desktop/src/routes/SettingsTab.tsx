@@ -1,9 +1,22 @@
 import { useEffect, useState } from "react";
 
+import { formatClockHz, SAFE_FIRST_CONTACT_HZ } from "@ecu/chip-db";
+
 import { Topbar } from "../components/Topbar";
 import { Api, type KeyStatus } from "../lib/api";
+import { usePico } from "../lib/pico-connection";
+
+const CLOCK_PRESETS: Array<{ label: string; hz: number | null }> = [
+  { label: "Auto (chip-rated)", hz: null },
+  { label: "Safe · 1 MHz", hz: SAFE_FIRST_CONTACT_HZ },
+  { label: "2 MHz", hz: 2_000_000 },
+  { label: "4 MHz", hz: 4_000_000 },
+  { label: "8 MHz", hz: 8_000_000 },
+];
 
 export function SettingsTab() {
+  const { spiClockHz, setSpiClockHz } = usePico();
+  const [clockCustom, setClockCustom] = useState("");
   const [status, setStatus] = useState<KeyStatus | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -122,6 +135,66 @@ export function SettingsTab() {
           {msg && (
             <p className="tiny mt-12" style={{ color: msg.ok ? "var(--accent)" : "var(--danger)" }}>{msg.text}</p>
           )}
+        </div>
+
+        <div className="card mt-16">
+          <h3>SPI clock default</h3>
+          <p className="tiny dim mt-8">
+            The SCK frequency PicoForge uses for SPI chips (Flash &amp; 25/95 EEPROM). Slower is always
+            safe for reads — there's no minimum. If a chip reads back all <span className="mono">0x00</span>
+            {" "}(its MISO line isn't being driven fast enough), drop to <strong>Safe · 1 MHz</strong>.
+            <strong> Auto</strong> uses each chip's datasheet-rated clock. This is shared with the per-read
+            control in the Read &amp; Write tabs.
+          </p>
+          <div className="card compact mt-12">
+            <div className="row spread" style={{ alignItems: "center" }}>
+              <div className="tiny dim">Current default</div>
+              <div className="tiny">
+                <strong>{spiClockHz === null ? "Auto (chip-rated)" : formatClockHz(spiClockHz)}</strong>
+              </div>
+            </div>
+            <div className="seg mt-8" style={{ flexWrap: "wrap" }}>
+              {CLOCK_PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  className={spiClockHz === p.hz ? "active" : ""}
+                  onClick={() => setSpiClockHz(p.hz)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="row gap-8 mt-8" style={{ alignItems: "center" }}>
+              <span className="tiny dim">custom</span>
+              <input
+                type="number"
+                step="0.5"
+                min="0.01"
+                placeholder="MHz"
+                value={clockCustom}
+                onChange={(e) => setClockCustom(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const mhz = Number(clockCustom.trim());
+                    if (Number.isFinite(mhz) && mhz > 0) setSpiClockHz(Math.round(mhz * 1_000_000));
+                  }
+                }}
+                style={{ width: 90 }}
+              />
+              <span className="tiny dim">MHz</span>
+              <button
+                className="tiny"
+                disabled={!clockCustom.trim()}
+                onClick={() => {
+                  const mhz = Number(clockCustom.trim());
+                  if (Number.isFinite(mhz) && mhz > 0) setSpiClockHz(Math.round(mhz * 1_000_000));
+                }}
+              >
+                Set
+              </button>
+            </div>
+            <p className="tiny dim mt-8">Note: I²C and Microwire chips run at fixed firmware clocks — this affects SPI only.</p>
+          </div>
         </div>
       </div>
     </>

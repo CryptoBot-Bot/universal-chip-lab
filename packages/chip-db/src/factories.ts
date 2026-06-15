@@ -124,7 +124,9 @@ export function m95Profile(spec: M95Spec): ChipProfile {
     voltage: { min: 1.8, typical: 3.3, max: 5.5 },
     pinout: SOIC8_SPI_PINOUT,
     operations: { read: true, write: true, erase: false, verify: true },
-    readAlgorithm: { opcode: "0x03", addressBytes, pageSize },
+    // M95 family is conservatively rated ~5 MHz; older -W grades derate further
+    // at low Vcc. The tool clamps overrides to this and offers it as "Rated".
+    readAlgorithm: { opcode: "0x03", addressBytes, pageSize, maxClockHz: 5_000_000 },
     warnings,
   };
 }
@@ -216,6 +218,8 @@ export interface SpiNorSpec {
   /** JEDEC ID as 6-hex string (manuf+memtype+capacity), if known. */
   jedecId?: string;
   voltage?: ChipVoltage;       // default 2.7–3.6 V
+  /** Datasheet-rated SCK ceiling in Hz. Defaults to 20 MHz (derated for a clip). */
+  maxClockHz?: number;
   extraWarnings?: string[];
 }
 
@@ -233,7 +237,7 @@ export function spiNorProfile(spec: SpiNorSpec): ChipProfile {
     voltage: spec.voltage ?? { min: 2.7, typical: 3.3, max: 3.6 },
     pinout: SOIC8_SPI_NOR_PINOUT,
     operations: { read: true, write: true, erase: true, verify: true },
-    readAlgorithm: { opcode: "0x03", addressBytes: 3, pageSize: 256 },
+    readAlgorithm: { opcode: "0x03", addressBytes: 3, pageSize: 256, maxClockHz: spec.maxClockHz ?? 20_000_000 },
     warnings: [
       "Always read twice and compare before writing.",
       "3.3 V parts only — do NOT clip with a 5 V CH341A. Use the 1.8 V adapter or a 3.3 V programmer.",
@@ -281,6 +285,8 @@ export interface Spi25Spec {
   pageSize: number;
   addressBytes: 1 | 2 | 3;
   voltage?: ChipVoltage;
+  /** Datasheet-rated SCK ceiling in Hz. Defaults to a safe 10 MHz. */
+  maxClockHz?: number;
 }
 
 export function spi25EepromProfile(spec: Spi25Spec): ChipProfile {
@@ -296,7 +302,12 @@ export function spi25EepromProfile(spec: Spi25Spec): ChipProfile {
     voltage: spec.voltage ?? { min: 2.5, typical: 3.3, max: 5.5 },
     pinout: SOIC8_SPI_PINOUT,
     operations: { read: true, write: true, erase: false, verify: true },
-    readAlgorithm: { opcode: "0x03", addressBytes: spec.addressBytes, pageSize: spec.pageSize },
+    readAlgorithm: {
+      opcode: "0x03",
+      addressBytes: spec.addressBytes,
+      pageSize: spec.pageSize,
+      maxClockHz: spec.maxClockHz ?? 10_000_000,
+    },
     warnings: [
       "Always read twice and compare before writing.",
       "WP and HOLD must be tied HIGH (VCC) before powering for any read.",

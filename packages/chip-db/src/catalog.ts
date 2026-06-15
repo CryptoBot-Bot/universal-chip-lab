@@ -48,9 +48,9 @@ const SPI25_PROFILES: ChipProfile[] = [
   spi25EepromProfile({ manufacturer: "Atmel", variant: "AT25512",  sizeBytes: 65536, pageSize: 128, addressBytes: 2 }),
   // ABLIC / Seiko Instruments (SII) S-25A — automotive 125 °C SPI EEPROM, common in
   // ECU/TCU/cluster/immobiliser modules. Top-marked like "S25A32" (= S-25A320A).
-  spi25EepromProfile({ manufacturer: "ABLIC", variant: "S-25A080A", sizeBytes: 1024, pageSize: 32, addressBytes: 2 }),
-  spi25EepromProfile({ manufacturer: "ABLIC", variant: "S-25A160A", sizeBytes: 2048, pageSize: 32, addressBytes: 2 }),
-  spi25EepromProfile({ manufacturer: "ABLIC", variant: "S-25A320A", sizeBytes: 4096, pageSize: 32, addressBytes: 2 }),
+  spi25EepromProfile({ manufacturer: "ABLIC", variant: "S-25A080A", sizeBytes: 1024, pageSize: 32, addressBytes: 2, maxClockHz: 20_000_000 }),
+  spi25EepromProfile({ manufacturer: "ABLIC", variant: "S-25A160A", sizeBytes: 2048, pageSize: 32, addressBytes: 2, maxClockHz: 20_000_000 }),
+  spi25EepromProfile({ manufacturer: "ABLIC", variant: "S-25A320A", sizeBytes: 4096, pageSize: 32, addressBytes: 2, maxClockHz: 20_000_000 }),
 ];
 
 // --- 24Cxx I²C EEPROM — clusters, BCMs, immobilisers, airbag/SRS.

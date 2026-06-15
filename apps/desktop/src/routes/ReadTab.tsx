@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { ChipIdentification, ChipProfile } from "@ecu/chip-db";
-import { draftProfileFromIdentification, picoModeForChip } from "@ecu/chip-db";
+import { draftProfileFromIdentification, effectiveSpiClockHz, picoModeForChip } from "@ecu/chip-db";
 
+import { ClockControl } from "../components/ClockControl";
 import { Topbar } from "../components/Topbar";
 import { Api } from "../lib/api";
 import { usePico } from "../lib/pico-connection";
@@ -31,7 +32,7 @@ async function fileToImage(file: File): Promise<Img> {
 }
 
 export function ReadTab() {
-  const { port } = usePico();
+  const { port, spiClockHz, setSpiClockHz } = usePico();
   const [chips, setChips] = useState<ChipProfile[]>([]);
   const [query, setQuery] = useState("");
   const [chipId, setChipId] = useState("");
@@ -113,8 +114,9 @@ export function ReadTab() {
     setResult(null);
     setSaveMsg(null);
     try {
-      const r1 = await readChip(port, modeInfo.mode, activeChip.sizeBytes, (d, t) => setProgress(`read 1/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`));
-      const r2 = await readChip(port, modeInfo.mode, activeChip.sizeBytes, (d, t) => setProgress(`read 2/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      const clockHz = effectiveSpiClockHz(activeChip, spiClockHz ?? undefined);
+      const r1 = await readChip(port, modeInfo.mode, activeChip.sizeBytes, (d, t) => setProgress(`read 1/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
+      const r2 = await readChip(port, modeInfo.mode, activeChip.sizeBytes, (d, t) => setProgress(`read 2/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
       const s1 = await sha256Hex(r1);
       const s2 = await sha256Hex(r2);
       setResult({ sha: s1, verified: s1 === s2, preview: hexDump(r1), size: activeChip.sizeBytes, modeLabel: modeInfo.label, bytes: r1 });
@@ -258,6 +260,7 @@ export function ReadTab() {
               </button>
             </div>
             {!sizeReady && <p className="tiny mt-8" style={{ color: "var(--warn)" }}>Set the chip capacity above before reading.</p>}
+            <ClockControl profile={activeChip} mode={modeInfo.mode} value={spiClockHz} onChange={setSpiClockHz} disabled={busy} />
             <p className="tiny dim mt-8">
               Plug the {modeInfo.label} adapter, clip the chip (red→pin 1), meter pin-8 = 3.3 V / GND = 0 V, then read.
             </p>

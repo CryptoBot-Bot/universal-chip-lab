@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { ChipProfile } from "@ecu/chip-db";
-import { picoModeForChip } from "@ecu/chip-db";
+import { effectiveSpiClockHz, picoModeForChip } from "@ecu/chip-db";
 
+import { ClockControl } from "../components/ClockControl";
 import { HexEditor } from "../components/HexEditor";
 import { Topbar } from "../components/Topbar";
 import { Api, type DumpEntry } from "../lib/api";
@@ -33,7 +34,7 @@ function str(v: unknown): string {
 }
 
 export function WriteTab() {
-  const { port } = usePico();
+  const { port, spiClockHz, setSpiClockHz } = usePico();
   const [tool, setTool] = useState<Tool>("write");
   const [dumps, setDumps] = useState<DumpEntry[]>([]);
   const [chips, setChips] = useState<ChipProfile[]>([]);
@@ -83,6 +84,7 @@ export function WriteTab() {
   const mode = modeInfo?.mode ?? null;
   const isFlash = mode === 0;
   const eeprom = mode !== null && isEeprom(mode);
+  const clockHz = chip ? effectiveSpiClockHz(chip, spiClockHz ?? undefined) : undefined;
 
   const supportedChips = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -123,14 +125,14 @@ export function WriteTab() {
       const srcSha = await sha256Hex(src);
       if (isFlash && eraseFirst) {
         setProgress("erasing flash (tens of seconds)…");
-        await eraseFlash(port);
+        await eraseFlash(port, clockHz);
       } else if (eeprom) {
         setProgress("unlocking (clearing write-protect)…");
-        await unlockChip(port, mode);
+        await unlockChip(port, mode, clockHz);
       }
-      await writeChip(port, mode, src, (d, t) => setProgress(`writing — ${d.toLocaleString()}/${t.toLocaleString()} B`), isFlash);
+      await writeChip(port, mode, src, (d, t) => setProgress(`writing — ${d.toLocaleString()}/${t.toLocaleString()} B`), isFlash, clockHz);
       setPhase("verifying");
-      const back = await readChip(port, mode, dump.sizeBytes, (d, t) => setProgress(`reading back — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      const back = await readChip(port, mode, dump.sizeBytes, (d, t) => setProgress(`reading back — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
       const backSha = await sha256Hex(back);
       setResult({ ok: backSha === srcSha, srcSha, backSha });
       setPhase("done");
@@ -154,9 +156,9 @@ export function WriteTab() {
     setEraseBusy(true);
     try {
       setEraseProgress(isFlash ? "erasing flash (tens of seconds)…" : "erasing (writing 0xFF)…");
-      await eraseChip(port, mode, chip.sizeBytes, (d, t) => setEraseProgress(`erasing — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      await eraseChip(port, mode, chip.sizeBytes, (d, t) => setEraseProgress(`erasing — ${d.toLocaleString()}/${t.toLocaleString()} B`), undefined, clockHz);
       setEraseProgress("verifying blank…");
-      const back = await readChip(port, mode, chip.sizeBytes, (d, t) => setEraseProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      const back = await readChip(port, mode, chip.sizeBytes, (d, t) => setEraseProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
       let nonBlank = 0;
       for (let i = 0; i < back.length; i++) if (back[i] !== 0xff) nonBlank++;
       setEraseResult({ ok: nonBlank === 0, nonBlank });
@@ -177,7 +179,7 @@ export function WriteTab() {
     setEditBusy(true);
     try {
       setEditProgress("reading chip…");
-      const back = await readChip(port, mode, chip.sizeBytes, (d, t) => setEditProgress(`reading — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      const back = await readChip(port, mode, chip.sizeBytes, (d, t) => setEditProgress(`reading — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
       setOrig(back.slice());
       setBuf(back.slice());
       setDirty(new Map());
@@ -248,15 +250,15 @@ export function WriteTab() {
       const runs = dirtyRuns(dirty.keys());
       if (mode === 1) {
         setEditProgress("unlocking (clearing write-protect)…");
-        await unlockChip(port, mode);
+        await unlockChip(port, mode, clockHz);
       }
       let done = 0;
       for (const [s, e] of runs) {
         setEditProgress(`writing ${runs.length} run(s) — ${++done}/${runs.length}`);
-        await writeAt(port, mode, s, buf.subarray(s, e));
+        await writeAt(port, mode, s, buf.subarray(s, e), undefined, clockHz);
       }
       setEditProgress("reading back to verify…");
-      const back = await readChip(port, mode, buf.length, (d, t) => setEditProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      const back = await readChip(port, mode, buf.length, (d, t) => setEditProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
       let bad = 0;
       for (const off of dirty.keys()) if (back[off] !== buf[off]) bad++;
       setEditResult({ ok: bad === 0, bytes: dirty.size, runs: runs.length });
@@ -323,10 +325,13 @@ export function WriteTab() {
             })}
           </div>
           {chip && modeInfo && (
-            <p className="tiny dim mt-8">
-              Selected <strong>{chip.displayName}</strong> · {modeInfo.label} ·{" "}
-              {isFlash ? "flash (erase-before-write)" : "EEPROM (byte-writable)"} · {fmtBytes(chip.sizeBytes)}
-            </p>
+            <>
+              <p className="tiny dim mt-8">
+                Selected <strong>{chip.displayName}</strong> · {modeInfo.label} ·{" "}
+                {isFlash ? "flash (erase-before-write)" : "EEPROM (byte-writable)"} · {fmtBytes(chip.sizeBytes)}
+              </p>
+              <ClockControl profile={chip} mode={modeInfo.mode} value={spiClockHz} onChange={setSpiClockHz} disabled={busy || eraseBusy || editBusy} />
+            </>
           )}
         </div>
 

@@ -82,6 +82,15 @@ export interface SerialReadAlgorithm {
   addressBytes: number;
   /** Page size in bytes (relevant for writes; informational for reads). */
   pageSize: number;
+  /**
+   * Datasheet-rated maximum bus clock in Hz, lightly derated for breadboard
+   * reality. The chip-DB "default" in the hybrid clock model: the tool offers
+   * it as the rated preset and uses it as the upper clamp for any override.
+   * SPI/Microwire have a free clock up to this ceiling and no minimum; I²C
+   * advertises a tier (100k/400k/1M). Omitted when unknown — the tool then
+   * falls back to a conservative per-family default.
+   */
+  maxClockHz?: number;
 }
 
 /** Where a profile came from. Drives trust and how it is persisted. */

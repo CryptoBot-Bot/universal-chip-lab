@@ -12,10 +12,12 @@ run. Type in the Serial Monitor:  PING  then  HELP.  Press MODE to cycle the
 family (watch the LED move); press ACTION to do a quick read of the current mode.
 
 Serial protocol (one command per line; replies start with OK or ERR):
-    PING                -> OK PicoForge v1.1
+    PING                -> OK PicoForge v1.5
     HELP                -> command list
-    INFO                -> current mode
+    INFO                -> current mode + SPI clock
     MODE <0..3>         -> 0 SPI Flash | 1 SPI EEPROM | 2 I2C EEPROM | 3 Microwire
+    SPEED [<hz>]        -> get/set the SPI clock (Hz). Slower = more tolerant of
+                           slow/old chips & long leads (e.g. M95: SPEED 1000000).
     ID                  -> JEDEC id (SPI modes)
     READ  <start> <len> -> hex bytes
     WRITE <start> <hex> -> write hex bytes
@@ -33,7 +35,7 @@ try:
 except ImportError:
     HAVE_OLED = False
 
-FIRMWARE = "PicoForge v1.4"
+FIRMWARE = "PicoForge v1.5"
 
 # ---- pin map (see README.md / BUILD.md) ----
 OLED_SDA, OLED_SCL = 8, 9                                # I2C0 -> OLED
@@ -54,11 +56,22 @@ MODES = ["SPI Flash", "SPI EEPROM", "I2C EEPROM", "Microwire"]
 # than it wrap inside the page and silently corrupt. So we default low.
 SPI_EE_PAGE = 32
 
+# SPI clock (SCK frequency) in Hz. This is the one knob that fixes "reads back
+# all 0x00" on slow/old SPI chips: if the master clocks faster than the chip's
+# output-valid time (tV) — which derates with Vcc and long jumper leads — the
+# Pico samples MISO before the chip has driven it and sees idle-low zeros. SPI
+# has no minimum clock, so slowing down is always safe for reads; the only cost
+# is time. 2 MHz is the proven default; drop to 1 MHz for a stubborn chip.
+SPI_BAUD_DEFAULT = 2_000_000
+SPI_BAUD_MIN = 10_000          # below this is pointless; guards typos
+SPI_BAUD_MAX = 62_500_000      # RP2040 PL022 ceiling (125 MHz peripheral / 2)
+
 
 class PicoForge:
     def __init__(self):
         self.mode = 0
         self.status = "ready"
+        self.spi_baud = SPI_BAUD_DEFAULT
 
         self.mode_leds = [Pin(p, Pin.OUT) for p in MODE_LED_PINS]
         self.act = Pin(ACT_LED, Pin.OUT)
@@ -125,8 +138,19 @@ class PicoForge:
 
     # ------------- chip helpers (real hardware) -------------
     def _spi(self):
-        return SPI(0, baudrate=2_000_000, polarity=0, phase=0,
+        return SPI(0, baudrate=self.spi_baud, polarity=0, phase=0,
                    sck=Pin(SPI_SCK), mosi=Pin(SPI_MOSI), miso=Pin(SPI_MISO))
+
+    def set_speed(self, hz):
+        """Set the SPI clock, clamped to the RP2040's usable range. Applies to
+        the next SPI op (modes 0/1). I2C/Microwire have their own fixed clocks."""
+        hz = int(hz)
+        if hz < SPI_BAUD_MIN:
+            hz = SPI_BAUD_MIN
+        elif hz > SPI_BAUD_MAX:
+            hz = SPI_BAUD_MAX
+        self.spi_baud = hz
+        return self.spi_baud
 
     def chip_id(self):
         if self.mode in (0, 1):
@@ -217,14 +241,23 @@ class PicoForge:
             if cmd == "PING":
                 print("OK " + FIRMWARE)
             elif cmd == "HELP":
-                print("OK cmds: PING INFO MODE<0-3> ID SCAN READ<start><len> "
-                      "WRITE<start><hex> WRITES<start><text> "
+                print("OK cmds: PING INFO MODE<0-3> SPEED[<hz>] ID SCAN "
+                      "READ<start><len> WRITE<start><hex> WRITES<start><text> "
                       "FILL<start><len>[<hexbyte>] UNLOCK ERASE")
             elif cmd == "INFO":
-                print("OK mode=%d %s | 3V3 safe" % (self.mode, MODES[self.mode]))
+                print("OK mode=%d %s | spi=%d Hz | 3V3 safe"
+                      % (self.mode, MODES[self.mode], self.spi_baud))
             elif cmd == "MODE":
                 self.set_mode(int(parts[1]))
                 print("OK mode=%d %s" % (self.mode, MODES[self.mode]))
+            elif cmd == "SPEED":
+                if len(parts) > 1:
+                    self.set_speed(parts[1])
+                    self.status = "spi %dk" % (self.spi_baud // 1000); self.refresh()
+                # Echo the effective (clamped) clock. SPI peripheral may round to
+                # its nearest divider, but MicroPython doesn't expose the achieved
+                # rate, so this is the requested-after-clamp value.
+                print("OK speed=%d Hz (spi)" % self.spi_baud)
             elif cmd == "ID":
                 self.status = "id"; self.refresh()
                 print("OK " + self.chip_id())

@@ -65,14 +65,31 @@ VCC→3V3 (use 5 V + level shifters for writes), ORG→3V3 (x16) or GND (x8).
 
 ## Serial protocol (USB CDC, one command per line)
 ```
-PING                -> OK PicoForge v1.0
+PING                -> OK PicoForge v1.5
 HELP                -> command list
-INFO                -> current mode
+INFO                -> current mode + SPI clock
 MODE <0..3>         -> 0 SPI Flash | 1 SPI EEPROM | 2 I2C EEPROM | 3 Microwire
+SPEED [<hz>]        -> get/set the SPI clock in Hz (e.g. SPEED 1000000)
 ID                  -> JEDEC id (SPI modes)
 READ  <start> <len> -> OK <hex bytes>
 WRITE <start> <hex> -> OK wrote N
 ```
+
+### SPI clock (`SPEED`) — fixing all-`00` reads
+The SPI clock is the SCK frequency the Pico drives the bus at. It is a pure
+throughput knob: SPI has **no minimum**, so slowing down is always safe for a
+read — the only cost is time. The *maximum* is per-chip (the datasheet's
+output-valid time `tV`) and derates with supply voltage and long jumper leads.
+
+If a chip reads back a wall of `0x00`, the Pico is clocking faster than the chip
+can drive its SO/MISO line, so it samples the idle-low line before valid data
+arrives. (A genuinely blank chip reads `0xFF`, never `0x00` — so all-`00` means
+"nobody is driving the line", not "empty".) The fix is to slow down:
+`SPEED 1000000` (1 MHz). Default is 2 MHz; the firmware clamps to 10 kHz…62.5 MHz
+(the RP2040 PL022 ceiling). `SPEED` affects SPI modes (0/1) only — I²C and
+Microwire have their own fixed clocks. The app exposes this as the **SPI clock**
+control in the Read/Write tabs and Settings, with each chip's datasheet-rated
+clock stored in the chip database (`readAlgorithm.maxClockHz`).
 This is the bridge for a future `PicoAdapter` in the Universal Chip Lab app:
 the app opens the Pico's COM port and sends these lines.
 
