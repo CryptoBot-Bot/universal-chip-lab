@@ -1,4 +1,7 @@
 import type {
+  ChipAsset,
+  ChipAssetKind,
+  ChipConnectGuide,
   ChipIdentification,
   ChipMatch,
   ChipProfile,
@@ -124,6 +127,19 @@ export const Api = {
       unwrap<{ imported: number; errors: { id: string; message: string }[] }>(
         api.chips.importLibrary(profiles) as never,
       ),
+    bakeCatalog: () => unwrap<{ path: string; count: number }>(api.chips.bakeCatalog() as never),
+    guide: (input: { chipProfileId: string; generate?: boolean }) =>
+      unwrap<ChipConnectGuide | null>(api.chips.guide(input) as never),
+    scaffold: (input: { name: string; notes?: string }) =>
+      unwrap<ChipProfile>(api.chips.scaffold(input) as never),
+    listAssets: (chipProfileId: string) =>
+      unwrap<ChipAsset[]>(api.chips.listAssets(chipProfileId) as never),
+    addAsset: (input: { chipProfileId: string; fileName: string; base64: string; mediaType: string; kind: ChipAssetKind; caption?: string }) =>
+      unwrap<ChipAsset>(api.chips.addAsset(input) as never),
+    readAsset: (input: { chipProfileId: string; assetId: string }) =>
+      unwrap<{ base64: string; mediaType: string; fileName: string }>(api.chips.readAsset(input) as never),
+    deleteAsset: (input: { chipProfileId: string; assetId: string }) =>
+      unwrap<{ removed: boolean }>(api.chips.deleteAsset(input) as never),
   },
   adapters: {
     list:   () => unwrap<AdapterSummary[]>(api.adapters.list() as never),
@@ -131,6 +147,12 @@ export const Api = {
     test:   (id: string) => unwrap<AdapterStatus>(api.adapters.test(id) as never),
     identify: (id: string, opts?: { simulateChipId?: string; protocol?: string }) =>
       unwrap<IdentifyResult>(api.adapters.identify(id, opts) as never),
+    read: (input: { id: string; chipProfile: ChipProfile; offset?: number; length?: number; tag?: string }) =>
+      unwrap<{ base64: string; durationMs: number }>(api.adapters.read(input) as never),
+    write: (input: { id: string; chipProfile: ChipProfile; offset?: number; base64: string; tag?: string }) =>
+      unwrap<{ bytesWritten: number; durationMs: number }>(api.adapters.write(input) as never),
+    erase: (input: { id: string; chipProfile: ChipProfile }) =>
+      unwrap<{ bytesWritten: number; durationMs: number }>(api.adapters.erase(input) as never),
   },
   jobs: {
     list:       () => unwrap<JobRecord[]>(api.jobs.list() as never),

@@ -148,6 +148,13 @@ export const CHIP_CONFIDENCE_LEVELS: readonly ChipConfidence[] = [
   "clone_proven",
 ];
 
+/** An external reference for a chip — a video, datasheet, article or forum link. */
+export interface ChipReference {
+  label: string;
+  url: string;
+  kind?: "video" | "datasheet" | "article" | "forum" | "other";
+}
+
 export interface ChipProfile {
   chipProfileId: string;
   displayName: string;
@@ -162,6 +169,8 @@ export interface ChipProfile {
   operations: ChipOperations;
   readAlgorithm?: SerialReadAlgorithm;
   warnings: string[];
+  /** Operator/AI-curated external links (videos, datasheets, write-ups). */
+  references?: ChipReference[];
   /**
    * Origin and trust metadata. Optional for backward compatibility — seed
    * profiles without it are treated as built-in `seed` / `bench_verified`

@@ -4,6 +4,11 @@ import { ChipProfile, ChipProfileMap, validateChipProfile } from "./chipProfile.
 import profile24lc256 from "./seedProfiles/24lc256.json";
 import profile25lc256 from "./seedProfiles/25lc256.json";
 import profile93c86 from "./seedProfiles/93c86.json";
+// Bundled "community" catalog — operator/AI chips baked into the build so they
+// travel with every GitHub release and appear on a fresh install (see the
+// "Bake into app catalog" action). Hand-edited or generated; loaded tolerantly
+// so one bad entry can never brick the whole registry.
+import communityCatalog from "./seedProfiles/community.json";
 
 const SEED_PROFILES: ChipProfile[] = [
   profile24lc256 as ChipProfile,
@@ -14,6 +19,18 @@ const SEED_PROFILES: ChipProfile[] = [
 
 for (const profile of SEED_PROFILES) {
   validateChipProfile(profile);
+}
+
+/** Bundled community profiles, validated individually (skip bad ones). */
+export const COMMUNITY_PROFILES: ChipProfile[] = [];
+for (const raw of (communityCatalog as unknown[]) ?? []) {
+  try {
+    validateChipProfile(raw);
+    COMMUNITY_PROFILES.push(raw);
+    SEED_PROFILES.push(raw);
+  } catch {
+    /* skip an invalid bundled profile rather than break startup */
+  }
 }
 
 // Build map; later profiles override earlier ones (so factory-generated

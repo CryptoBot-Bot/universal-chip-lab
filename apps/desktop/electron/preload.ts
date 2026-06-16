@@ -23,6 +23,14 @@ const api = {
     promoteProfile: (input: unknown) => invoke("chips:promoteProfile", input),
     exportLibrary: () => invoke("chips:exportLibrary"),
     importLibrary: (profiles: unknown) => invoke("chips:importLibrary", { profiles }),
+    bakeCatalog: () => invoke("chips:bakeCatalog"),
+    guide: (input: { chipProfileId: string; generate?: boolean }) => invoke("chips:guide", input),
+    scaffold: (input: { name: string; notes?: string }) => invoke("chips:scaffold", input),
+    listAssets: (chipProfileId: string) => invoke("chips:listAssets", { chipProfileId }),
+    addAsset: (input: { chipProfileId: string; fileName: string; base64: string; mediaType: string; kind: string; caption?: string }) =>
+      invoke("chips:addAsset", input),
+    readAsset: (input: { chipProfileId: string; assetId: string }) => invoke("chips:readAsset", input),
+    deleteAsset: (input: { chipProfileId: string; assetId: string }) => invoke("chips:deleteAsset", input),
   },
   adapters: {
     list:   () => invoke("adapters:list"),
@@ -30,6 +38,12 @@ const api = {
     test:   (id: string) => invoke("adapters:test", { id }),
     identify: (id: string, opts?: { simulateChipId?: string; protocol?: string }) =>
       invoke("adapters:identify", { id, ...opts }),
+    read:  (input: { id: string; chipProfile: unknown; offset?: number; length?: number; tag?: string }) =>
+      invoke("adapters:read", input),
+    write: (input: { id: string; chipProfile: unknown; offset?: number; base64: string; tag?: string }) =>
+      invoke("adapters:write", input),
+    erase: (input: { id: string; chipProfile: unknown }) =>
+      invoke("adapters:erase", input),
   },
   jobs: {
     list:       () => invoke("jobs:list"),

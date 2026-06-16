@@ -1,25 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { ChipProfile } from "@ecu/chip-db";
-import { effectiveSpiClockHz, picoModeForChip } from "@ecu/chip-db";
+import { accessGuideFor, picoModeForChip } from "@ecu/chip-db";
 
 import { ClockControl } from "../components/ClockControl";
 import { HexEditor } from "../components/HexEditor";
 import { Topbar } from "../components/Topbar";
 import { Api, type DumpEntry } from "../lib/api";
 import { usePico } from "../lib/pico-connection";
-import {
-  base64ToBytes,
-  dirtyRuns,
-  eraseChip,
-  eraseFlash,
-  isEeprom,
-  readChip,
-  sha256Hex,
-  unlockChip,
-  writeAt,
-  writeChip,
-} from "../lib/picoforge";
+import { base64ToBytes, dirtyRuns, isEeprom, sha256Hex } from "../lib/picoforge";
 
 type Tool = "write" | "erase" | "edit";
 type Phase = "idle" | "writing" | "verifying" | "done";
@@ -34,7 +23,7 @@ function str(v: unknown): string {
 }
 
 export function WriteTab() {
-  const { port, spiClockHz, setSpiClockHz } = usePico();
+  const { port, device, backend, spiClockHz, setSpiClockHz } = usePico();
   const [tool, setTool] = useState<Tool>("write");
   const [dumps, setDumps] = useState<DumpEntry[]>([]);
   const [chips, setChips] = useState<ChipProfile[]>([]);
@@ -82,15 +71,19 @@ export function WriteTab() {
   const chip = useMemo(() => chips.find((c) => c.chipProfileId === chipId) ?? null, [chips, chipId]);
   const modeInfo = chip ? picoModeForChip(chip) : null;
   const mode = modeInfo?.mode ?? null;
-  const isFlash = mode === 0;
-  const eeprom = mode !== null && isEeprom(mode);
-  const clockHz = chip ? effectiveSpiClockHz(chip, spiClockHz ?? undefined) : undefined;
+  // The Simulator reaches every chip and is byte-writable; PicoForge needs a real
+  // serial mode. In sim we treat all parts as byte-writable EEPROM-style (the mock
+  // adapter stores any bytes), so write/erase/edit all work without hardware.
+  const reachable = !!chip && (device === "simulator" || mode !== null);
+  const isFlash = device === "simulator" ? false : mode === 0;
+  const eeprom = device === "simulator" ? true : mode !== null && isEeprom(mode);
 
   const supportedChips = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = chips.filter((c) => picoModeForChip(c) !== null);
-    if (!q) return list.slice(0, 30);
-    return list.filter((c) => [c.displayName, c.family].join(" ").toLowerCase().includes(q)).slice(0, 30);
+    if (!q) return chips.slice(0, 40);
+    return chips
+      .filter((c) => [c.displayName, c.family, c.manufacturer ?? "", c.package, c.protocol].join(" ").toLowerCase().includes(q))
+      .slice(0, 40);
   }, [chips, query]);
 
   function pickChip(id: string) {
@@ -111,10 +104,10 @@ export function WriteTab() {
   const verified = dump?.meta.verified === true;
   const armed = !!chip && confirmText.trim() === chip.displayName;
   const busy = phase === "writing" || phase === "verifying";
-  const canWrite = !!port && !!dump && !!chip && mode !== null && sizeOk && armed && !busy;
+  const canWrite = !!backend && !!dump && !!chip && reachable && sizeOk && armed && !busy;
 
   async function doWrite() {
-    if (!canWrite || !dump || !chip || mode === null || !port) return;
+    if (!canWrite || !dump || !chip || !backend) return;
     setError(null);
     setResult(null);
     try {
@@ -125,14 +118,14 @@ export function WriteTab() {
       const srcSha = await sha256Hex(src);
       if (isFlash && eraseFirst) {
         setProgress("erasing flash (tens of seconds)…");
-        await eraseFlash(port, clockHz);
+        await backend.eraseChip(chip, (d, t) => setProgress(`erasing — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       } else if (eeprom) {
         setProgress("unlocking (clearing write-protect)…");
-        await unlockChip(port, mode, clockHz);
+        await backend.unlockChip(chip);
       }
-      await writeChip(port, mode, src, (d, t) => setProgress(`writing — ${d.toLocaleString()}/${t.toLocaleString()} B`), isFlash, clockHz);
+      await backend.writeChip(chip, src, (d, t) => setProgress(`writing — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       setPhase("verifying");
-      const back = await readChip(port, mode, dump.sizeBytes, (d, t) => setProgress(`reading back — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
+      const back = await backend.readChip(chip, (d, t) => setProgress(`reading back — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       const backSha = await sha256Hex(back);
       setResult({ ok: backSha === srcSha, srcSha, backSha });
       setPhase("done");
@@ -147,18 +140,18 @@ export function WriteTab() {
 
   // ---------- erase ----------
   const eraseArmed = !!chip && eraseConfirm.trim() === "ERASE";
-  const canErase = !!port && !!chip && mode !== null && eraseArmed && !eraseBusy;
+  const canErase = !!backend && !!chip && reachable && eraseArmed && !eraseBusy;
 
   async function doErase() {
-    if (!canErase || !chip || mode === null || !port) return;
+    if (!canErase || !chip || !backend) return;
     setEraseError(null);
     setEraseResult(null);
     setEraseBusy(true);
     try {
       setEraseProgress(isFlash ? "erasing flash (tens of seconds)…" : "erasing (writing 0xFF)…");
-      await eraseChip(port, mode, chip.sizeBytes, (d, t) => setEraseProgress(`erasing — ${d.toLocaleString()}/${t.toLocaleString()} B`), undefined, clockHz);
+      await backend.eraseChip(chip, (d, t) => setEraseProgress(`erasing — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       setEraseProgress("verifying blank…");
-      const back = await readChip(port, mode, chip.sizeBytes, (d, t) => setEraseProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
+      const back = await backend.readChip(chip, (d, t) => setEraseProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       let nonBlank = 0;
       for (let i = 0; i < back.length; i++) if (back[i] !== 0xff) nonBlank++;
       setEraseResult({ ok: nonBlank === 0, nonBlank });
@@ -173,13 +166,13 @@ export function WriteTab() {
 
   // ---------- surgical edit ----------
   async function readForEdit() {
-    if (!port || !chip || mode === null) return;
+    if (!backend || !chip || !reachable) return;
     setEditError(null);
     setEditResult(null);
     setEditBusy(true);
     try {
       setEditProgress("reading chip…");
-      const back = await readChip(port, mode, chip.sizeBytes, (d, t) => setEditProgress(`reading — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
+      const back = await backend.readChip(chip, (d, t) => setEditProgress(`reading — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       setOrig(back.slice());
       setBuf(back.slice());
       setDirty(new Map());
@@ -239,10 +232,10 @@ export function WriteTab() {
   }
 
   const editArmed = editConfirm.trim() === "EDIT";
-  const canApply = !!port && !!buf && mode !== null && eeprom && dirty.size > 0 && editArmed && !editBusy;
+  const canApply = !!backend && !!buf && !!chip && reachable && eeprom && dirty.size > 0 && editArmed && !editBusy;
 
   async function applyEdits() {
-    if (!canApply || !port || !buf || mode === null) return;
+    if (!canApply || !backend || !buf || !chip) return;
     setEditError(null);
     setEditResult(null);
     setEditBusy(true);
@@ -250,15 +243,15 @@ export function WriteTab() {
       const runs = dirtyRuns(dirty.keys());
       if (mode === 1) {
         setEditProgress("unlocking (clearing write-protect)…");
-        await unlockChip(port, mode, clockHz);
+        await backend.unlockChip(chip);
       }
       let done = 0;
       for (const [s, e] of runs) {
         setEditProgress(`writing ${runs.length} run(s) — ${++done}/${runs.length}`);
-        await writeAt(port, mode, s, buf.subarray(s, e), undefined, clockHz);
+        await backend.writeAt(chip, s, buf.subarray(s, e));
       }
       setEditProgress("reading back to verify…");
-      const back = await readChip(port, mode, buf.length, (d, t) => setEditProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
+      const back = await backend.readChip(chip, (d, t) => setEditProgress(`verifying — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       let bad = 0;
       for (const off of dirty.keys()) if (back[off] !== buf[off]) bad++;
       setEditResult({ ok: bad === 0, bytes: dirty.size, runs: runs.length });
@@ -275,23 +268,27 @@ export function WriteTab() {
     }
   }
 
-  if (!port) {
+  if (!port || !backend) {
     return (
       <>
         <Topbar title="Write" crumb="not connected" />
         <div className="content">
           <div className="card">
-            <h3>Connect PicoForge to begin</h3>
-            <p className="tiny dim mt-8">Use <strong>Connect device</strong> in the sidebar.</p>
+            <h3>Connect a device to begin</h3>
+            <p className="tiny dim mt-8">
+              Pick <strong>PicoForge</strong> or <strong>Simulator</strong> and hit <strong>Connect device</strong> in the sidebar.
+            </p>
           </div>
         </div>
       </>
     );
   }
 
+  const deviceName = device === "simulator" ? "Simulator" : "PicoForge";
+
   return (
     <>
-      <Topbar title="Write" crumb={`PicoForge · ${port}`} />
+      <Topbar title="Write" crumb={`${deviceName} · ${port}`} />
       <div className="content">
         <div className="legal-banner" style={{ borderColor: "var(--warn)" }}>
           ⚠ These tools modify the chip. EEPROM writes auto-clear write-protect first, then read back and
@@ -306,31 +303,47 @@ export function WriteTab() {
 
         {/* shared chip picker */}
         <div className="card">
-          <h3>Target chip</h3>
-          <input type="text" placeholder="Search chips… e.g. 24C32, S-25A320A, 95080" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <h3>Target chip <span className="tiny dim">— all {chips.length} in your database</span></h3>
+          <input type="text" placeholder="Search all chips… e.g. 24C32, S-25A320A, 95080, SPC5668, 29F040" value={query} onChange={(e) => setQuery(e.target.value)} />
+          {device !== "simulator" && (
+            <p className="tiny dim mt-8">
+              On <strong>PicoForge</strong>, only serial chips (📎) can be written. Switch to the <strong>Simulator</strong> to work any chip.
+            </p>
+          )}
           <div className="grid cols-2 mt-8" style={{ maxHeight: "22vh", overflowY: "auto" }}>
             {supportedChips.map((c) => {
-              const m = picoModeForChip(c);
+              const g = accessGuideFor(c);
+              const reach = device === "simulator" || picoModeForChip(c) !== null;
               return (
                 <button
                   key={c.chipProfileId}
                   className={chipId === c.chipProfileId ? "primary" : ""}
-                  style={{ textAlign: "left", padding: 10 }}
+                  style={{ textAlign: "left", padding: 10, opacity: reach ? 1 : 0.55 }}
                   onClick={() => pickChip(c.chipProfileId)}
                 >
                   <div style={{ fontWeight: 600 }}>{c.displayName}</div>
-                  <div className="tiny dim">MODE {m?.mode} · {m?.label} · {c.sizeBytes.toLocaleString()} B</div>
+                  <div className="tiny dim">
+                    {g.icon} {g.label} · {c.sizeBytes.toLocaleString()} B
+                    {!reach && <span style={{ color: "var(--warn)" }}> · needs Simulator</span>}
+                  </div>
                 </button>
               );
             })}
           </div>
-          {chip && modeInfo && (
+          {chip && (
             <>
               <p className="tiny dim mt-8">
-                Selected <strong>{chip.displayName}</strong> · {modeInfo.label} ·{" "}
-                {isFlash ? "flash (erase-before-write)" : "EEPROM (byte-writable)"} · {fmtBytes(chip.sizeBytes)}
+                Selected <strong>{chip.displayName}</strong> · {modeInfo?.label ?? accessGuideFor(chip).label} ·{" "}
+                {device === "simulator" ? "simulated (byte-writable)" : isFlash ? "flash (erase-before-write)" : "EEPROM (byte-writable)"} · {fmtBytes(chip.sizeBytes)}
               </p>
-              <ClockControl profile={chip} mode={modeInfo.mode} value={spiClockHz} onChange={setSpiClockHz} disabled={busy || eraseBusy || editBusy} />
+              {!reachable && (
+                <p className="tiny mt-8" style={{ color: "var(--warn)" }}>
+                  PicoForge can't reach this chip ({accessGuideFor(chip).label}). Switch to the <strong>Simulator</strong> to work it now, or use a T48 / CH347 (coming soon).
+                </p>
+              )}
+              {device !== "simulator" && modeInfo && (
+                <ClockControl profile={chip} mode={modeInfo.mode} value={spiClockHz} onChange={setSpiClockHz} disabled={busy || eraseBusy || editBusy} />
+              )}
             </>
           )}
         </div>
@@ -364,7 +377,7 @@ export function WriteTab() {
               )}
             </div>
 
-            {dump && chip && modeInfo && (
+            {dump && chip && reachable && (
               <div className="card mt-16">
                 <h3>Write gate</h3>
                 <div className="tiny mt-8" style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -374,7 +387,7 @@ export function WriteTab() {
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <span style={{ width: 14, flex: "0 0 14px" }}>✓</span>
-                    <span>Target — {modeInfo.label}{isFlash ? " (flash — erased to 0xFF before writing)" : " (EEPROM — auto-unlock + byte write)"}</span>
+                    <span>Target — {modeInfo?.label ?? accessGuideFor(chip).label}{device === "simulator" ? " (simulated byte write)" : isFlash ? " (flash — erased to 0xFF before writing)" : " (EEPROM — auto-unlock + byte write)"}</span>
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <span style={{ width: 14, flex: "0 0 14px" }}>{verified ? "✓" : "⚠"}</span>
@@ -429,8 +442,10 @@ export function WriteTab() {
         {tool === "erase" && (
           <div className="card mt-16">
             <h3>Erase chip</h3>
-            {!chip || mode === null ? (
+            {!chip ? (
               <p className="tiny dim mt-8">Pick a target chip above.</p>
+            ) : !reachable ? (
+              <p className="tiny mt-8" style={{ color: "var(--warn)" }}>PicoForge can't reach {chip.displayName} ({accessGuideFor(chip).label}). Switch to the <strong>Simulator</strong> to erase it now.</p>
             ) : (
               <>
                 <p className="tiny dim mt-8">
@@ -466,8 +481,10 @@ export function WriteTab() {
         {tool === "edit" && (
           <div className="card mt-16">
             <h3>Edit bytes</h3>
-            {!chip || mode === null ? (
+            {!chip ? (
               <p className="tiny dim mt-8">Pick a target chip above.</p>
+            ) : !reachable ? (
+              <p className="tiny mt-8" style={{ color: "var(--warn)" }}>PicoForge can't reach {chip.displayName} ({accessGuideFor(chip).label}). Switch to the <strong>Simulator</strong> to edit it now.</p>
             ) : isFlash ? (
               <p className="tiny mt-8" style={{ color: "var(--warn)" }}>
                 Surgical byte editing is EEPROM-only. Flash can't flip individual bits without erasing the whole

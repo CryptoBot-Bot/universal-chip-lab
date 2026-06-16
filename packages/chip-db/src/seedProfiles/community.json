@@ -1,0 +1,140 @@
+[
+  {
+    "chipProfileId": "resolved_stmicroelectronics_spc5668eavmg",
+    "displayName": "SPC5668EAVMG",
+    "manufacturer": "STMicroelectronics",
+    "family": "mcu_internal_flash",
+    "memoryType": "mcu_flash",
+    "protocol": "jtag",
+    "package": "256-MAPBGA",
+    "sizeBytes": 2097152,
+    "voltage": {
+      "min": 3,
+      "typical": 3.3,
+      "max": 5.5
+    },
+    "pinout": [
+      {
+        "pin": 1,
+        "name": "VDD_HV (I/O Power)",
+        "role": "power",
+        "note": "3.0-5.5V I/O supply segment (representative, not actual ball)"
+      },
+      {
+        "pin": 2,
+        "name": "VDD_LV (Core Power)",
+        "role": "power",
+        "note": "~1.2V core supply (internal regulator output decoupling)"
+      },
+      {
+        "pin": 3,
+        "name": "VSS",
+        "role": "ground",
+        "note": "Common ground (multiple balls)"
+      },
+      {
+        "pin": 4,
+        "name": "VDD_BV (Regulator)",
+        "role": "power",
+        "note": "Voltage regulator supply"
+      },
+      {
+        "pin": 5,
+        "name": "RESET",
+        "role": "reset",
+        "note": "Bidirectional active-low reset"
+      },
+      {
+        "pin": 6,
+        "name": "TCK",
+        "role": "clock",
+        "note": "JTAG/Nexus test clock"
+      },
+      {
+        "pin": 7,
+        "name": "TMS",
+        "role": "control",
+        "note": "JTAG test mode select"
+      },
+      {
+        "pin": 8,
+        "name": "TDI",
+        "role": "di",
+        "note": "JTAG test data in"
+      },
+      {
+        "pin": 9,
+        "name": "TDO",
+        "role": "do",
+        "note": "JTAG test data out"
+      },
+      {
+        "pin": 10,
+        "name": "JCOMP/TRST",
+        "role": "control",
+        "note": "JTAG compliance / TAP reset"
+      },
+      {
+        "pin": 11,
+        "name": "EXTAL",
+        "role": "clock",
+        "note": "Crystal oscillator input"
+      },
+      {
+        "pin": 12,
+        "name": "XTAL",
+        "role": "clock",
+        "note": "Crystal oscillator output"
+      },
+      {
+        "pin": 13,
+        "name": "VDD_OSC",
+        "role": "power",
+        "note": "Oscillator supply"
+      },
+      {
+        "pin": 14,
+        "name": "VDDA / VRC",
+        "role": "power",
+        "note": "ADC / reference supply"
+      },
+      {
+        "pin": 15,
+        "name": "VSSA",
+        "role": "ground",
+        "note": "Analog ground"
+      },
+      {
+        "pin": 16,
+        "name": "MDO/MSEO (Nexus)",
+        "role": "data",
+        "note": "Nexus trace message data/control"
+      }
+    ],
+    "operations": {
+      "read": true,
+      "write": true,
+      "erase": true,
+      "verify": true
+    },
+    "warnings": [
+      "AI-scaffolded profile — pinout and parameters are UNVERIFIED. Confirm against the datasheet and a real read before any write.",
+      "Always read twice and compare before writing.",
+      "This lab is 3.3 V-safe: device I/O can operate at 3.3 V, but verify segment supply configuration before connecting.",
+      "Pinout is a representative subset of key signals only — the 256-ball MAPBGA full ball map is NOT enumerated here; consult the official datasheet for exact ball assignments.",
+      "High pin/ball count automotive MCU: programming requires JTAG/Nexus debug tooling, not a generic memory programmer.",
+      "Capacity/package details are best-effort and should be confirmed against the SPC5668E datasheet."
+    ],
+    "provenance": {
+      "source": "ai_resolved",
+      "confidence": "ai_suggested",
+      "createdAt": "2026-06-16T08:46:53.965Z",
+      "notes": "SPC5668EAVMG is an STMicroelectronics SPC56 (Power Architecture e200z6/e200z0 dual-core) automotive MCU, ST's equivalent of the Freescale/NXP MPC5668 'Fado' family; the 'E' denotes an Ethernet/gateway variant. It is programmed via JTAG/Nexus, so I mapped family to mcu_internal_flash and protocol to jtag. I estimated ~2 MB on-chip code flash and a 3.0–5.5 V multi-segment I/O supply with an internal ~1.2 V core regulator, which is typical for this family. Package suffix 'MG' most likely corresponds to a 256-ball MAPBGA, but I am not fully certain of exact flash size, RAM, and the precise ball map, so confidence is low and the pinout lists only representative key signals (power, ground, reset, oscillator, JTAG/Nexus) rather than actual ball coordinates. Verify all values against the official SPC5668E datasheet.",
+      "evidence": {
+        "markings": "SPC5668EAVMG",
+        "model": "claude-opus-4-8"
+      },
+      "updatedAt": "2026-06-16T08:47:03.314Z"
+    }
+  }
+]

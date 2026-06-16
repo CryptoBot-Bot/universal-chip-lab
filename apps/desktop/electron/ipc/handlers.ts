@@ -16,8 +16,22 @@ import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump
 import { createModuleRegistry } from "@ecu/vehicle-db";
 import { JobFileManager, WorkspaceManager } from "@ecu/workspace";
 
+import {
+  addChipAsset,
+  deleteChipAsset,
+  listChipAssets,
+  readChipAsset,
+  readChipGuide,
+  writeChipGuide,
+} from "../chipAssets";
 import { deleteDump, exportDump, listDumps, readDumpSlice, type DumpFormat } from "../dumps";
-import { resolveChip, testApiKey, type ResolveChipInput } from "../resolver/chipResolver";
+import {
+  generateChipGuide,
+  resolveChip,
+  scaffoldChipFromName,
+  testApiKey,
+  type ResolveChipInput,
+} from "../resolver/chipResolver";
 import { clearApiKey, getKeyStatus, setApiKey } from "../settings";
 import { findPicoPort } from "../serial/picoSerial";
 import { picoSessionCommand, stopPicoSession } from "../serial/picoSession";
@@ -39,6 +53,7 @@ export async function registerIpcHandlers(
   const workspace = new WorkspaceManager(opts.projectRoot);
   const layout = await workspace.init();
   const jobFiles = new JobFileManager(layout);
+  const chipAssetsDir = path.join(layout.root, "chip-assets");
 
   // Hydrate operator/AI-resolved profiles from disk so they appear in the
   // chip list and survive restarts. Built-in seed profiles are always present.
@@ -153,6 +168,21 @@ export async function registerIpcHandlers(
     const { profiles } = await loadStoredProfiles(layout.chipDbDir);
     return profiles;
   });
+  // Bake the operator's custom/AI chips into the repo's bundled catalog so they
+  // ship with the next GitHub release and appear on a fresh install anywhere.
+  // Only works running from source (a packaged build can't edit its own catalog).
+  register("chips:bakeCatalog", async () => {
+    const { profiles } = await loadStoredProfiles(layout.chipDbDir);
+    const target = path.join(opts.projectRoot, "packages", "chip-db", "src", "seedProfiles", "community.json");
+    try {
+      await writeFile(target, `${JSON.stringify(profiles, null, 2)}\n`, "utf8");
+    } catch (err) {
+      throw new Error(
+        `Could not write the bundled catalog (${(err as Error).message}). This works when running from source (dev); a packaged build can't edit its own catalog.`,
+      );
+    }
+    return { path: target, count: profiles.length };
+  });
   register("chips:importLibrary", async (_e, p: { profiles: ChipProfile[] }) => {
     const now = new Date().toISOString();
     let imported = 0;
@@ -228,6 +258,41 @@ export async function registerIpcHandlers(
   register("chips:families", () => chipRegistry.families());
   register("chips:byFamily", (_e, p: { family: any }) => chipRegistry.byFamily(p.family));
 
+  // ---- per-chip AI connection guide (cached on disk) + instruction images
+  register("chips:guide", async (_e, p: { chipProfileId: string; generate?: boolean }) => {
+    const profile = chipRegistry.get(p.chipProfileId);
+    if (!profile) throw new Error(`Unknown chip profile: ${p.chipProfileId}`);
+    const cached = await readChipGuide(chipAssetsDir, p.chipProfileId);
+    if (cached && !p.generate) return cached;
+    if (!p.generate) return null; // load-only: don't spend tokens until asked
+    const guide = await generateChipGuide(profile);
+    await writeChipGuide(chipAssetsDir, p.chipProfileId, guide);
+    return guide;
+  });
+  register("chips:scaffold", (_e, p: { name: string; notes?: string }) =>
+    scaffoldChipFromName(p),
+  );
+  register("chips:listAssets", (_e, p: { chipProfileId: string }) =>
+    listChipAssets(chipAssetsDir, p.chipProfileId),
+  );
+  register(
+    "chips:addAsset",
+    (_e, p: { chipProfileId: string; fileName: string; base64: string; mediaType: string; kind: any; caption?: string }) =>
+      addChipAsset(chipAssetsDir, p.chipProfileId, {
+        fileName: p.fileName,
+        base64: p.base64,
+        mediaType: p.mediaType,
+        kind: p.kind,
+        ...(p.caption ? { caption: p.caption } : {}),
+      }),
+  );
+  register("chips:readAsset", (_e, p: { chipProfileId: string; assetId: string }) =>
+    readChipAsset(chipAssetsDir, p.chipProfileId, p.assetId),
+  );
+  register("chips:deleteAsset", (_e, p: { chipProfileId: string; assetId: string }) =>
+    deleteChipAsset(chipAssetsDir, p.chipProfileId, p.assetId),
+  );
+
   // ---- adapters
   register("adapters:list", () =>
     adapterRegistry.list().map((a) => ({
@@ -272,6 +337,55 @@ export async function registerIpcHandlers(
       });
       const matches = matchSignature(result.signature, chipRegistry.list());
       return { signature: result.signature, matches, durationMs: result.durationMs };
+    },
+  );
+
+  // Generic adapter read/write/erase — the unified backend for non-PicoForge
+  // devices (Simulator now; CH347 / T48 later). The renderer passes the full
+  // ChipProfile so the adapter has size/protocol without a registry lookup, and
+  // bytes cross IPC as base64. Adapters are auto-connected on first use.
+  register(
+    "adapters:read",
+    async (_e, p: { id: string; chipProfile: ChipProfile; offset?: number; length?: number; tag?: string }) => {
+      const a = adapterRegistry.get(p.id);
+      if (!a) throw new Error(`Unknown adapter: ${p.id}`);
+      await a.connect();
+      const result = await a.readMemory({
+        chipProfile: p.chipProfile,
+        ...(p.offset !== undefined ? { offset: p.offset } : {}),
+        ...(p.length !== undefined ? { length: p.length } : {}),
+        tag: p.tag ?? "read",
+      });
+      return { base64: result.data.toString("base64"), durationMs: result.durationMs };
+    },
+  );
+  register(
+    "adapters:write",
+    async (_e, p: { id: string; chipProfile: ChipProfile; offset?: number; base64: string; tag?: string }) => {
+      const a = adapterRegistry.get(p.id);
+      if (!a) throw new Error(`Unknown adapter: ${p.id}`);
+      if (!a.writeMemory) throw new Error(`Adapter "${a.displayName}" cannot write.`);
+      await a.connect();
+      const result = await a.writeMemory({
+        chipProfile: p.chipProfile,
+        ...(p.offset !== undefined ? { offset: p.offset } : {}),
+        data: Buffer.from(p.base64, "base64"),
+        tag: p.tag ?? "write",
+      });
+      return { bytesWritten: result.bytesWritten, durationMs: result.durationMs };
+    },
+  );
+  register(
+    "adapters:erase",
+    async (_e, p: { id: string; chipProfile: ChipProfile }) => {
+      const a = adapterRegistry.get(p.id);
+      if (!a) throw new Error(`Unknown adapter: ${p.id}`);
+      if (!a.writeMemory) throw new Error(`Adapter "${a.displayName}" cannot erase.`);
+      await a.connect();
+      // Erase = fill the whole array with 0xFF (the blank state for these parts).
+      const blank = Buffer.alloc(p.chipProfile.sizeBytes, 0xff);
+      const result = await a.writeMemory({ chipProfile: p.chipProfile, data: blank, tag: "erase" });
+      return { bytesWritten: result.bytesWritten, durationMs: result.durationMs };
     },
   );
 

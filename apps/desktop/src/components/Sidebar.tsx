@@ -19,10 +19,12 @@ const DOT: Record<string, string> = {
 };
 
 export function Sidebar() {
-  const { port, status, error, connect, disconnect } = usePico();
+  const { device, setDevice, port, status, error, connect, disconnect } = usePico();
+  const deviceName = device === "simulator" ? "Simulator" : "PicoForge";
+  const connected = status === "connected";
 
   const label =
-    status === "connected" ? `PicoForge · ${port}`
+    connected ? `${deviceName} · ${port}`
     : status === "connecting" ? "Connecting…"
     : status === "error" ? "Connection failed"
     : "Not connected";
@@ -46,6 +48,24 @@ export function Sidebar() {
         ))}
       </nav>
       <div className="sidebar-footer">
+        <div className="seg tiny" style={{ marginBottom: 6 }}>
+          <button
+            className={device === "picoforge" ? "active" : ""}
+            onClick={() => setDevice("picoforge")}
+            disabled={connected || status === "connecting"}
+            title="Physical PicoForge over USB"
+          >
+            PicoForge
+          </button>
+          <button
+            className={device === "simulator" ? "active" : ""}
+            onClick={() => setDevice("simulator")}
+            disabled={connected || status === "connecting"}
+            title="Software simulator — no hardware needed"
+          >
+            Simulator
+          </button>
+        </div>
         <div className="tiny" style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: DOT[status], display: "inline-block" }} />
           {label}

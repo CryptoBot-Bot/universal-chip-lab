@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChipConfidence, ChipProfile, ChipTool } from "@ecu/chip-db";
+import type { AccessType, ChipConfidence, ChipProfile } from "@ecu/chip-db";
 import {
-  TOOLS,
+  ACCESS_TYPES,
+  accessTypeForChip,
   effectiveProvenance,
   primaryToolForChip,
-  toolsForChip,
+  TOOLS,
 } from "@ecu/chip-db";
 
+import { AccessGuideCard, ChipDetail } from "../components/ChipDetail";
 import { Topbar } from "../components/Topbar";
 import { Api } from "../lib/api";
 
@@ -17,7 +19,6 @@ const CONFIDENCE_TONE: Record<ChipConfidence, string> = {
   bench_verified: "ok",
   clone_proven: "ok",
 };
-
 const CONFIDENCE_LABEL: Record<ChipConfidence, string> = {
   unverified: "unverified",
   ai_suggested: "AI-suggested",
@@ -25,7 +26,8 @@ const CONFIDENCE_LABEL: Record<ChipConfidence, string> = {
   clone_proven: "clone-proven",
 };
 
-type ToolFilter = "all" | ChipTool;
+type AccessFilter = "all" | AccessType;
+const TOOL_LABEL: Record<string, string> = Object.fromEntries(TOOLS.map((t) => [t.id, t.label]));
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -36,9 +38,18 @@ function humanSize(bytes: number): string {
 export function ChipDatabase() {
   const [chips, setChips] = useState<ChipProfile[]>([]);
   const [query, setQuery] = useState("");
-  const [toolFilter, setToolFilter] = useState<ToolFilter>("all");
+  const [accessFilter, setAccessFilter] = useState<AccessFilter>("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [showGuide, setShowGuide] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
+
+  // AI scaffolder ("type a part number → get a chip")
+  const [addName, setAddName] = useState("");
+  const [addNotes, setAddNotes] = useState("");
+  const [scaffolding, setScaffolding] = useState(false);
+  const [draft, setDraft] = useState<ChipProfile | null>(null);
+  const [addErr, setAddErr] = useState<string | null>(null);
 
   function refresh() {
     Api.chips.list().then(setChips).catch(() => undefined);
@@ -48,32 +59,34 @@ export function ChipDatabase() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return chips.filter((c) => {
-      if (toolFilter !== "all" && primaryToolForChip(c) !== toolFilter) return false;
+      if (accessFilter !== "all" && accessTypeForChip(c) !== accessFilter) return false;
       if (!q) return true;
       return [c.chipProfileId, c.displayName, c.manufacturer ?? "", c.family, c.protocol, c.package]
         .join(" ")
         .toLowerCase()
         .includes(q);
     });
-  }, [chips, query, toolFilter]);
+  }, [chips, query, accessFilter]);
 
-  // Group the filtered chips under their primary tool, in TOOLS order.
-  const groups = useMemo(() => {
-    return TOOLS.map((tool) => ({
-      tool,
-      chips: filtered.filter((c) => primaryToolForChip(c) === tool.id),
-    })).filter((g) => g.chips.length > 0);
-  }, [filtered]);
+  const groups = useMemo(
+    () =>
+      ACCESS_TYPES.map((access) => ({
+        access,
+        chips: filtered.filter((c) => accessTypeForChip(c) === access.id),
+      })).filter((g) => g.chips.length > 0),
+    [filtered],
+  );
 
-  const customCount = chips.filter((c) => effectiveProvenance(c).source !== "seed").length;
-  const toolCounts = useMemo(() => {
+  const accessCounts = useMemo(() => {
     const m: Record<string, number> = {};
     for (const c of chips) {
-      const t = primaryToolForChip(c);
-      m[t] = (m[t] ?? 0) + 1;
+      const a = accessTypeForChip(c);
+      m[a] = (m[a] ?? 0) + 1;
     }
     return m;
   }, [chips]);
+
+  const customCount = chips.filter((c) => effectiveProvenance(c).source !== "seed").length;
 
   async function exportLibrary() {
     try {
@@ -95,6 +108,18 @@ export function ChipDatabase() {
     }
   }
 
+  async function bakeCatalog() {
+    if (!window.confirm("Bake your custom & AI chips into the app's bundled catalog?\n\nThey'll ship with the next release and appear on every fresh install. (Commit + publish a release afterwards.)")) {
+      return;
+    }
+    try {
+      const res = await Api.chips.bakeCatalog();
+      setMessage(`Baked ${res.count} chip(s) into the bundled catalog. Commit the change and publish a release so every install gets them.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function importLibrary(file: File) {
     try {
       const parsed = JSON.parse(await file.text());
@@ -108,10 +133,39 @@ export function ChipDatabase() {
     }
   }
 
-  async function remove(c: ChipProfile) {
-    if (!window.confirm(`Delete "${c.displayName}" from your library? This cannot be undone.`)) {
-      return;
+  async function scaffold() {
+    if (!addName.trim() || scaffolding) return;
+    setScaffolding(true);
+    setAddErr(null);
+    setDraft(null);
+    try {
+      setDraft(await Api.chips.scaffold({ name: addName.trim(), ...(addNotes.trim() ? { notes: addNotes.trim() } : {}) }));
+    } catch (err) {
+      setAddErr((err as Error).message);
+    } finally {
+      setScaffolding(false);
     }
+  }
+
+  async function saveDraft() {
+    if (!draft) return;
+    try {
+      const saved = await Api.chips.saveProfile(draft);
+      setDraft(null);
+      setAddName("");
+      setAddNotes("");
+      setChips(await Api.chips.list());
+      setAccessFilter("all");
+      setQuery("");
+      setExpandedId(saved.chipProfileId);
+      setMessage(`Added ${saved.displayName} — AI-scaffolded (unverified). Expand it below to simulate.`);
+    } catch (err) {
+      setAddErr((err as Error).message);
+    }
+  }
+
+  async function remove(c: ChipProfile) {
+    if (!window.confirm(`Delete "${c.displayName}" from your library? This cannot be undone.`)) return;
     try {
       await Api.chips.deleteProfile(c.chipProfileId);
       refresh();
@@ -128,6 +182,8 @@ export function ChipDatabase() {
         crumb={`${chips.length} profiles · ${customCount} custom`}
         actions={
           <div className="row gap-8">
+            <button onClick={() => setShowGuide((s) => !s)}>{showGuide ? "Hide" : "📖 Access types"}</button>
+            <button onClick={bakeCatalog} title="Ship your custom chips with the app's releases">💾 Bake into app catalog</button>
             <button onClick={exportLibrary}>Export library</button>
             <button onClick={() => importInput.current?.click()}>Import…</button>
             <input
@@ -135,16 +191,76 @@ export function ChipDatabase() {
               type="file"
               accept="application/json,.json"
               style={{ display: "none" }}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) importLibrary(f);
-                e.target.value = "";
-              }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) importLibrary(f); e.target.value = ""; }}
             />
           </div>
         }
       />
       <div className="content">
+        {showGuide && (
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Access types — how you reach each chip</h3>
+            <div className="grid cols-2 mt-8" style={{ gap: 12, alignItems: "start" }}>
+              {ACCESS_TYPES.map((a) => <AccessGuideCard key={a.id} guide={a} />)}
+            </div>
+          </div>
+        )}
+
+        {/* AI scaffolder — type a part number, AI builds the full profile. */}
+        <div className="card" style={{ borderColor: "var(--accent)" }}>
+          <h3 style={{ marginTop: 0 }}>✨ Add a chip with AI <span className="tiny dim">— type a part number, get a full profile</span></h3>
+          <p className="tiny dim mt-8">
+            Enter any processor or memory part number. A strong AI pipeline scaffolds the family, package,
+            capacity, voltage and a real <strong>pinout</strong> from datasheet knowledge — then you can save it
+            and <strong>simulate it instantly</strong>, no hardware needed. Saved as <em>AI-suggested</em> until
+            you verify it on real silicon.
+          </p>
+          <div className="row gap-8 mt-8" style={{ flexWrap: "wrap" }}>
+            <input
+              type="text"
+              placeholder="e.g. M95128-W, SPC560B, MX25L6406E, TC1767, 24LC512"
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") scaffold(); }}
+              style={{ flex: 2, minWidth: 220 }}
+            />
+            <input
+              type="text"
+              placeholder="notes / context (optional)"
+              value={addNotes}
+              onChange={(e) => setAddNotes(e.target.value)}
+              style={{ flex: 1, minWidth: 160 }}
+            />
+            <button className="primary" onClick={scaffold} disabled={scaffolding || !addName.trim()}>
+              {scaffolding ? "Scaffolding…" : "Scaffold with AI"}
+            </button>
+          </div>
+          {addErr && <p className="tiny mt-8" style={{ color: "var(--danger)" }}>{addErr}</p>}
+
+          {draft && (
+            <div className="card compact mt-12" style={{ borderColor: "var(--warn)" }}>
+              <div className="row spread" style={{ alignItems: "baseline" }}>
+                <div>
+                  <strong>{draft.displayName}</strong>{" "}
+                  <span className="badge tiny warn">AI-suggested</span>
+                </div>
+                <div className="row gap-8">
+                  <button className="tiny primary" onClick={saveDraft}>Save to database</button>
+                  <button className="tiny ghost" onClick={() => setDraft(null)}>Discard</button>
+                </div>
+              </div>
+              <div className="tiny dim mt-8">
+                {draft.manufacturer ? `${draft.manufacturer} · ` : ""}{draft.family} · {draft.protocol.toUpperCase()} · {draft.package} ·{" "}
+                {humanSize(draft.sizeBytes)} · {draft.voltage.min}–{draft.voltage.max} V · {draft.pinout.length} pins
+              </div>
+              {draft.provenance?.notes && <p className="tiny dim mt-8">{draft.provenance.notes}</p>}
+              <p className="tiny mt-8" style={{ color: "var(--warn)" }}>
+                Review before trusting — AI can get pinouts wrong. Save, then verify against the datasheet / a real read.
+              </p>
+            </div>
+          )}
+        </div>
+
         <div className="card">
           <label htmlFor="chip-search">Search</label>
           <input
@@ -154,49 +270,45 @@ export function ChipDatabase() {
             onChange={(e) => setQuery(e.target.value)}
           />
 
-          {/* Tool filter — the database is organised by the tool that reads/writes each chip. */}
+          {/* Access-type filter — the database is organised by HOW you reach a chip. */}
           <div className="row gap-8 mt-8" style={{ flexWrap: "wrap" }}>
-            <button
-              className={`tiny ${toolFilter === "all" ? "" : "ghost"}`}
-              onClick={() => setToolFilter("all")}
-            >
-              All tools ({chips.length})
+            <button className={`tiny ${accessFilter === "all" ? "" : "ghost"}`} onClick={() => setAccessFilter("all")}>
+              All ({chips.length})
             </button>
-            {TOOLS.map((t) => (
+            {ACCESS_TYPES.map((a) => (
               <button
-                key={t.id}
-                className={`tiny ${toolFilter === t.id ? "" : "ghost"}`}
-                onClick={() => setToolFilter(t.id)}
-                title={t.blurb}
+                key={a.id}
+                className={`tiny ${accessFilter === a.id ? "" : "ghost"}`}
+                onClick={() => setAccessFilter(a.id)}
+                title={a.tagline}
               >
-                {t.label} ({toolCounts[t.id] ?? 0})
+                {a.icon} {a.label} ({accessCounts[a.id] ?? 0})
               </button>
             ))}
           </div>
 
           <p className="tiny dim mt-8">
-            Chips are grouped by the <strong>tool</strong> that reads/writes them.{" "}
-            <strong>PicoForge</strong> reaches serial memories (SPI/I²C/Microwire);{" "}
-            <strong>the T48</strong> adds parallel NOR/EEPROM, EPROM, NAND and socketed MCUs;{" "}
-            <strong>the MCU debugger</strong> is the only way into a microcontroller's internal
-            memory. Built-in profiles are bench-verified; photo-resolved ones stay AI-suggested
-            until you verify them on real silicon.
+            Chips are grouped by <strong>access type</strong> — the physical way you read/write them. Click any
+            chip to expand its panel: <strong>simulate a real read</strong>, see the connection guide, generate an
+            AI wiring &amp; soldering guide, and attach your own instruction images. Built-in profiles are
+            bench-verified; photo-resolved ones stay AI-suggested until you verify them on real silicon.
           </p>
           {message && <p className="tiny mt-8" style={{ color: "var(--accent)" }}>{message}</p>}
         </div>
 
-        {groups.map(({ tool, chips: groupChips }) => (
-          <div key={tool.id} className="mt-16">
+        {groups.map(({ access, chips: groupChips }) => (
+          <div key={access.id} className="mt-16">
             <div className="row gap-8" style={{ alignItems: "baseline" }}>
-              <h3 style={{ margin: 0 }}>{tool.label}</h3>
-              <span className="tiny dim">{groupChips.length} chips · {tool.blurb}</span>
+              <h3 style={{ margin: 0 }}>{access.icon} {access.label}</h3>
+              <span className="tiny dim">{groupChips.length} chips · primary: {TOOL_LABEL[access.primaryTool] ?? access.primaryTool} · {access.tagline}</span>
             </div>
             <table className="table mt-8">
               <thead>
                 <tr>
+                  <th style={{ width: 24 }} />
                   <th>Chip</th>
                   <th>Trust</th>
-                  <th>Access</th>
+                  <th>Tool</th>
                   <th>Family</th>
                   <th>Package</th>
                   <th>Size</th>
@@ -208,42 +320,40 @@ export function ChipDatabase() {
                 {groupChips.map((c) => {
                   const prov = effectiveProvenance(c);
                   const isCustom = prov.source !== "seed";
-                  const caps = toolsForChip(c);
-                  const primary = caps[0];
-                  const secondary = caps[1];
+                  const open = expandedId === c.chipProfileId;
                   return (
-                    <tr key={c.chipProfileId}>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>{c.displayName}</div>
-                        <div className="tiny dim mono">{c.chipProfileId}</div>
-                      </td>
-                      <td>
-                        <span className={`badge tiny ${CONFIDENCE_TONE[prov.confidence]}`}>
-                          {CONFIDENCE_LABEL[prov.confidence]}
-                        </span>
-                      </td>
-                      <td>
-                        {primary && (
-                          <span className="badge tiny info" title={primary.note ?? ""}>
-                            {primary.label} · {primary.canWrite ? "R/W" : "R-only"}
+                    <Fragment key={c.chipProfileId}>
+                      <tr
+                        style={{ cursor: "pointer", background: open ? "var(--border)" : undefined }}
+                        onClick={() => setExpandedId(open ? null : c.chipProfileId)}
+                      >
+                        <td className="mono dim">{open ? "▾" : "▸"}</td>
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{c.displayName}</div>
+                          <div className="tiny dim mono">{c.chipProfileId}</div>
+                        </td>
+                        <td>
+                          <span className={`badge tiny ${CONFIDENCE_TONE[prov.confidence]}`}>
+                            {CONFIDENCE_LABEL[prov.confidence]}
                           </span>
-                        )}
-                        {secondary && (
-                          <span className="badge tiny dim" style={{ marginLeft: 4 }}>
-                            +{TOOLS.find((t) => t.id === secondary.tool)?.label ?? secondary.tool}
-                          </span>
-                        )}
-                      </td>
-                      <td className="tiny mono">{c.family}</td>
-                      <td className="tiny mono">{c.package}</td>
-                      <td className="mono">{humanSize(c.sizeBytes)}</td>
-                      <td className="mono tiny">{c.voltage.min}–{c.voltage.max} V</td>
-                      <td>
-                        {isCustom && (
-                          <button className="tiny" onClick={() => remove(c)}>Delete</button>
-                        )}
-                      </td>
-                    </tr>
+                        </td>
+                        <td className="tiny">{TOOL_LABEL[primaryToolForChip(c)] ?? primaryToolForChip(c)}</td>
+                        <td className="tiny mono">{c.family}</td>
+                        <td className="tiny mono">{c.package}</td>
+                        <td className="mono">{humanSize(c.sizeBytes)}</td>
+                        <td className="mono tiny">{c.voltage.min}–{c.voltage.max} V</td>
+                        <td onClick={(e) => e.stopPropagation()}>
+                          {isCustom && <button className="tiny" onClick={() => remove(c)}>Delete</button>}
+                        </td>
+                      </tr>
+                      {open && (
+                        <tr>
+                          <td colSpan={9} style={{ background: "var(--bg)" }}>
+                            <ChipDetail chip={c} onChanged={refresh} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -251,9 +361,7 @@ export function ChipDatabase() {
           </div>
         ))}
 
-        {groups.length === 0 && (
-          <p className="tiny dim mt-16">No chips match this filter.</p>
-        )}
+        {groups.length === 0 && <p className="tiny dim mt-16">No chips match this filter.</p>}
       </div>
     </>
   );

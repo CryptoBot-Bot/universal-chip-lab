@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { ChipIdentification, ChipProfile } from "@ecu/chip-db";
-import { draftProfileFromIdentification, effectiveSpiClockHz, picoModeForChip } from "@ecu/chip-db";
+import { accessGuideFor, draftProfileFromIdentification, picoModeForChip } from "@ecu/chip-db";
 
 import { ClockControl } from "../components/ClockControl";
 import { Topbar } from "../components/Topbar";
 import { Api } from "../lib/api";
 import { usePico } from "../lib/pico-connection";
-import { bytesToBase64, hexDump, readChip, sha256Hex } from "../lib/picoforge";
+import { bytesToBase64, hexDump, sha256Hex } from "../lib/picoforge";
 
 type Img = { data: string; mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp" };
 
@@ -32,7 +32,7 @@ async function fileToImage(file: File): Promise<Img> {
 }
 
 export function ReadTab() {
-  const { port, spiClockHz, setSpiClockHz } = usePico();
+  const { port, device, backend, spiClockHz, setSpiClockHz } = usePico();
   const [chips, setChips] = useState<ChipProfile[]>([]);
   const [query, setQuery] = useState("");
   const [chipId, setChipId] = useState("");
@@ -61,12 +61,15 @@ export function ReadTab() {
   const activeChip = resolvedChip ?? dbChip;
   const modeInfo = activeChip ? picoModeForChip(activeChip) : null;
   const sizeReady = !!activeChip && activeChip.sizeBytes > 0;
+  // The Simulator reaches every chip; PicoForge only serial families (those with a Pico mode).
+  const reachable = !!activeChip && (device === "simulator" || modeInfo !== null);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const supported = chips.filter((c) => picoModeForChip(c) !== null);
-    if (!q) return supported.slice(0, 30);
-    return supported.filter((c) => [c.displayName, c.family].join(" ").toLowerCase().includes(q)).slice(0, 30);
+    if (!q) return chips.slice(0, 40);
+    return chips
+      .filter((c) => [c.displayName, c.family, c.manufacturer ?? "", c.package, c.protocol].join(" ").toLowerCase().includes(q))
+      .slice(0, 40);
   }, [chips, query]);
 
   async function onFiles(files: FileList | null) {
@@ -108,18 +111,18 @@ export function ReadTab() {
   }
 
   async function readAndVerify() {
-    if (!port || !activeChip || !modeInfo || !sizeReady) return;
+    if (!backend || !activeChip || !sizeReady || !reachable) return;
     setBusy(true);
     setError(null);
     setResult(null);
     setSaveMsg(null);
     try {
-      const clockHz = effectiveSpiClockHz(activeChip, spiClockHz ?? undefined);
-      const r1 = await readChip(port, modeInfo.mode, activeChip.sizeBytes, (d, t) => setProgress(`read 1/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
-      const r2 = await readChip(port, modeInfo.mode, activeChip.sizeBytes, (d, t) => setProgress(`read 2/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`), clockHz);
+      const r1 = await backend.readChip(activeChip, (d, t) => setProgress(`read 1/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`));
+      const r2 = await backend.readChip(activeChip, (d, t) => setProgress(`read 2/2 — ${d.toLocaleString()}/${t.toLocaleString()} B`));
       const s1 = await sha256Hex(r1);
       const s2 = await sha256Hex(r2);
-      setResult({ sha: s1, verified: s1 === s2, preview: hexDump(r1), size: activeChip.sizeBytes, modeLabel: modeInfo.label, bytes: r1 });
+      const modeLabel = modeInfo?.label ?? `${accessGuideFor(activeChip).label} (simulated)`;
+      setResult({ sha: s1, verified: s1 === s2, preview: hexDump(r1), size: activeChip.sizeBytes, modeLabel, bytes: r1 });
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -150,23 +153,28 @@ export function ReadTab() {
     }
   }
 
-  if (!port) {
+  if (!port || !backend) {
     return (
       <>
         <Topbar title="Read" crumb="not connected" />
         <div className="content">
           <div className="card">
-            <h3>Connect PicoForge to begin</h3>
-            <p className="tiny dim mt-8">Use <strong>Connect device</strong> in the sidebar.</p>
+            <h3>Connect a device to begin</h3>
+            <p className="tiny dim mt-8">
+              Pick <strong>PicoForge</strong> or <strong>Simulator</strong> and hit <strong>Connect device</strong> in the
+              sidebar. The Simulator needs no hardware — great for trying the full read/verify flow.
+            </p>
           </div>
         </div>
       </>
     );
   }
 
+  const deviceName = device === "simulator" ? "Simulator" : "PicoForge";
+
   return (
     <>
-      <Topbar title="Read" crumb={`PicoForge · ${port}`} />
+      <Topbar title="Read" crumb={`${deviceName} · ${port}`} />
       <div className="content">
         {/* Identify from photo */}
         <div className="card">
@@ -217,27 +225,36 @@ export function ReadTab() {
           )}
         </div>
 
-        {/* Pick from DB */}
+        {/* Pick from DB — ALL chips. The Simulator reaches every one; PicoForge serial only. */}
         <div className="card mt-16">
-          <h3>…or pick a known chip</h3>
+          <h3>…or pick any chip <span className="tiny dim">— all {chips.length} in your database</span></h3>
           <input
             type="text"
-            placeholder="Search supported chips… e.g. 24C32, 95080, W25Q, 93C86"
+            placeholder="Search all chips… e.g. 24C32, 95080, W25Q, SPC5668, TC1767, 29F040"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
+          {device !== "simulator" && (
+            <p className="tiny dim mt-8">
+              On <strong>PicoForge</strong>, only serial chips (📎) can be read. Switch to the <strong>Simulator</strong> to open any chip.
+            </p>
+          )}
           <div className="grid cols-2 mt-8" style={{ maxHeight: "26vh", overflowY: "auto" }}>
             {filtered.map((c) => {
-              const m = picoModeForChip(c);
+              const g = accessGuideFor(c);
+              const reach = device === "simulator" || picoModeForChip(c) !== null;
               return (
                 <button
                   key={c.chipProfileId}
                   className={!resolvedChip && chipId === c.chipProfileId ? "primary" : ""}
-                  style={{ textAlign: "left", padding: 10 }}
+                  style={{ textAlign: "left", padding: 10, opacity: reach ? 1 : 0.55 }}
                   onClick={() => { setChipId(c.chipProfileId); setResolvedChip(null); setIdent(null); setResult(null); setSaveMsg(null); }}
                 >
                   <div style={{ fontWeight: 600 }}>{c.displayName}</div>
-                  <div className="tiny dim">MODE {m?.mode} · {m?.label} · {c.sizeBytes.toLocaleString()} B</div>
+                  <div className="tiny dim">
+                    {g.icon} {g.label} · {c.sizeBytes.toLocaleString()} B
+                    {!reach && <span style={{ color: "var(--warn)" }}> · needs Simulator</span>}
+                  </div>
                 </button>
               );
             })}
@@ -245,25 +262,39 @@ export function ReadTab() {
         </div>
 
         {/* Read */}
-        {activeChip && modeInfo && (
+        {activeChip && (
           <div className="card mt-16">
             <div className="row spread">
               <div>
                 <h3>{activeChip.displayName}</h3>
                 <div className="tiny dim mt-8">
-                  <span className="badge tiny info">MODE {modeInfo.mode} · {modeInfo.label}</span>{" "}
+                  {modeInfo
+                    ? <span className="badge tiny info">MODE {modeInfo.mode} · {modeInfo.label}</span>
+                    : <span className="badge tiny">{accessGuideFor(activeChip).icon} {accessGuideFor(activeChip).label}</span>}{" "}
                   · {activeChip.sizeBytes.toLocaleString()} bytes · {activeChip.voltage.min}–{activeChip.voltage.max} V
                 </div>
               </div>
-              <button className="primary" onClick={readAndVerify} disabled={busy || !sizeReady}>
+              <button className="primary" onClick={readAndVerify} disabled={busy || !sizeReady || !reachable}>
                 {busy ? "Reading…" : "Read & verify"}
               </button>
             </div>
             {!sizeReady && <p className="tiny mt-8" style={{ color: "var(--warn)" }}>Set the chip capacity above before reading.</p>}
-            <ClockControl profile={activeChip} mode={modeInfo.mode} value={spiClockHz} onChange={setSpiClockHz} disabled={busy} />
-            <p className="tiny dim mt-8">
-              Plug the {modeInfo.label} adapter, clip the chip (red→pin 1), meter pin-8 = 3.3 V / GND = 0 V, then read.
-            </p>
+            {!reachable && (
+              <p className="tiny mt-8" style={{ color: "var(--warn)" }}>
+                PicoForge can't reach this chip ({accessGuideFor(activeChip).label}). Switch to the <strong>Simulator</strong> to
+                read it now, or use a T48 / CH347 (coming soon).
+              </p>
+            )}
+            {device !== "simulator" && modeInfo && (
+              <ClockControl profile={activeChip} mode={modeInfo.mode} value={spiClockHz} onChange={setSpiClockHz} disabled={busy} />
+            )}
+            {reachable && (
+              <p className="tiny dim mt-8">
+                {device === "simulator"
+                  ? "Simulator: returns deterministic, repeatable contents for this chip — no wiring needed. Reads twice and SHA-verifies, exactly like hardware."
+                  : `Plug the ${modeInfo?.label} adapter, clip the chip (red→pin 1), meter pin-8 = 3.3 V / GND = 0 V, then read.`}
+              </p>
+            )}
             {progress && <p className="tiny mt-8 mono">{progress}</p>}
             {error && <p className="tiny mt-8" style={{ color: "var(--danger)" }}>{error}</p>}
           </div>
