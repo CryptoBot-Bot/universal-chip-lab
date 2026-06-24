@@ -8,6 +8,7 @@ const ITEMS: { to: string; label: string; icon: string }[] = [
   { to: "/write", label: "Write",         icon: "▲" },
   { to: "/chips", label: "Chip Database", icon: "◇" },
   { to: "/dumps", label: "Dumps",         icon: "▤" },
+  { to: "/obd",   label: "OBD Reader",    icon: "🚗" },
   { to: "/settings", label: "Settings",   icon: "⚙" },
 ];
 
