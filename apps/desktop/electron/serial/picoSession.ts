@@ -14,7 +14,9 @@ import os from "node:os";
 import path from "node:path";
 
 const MARKER = "<<<PFR>>>";
-const SAFE_COMMAND = /^[A-Za-z0-9 ]+$/;
+// Allow letters, digits, spaces, and '.'/'-' so float args (e.g. "CAL 9.135",
+// "CAL -1.5") pass. These go to a serial device, not a shell — no metacharacters.
+const SAFE_COMMAND = /^[A-Za-z0-9 .\-]+$/;
 const PORT_RE = /^COM\d+$/;
 
 // Relay script: opens the port, soft-reboots main.py once, then loops reading

@@ -126,6 +126,11 @@ const DTC_DESCRIPTIONS: Record<string, string> = {
   P0128: "Coolant thermostat below regulating temperature",
 };
 
+/** Human description for a DTC code, or a generic fallback. */
+export function dtcDescription(code: string): string {
+  return DTC_DESCRIPTIONS[code] ?? "Manufacturer-specific / see service info";
+}
+
 const DTC_LETTER = ["P", "C", "B", "U"];
 
 /** Decodes one 2-byte DTC into its SAE code (e.g. 0x03 0x01 → "P0301"). */

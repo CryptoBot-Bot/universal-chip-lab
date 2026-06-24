@@ -14,14 +14,19 @@
 // app end-to-end. Everything under SIM is FAKE and the app flags it.
 // =============================================================================
 #include <ACAN2040.h>
+#include <EEPROM.h>   // arduino-pico: flash-emulated EEPROM, for persistent calibration
 
 static const char* FIRMWARE = "OBD-Reader v2 (can2040)";
+
+// Settings are stored in flash so they survive power-cycles AND follow the
+// device to any PC. Layout: [0]=magic, [4]=float ratio, [8]=uint32 bitrate.
+static const uint32_t CAL_MAGIC = 0xCA11B007;
 
 // ---- pins ----
 static const uint8_t CAN_TX_PIN = 5;      // -> transceiver D / CTX
 static const uint8_t CAN_RX_PIN = 4;      // <- transceiver R / CRX
 static const uint8_t CAN_PIO    = 0;
-static const uint32_t CAN_BITRATE = 500000;   // OBD-II high-speed CAN
+static uint32_t bitrate = 500000;          // current CAN bitrate (loaded from flash; 500k or 250k)
 #define BATT_ADC A2                        // GP28 = ADC2
 
 // ---- battery calibration / thresholds ----
@@ -149,61 +154,122 @@ static int simObd(uint8_t mode, int pid, uint8_t* out, const char** err) {
 }
 
 // =============================================================================
-// OBD-II — real CAN request/response with ISO-TP reassembly
+// ISO-TP transport (shared by OBD-II and UDS) over real CAN
 // =============================================================================
-// Sends a request to 0x7DF and reassembles the first ECU response (0x7E8-0x7EF),
-// handling single-frame and multi-frame (First/Consecutive + Flow Control).
-// out[] gets the response data AFTER the service byte. Returns length, or -1.
-static int realObd(uint8_t mode, int pid, uint8_t* out, const char** err) {
-  if (!can) { *err = "CAN not initialised"; return -1; }
+static void canSendFrame(uint32_t id, const uint8_t* d, int dlc) {
+  struct can2040_msg m;
+  m.id = id; m.dlc = 8;                       // OBD frames are padded to 8
+  for (int i = 0; i < 8; i++) m.data[i] = (i < dlc) ? d[i] : PAD;
+  can->send_message(&m);
+}
+
+// Sends a single-frame request (<=7 bytes) to txid, then reassembles the first
+// response from any 0x7E8-0x7EF (single + multi-frame w/ flow control). `out`
+// gets the RAW response INCLUDING the service byte. Returns length, 0 on timeout.
+static int isotpRequest(uint32_t txid, const uint8_t* req, int reqLen,
+                        uint8_t* out, int outMax, uint32_t* respId) {
+  if (!can || reqLen > 7) return -1;          // single-frame requests only
 
   struct can2040_msg drain;
-  while (popRx(&drain)) {}                   // flush stale frames before requesting
+  while (popRx(&drain)) {}                     // flush stale frames
 
-  struct can2040_msg req;
-  req.id = OBD_REQUEST_ID;
-  req.dlc = 8;
-  for (int i = 0; i < 8; i++) req.data[i] = PAD;
-  if (pid >= 0) { req.data[0] = 0x02; req.data[1] = mode; req.data[2] = (uint8_t)pid; }
-  else { req.data[0] = 0x01; req.data[1] = mode; }
-  can->send_message(&req);   // if it can't go out, we simply time out below
+  uint8_t f[8];
+  f[0] = (uint8_t)reqLen;                       // single-frame PCI = length
+  for (int i = 0; i < reqLen; i++) f[1 + i] = req[i];
+  canSendFrame(txid, f, 1 + reqLen);
 
-  uint8_t asmbuf[80];
   int asmLen = 0, expected = -1;
+  uint32_t rid = 0;
   uint32_t deadline = millis() + OBD_TIMEOUT_MS;
 
   while ((long)(deadline - millis()) > 0) {
     struct can2040_msg m;
     if (!popRx(&m)) { delay(1); continue; }
-    uint32_t rid = m.id & 0x1FFFFFFF;
-    if (rid < 0x7E8 || rid > 0x7EF) continue;   // OBD-II responses only
-
+    uint32_t id = m.id & 0x1FFFFFFF;
+    if (id < 0x7E8 || id > 0x7EF) continue;
     uint8_t pci = m.data[0] & 0xF0;
     if (pci == 0x00) {                          // single frame
       int len = m.data[0] & 0x0F;
-      for (int i = 0; i < len && i < (int)sizeof(asmbuf); i++) asmbuf[i] = m.data[1 + i];
-      asmLen = len;
-      break;
-    } else if (pci == 0x10) {                   // first frame of a multi-frame msg
+      for (int i = 0; i < len && i < outMax; i++) out[i] = m.data[1 + i];
+      asmLen = len; rid = id; break;
+    } else if (pci == 0x10) {                   // first frame
       expected = ((m.data[0] & 0x0F) << 8) | m.data[1];
-      for (int i = 0; i < 6; i++) asmbuf[asmLen++] = m.data[2 + i];
-      struct can2040_msg fc;                    // flow control -> responder id - 8
-      fc.id = rid - 8; fc.dlc = 8;
-      for (int i = 0; i < 8; i++) fc.data[i] = PAD;
-      fc.data[0] = 0x30; fc.data[1] = 0x00; fc.data[2] = 0x00;
-      can->send_message(&fc);
+      for (int i = 0; i < 6 && asmLen < outMax; i++) out[asmLen++] = m.data[2 + i];
+      rid = id;
+      uint8_t fc[3] = { 0x30, 0x00, 0x00 };     // flow control -> responder's request id
+      canSendFrame(id - 8, fc, 3);
     } else if (pci == 0x20) {                    // consecutive frame
-      for (int i = 0; i < 7 && asmLen < expected && asmLen < (int)sizeof(asmbuf); i++)
-        asmbuf[asmLen++] = m.data[1 + i];
+      for (int i = 0; i < 7 && asmLen < expected && asmLen < outMax; i++)
+        out[asmLen++] = m.data[1 + i];
       if (expected > 0 && asmLen >= expected) break;
     }
   }
+  if (respId) *respId = rid;
+  return asmLen;
+}
 
-  if (asmLen == 0) { *err = "no response (engine off? wrong bus? car uses K-line?)"; return -1; }
-  // Strip the service byte (mode + 0x40); return the rest, matching the app.
-  int n = asmLen - 1;
-  for (int i = 0; i < n; i++) out[i] = asmbuf[1 + i];
-  return n < 0 ? 0 : n;
+// OBD-II to the functional address; returns the response AFTER the service byte
+// (app-compatible). Reuses the ISO-TP engine.
+static int realObd(uint8_t mode, int pid, uint8_t* out, const char** err) {
+  uint8_t req[2]; int reqLen;
+  if (pid >= 0) { req[0] = mode; req[1] = (uint8_t)pid; reqLen = 2; }
+  else { req[0] = mode; reqLen = 1; }
+  uint8_t raw[80];
+  int n = isotpRequest(OBD_REQUEST_ID, req, reqLen, raw, sizeof(raw), nullptr);
+  if (n <= 0) { *err = "no response (engine off? wrong bus? car uses K-line?)"; return -1; }
+  for (int i = 0; i < n - 1; i++) out[i] = raw[1 + i];   // strip the 0x4X service echo
+  return n - 1;
+}
+
+// Functional supported-PIDs request; collects every distinct responder id, so we
+// can see which modules are present. Returns count; ids[] gets the addresses.
+static int probeModules(uint16_t* ids, int maxIds) {
+  if (!can) return 0;
+  struct can2040_msg drain;
+  while (popRx(&drain)) {}
+  uint8_t f[3] = { 0x02, 0x01, 0x00 };          // SF: mode 01 pid 00 (supported PIDs)
+  canSendFrame(OBD_REQUEST_ID, f, 3);
+  int count = 0;
+  uint32_t deadline = millis() + 1200;
+  while ((long)(deadline - millis()) > 0) {
+    struct can2040_msg m;
+    if (!popRx(&m)) { delay(1); continue; }
+    uint32_t id = m.id & 0x1FFFFFFF;
+    if (id < 0x7E8 || id > 0x7EF) continue;
+    bool known = false;
+    for (int i = 0; i < count; i++) if (ids[i] == id) known = true;
+    if (!known && count < maxIds) ids[count++] = (uint16_t)id;
+  }
+  return count;
+}
+
+// Simulated ISO-TP/UDS responder for SIM mode — lets the whole multi-module +
+// UDS app be exercised with no car. Returns RAW response (incl. service byte).
+static int simIsotp(uint32_t txid, const uint8_t* req, int reqLen, uint8_t* out) {
+  (void)txid;
+  if (reqLen < 1) return 0;
+  uint8_t svc = req[0];
+  if (svc == 0x3E) return 0;   // sim: no tester-present reply (discovery uses PROBE's list)
+  if (svc == 0x10) { out[0] = 0x50; out[1] = (reqLen > 1) ? req[1] : 1;
+                     out[2] = 0x00; out[3] = 0x32; out[4] = 0x01; out[5] = 0xF4; return 6; }
+  if (svc == 0x22) {                                                     // read data by id
+    if (reqLen >= 3 && req[1] == 0xF1 && req[2] == 0x90) {               // VIN
+      const char* vin = "1HGSIM0000PICO123";
+      out[0] = 0x62; out[1] = 0xF1; out[2] = 0x90;
+      for (int i = 0; i < 17; i++) out[3 + i] = vin[i];
+      return 20;
+    }
+    out[0] = 0x62; out[1] = (reqLen > 1) ? req[1] : 0; out[2] = (reqLen > 2) ? req[2] : 0;
+    out[3] = 0xAA; out[4] = 0x55; return 5;                             // generic DID
+  }
+  if (svc == 0x19) {                                                     // read DTC info
+    if (simCleared) { out[0] = 0x59; out[1] = 0x02; out[2] = 0xFF; return 3; }
+    uint8_t r[] = { 0x59, 0x02, 0xFF, 0x04, 0x20, 0x00, 0x09, 0x01, 0x76, 0x00, 0x09 };
+    for (int i = 0; i < (int)sizeof(r); i++) out[i] = r[i];             // P0420, P0176
+    return sizeof(r);
+  }
+  if (svc == 0x14) { simCleared = true; out[0] = 0x54; return 1; }       // clear DTCs
+  out[0] = 0x7F; out[1] = svc; out[2] = 0x11; return 3;                  // serviceNotSupported
 }
 
 // =============================================================================
@@ -233,11 +299,11 @@ static void handle(char* line) {
   if (!strcmp(cmd, "PING")) {
     printOK(FIRMWARE);
   } else if (!strcmp(cmd, "HELP")) {
-    printOK("PING INFO BATT CAL<r> RESET CANINIT CANDUMP OBD<mode>[<pid>] SIM<OFF|IGNITION|WEAK|IDLE|DRIVE>");
+    printOK("PING INFO BATT CAL<r> SPEED<250|500> RESET CANINIT CANRESET CANDUMP OBD<mode>[<pid>] ISOTP<txid><hex> REQDUMP<txid><hex> PROBE SIM<OFF|IGNITION|WEAK|IDLE|DRIVE>");
   } else if (!strcmp(cmd, "INFO")) {
     char b[120];
     snprintf(b, sizeof(b), "ratio=%.3f | low=%.1f charging=%.1f | can=up@%lu | sim=%s | can2040",
-             ratio, V_LOW, V_CHARGING, (unsigned long)CAN_BITRATE, simScenario ? simScenario : "off");
+             ratio, V_LOW, V_CHARGING, (unsigned long)bitrate, simScenario ? simScenario : "off");
     printOK(b);
   } else if (!strcmp(cmd, "BATT")) {
     float vb = readBattery();
@@ -247,12 +313,28 @@ static void handle(char* line) {
     snprintf(b, sizeof(b), "%lu,%.2f,%s,%.2f,%.2f", (unsigned long)(millis() - t0), vb, classify(vb), vmin, vmax);
     printOK(b);
   } else if (!strcmp(cmd, "CAL")) {
-    if (nt > 1) ratio = atof(tok[1]);
+    if (nt > 1) { ratio = atof(tok[1]); saveRatio(); }   // persist to flash
     char b[32]; snprintf(b, sizeof(b), "ratio=%.3f", ratio); printOK(b);
   } else if (!strcmp(cmd, "RESET")) {
     vmin = 99.0f; vmax = 0.0f; printOK("min/max cleared");
+  } else if (!strcmp(cmd, "CANRESET")) {
+    // Recover from bus-off by rebooting: re-runs setup() → fresh can2040 + reloads
+    // calibration from flash. The USB port drops briefly; the app reconnects.
+    printOK("rebooting");
+    Serial.flush();
+    delay(50);
+    rp2040.reboot();
+  } else if (!strcmp(cmd, "SPEED")) {
+    // SPEED <250000|500000> (or 250/500) — store the bus bitrate and reboot into it.
+    if (nt < 2) { printERR("SPEED needs 250 or 500 (kbit) / 250000 / 500000"); return; }
+    long v = strtol(tok[1], nullptr, 10);
+    if (v < 1000) v *= 1000;                 // accept "250"/"500" shorthand
+    if (v != 250000 && v != 500000) { printERR("only 250000 or 500000 supported"); return; }
+    saveBitrate((uint32_t)v);
+    char b[40]; snprintf(b, sizeof(b), "speed=%ld, rebooting", v); printOK(b);
+    Serial.flush(); delay(50); rp2040.reboot();
   } else if (!strcmp(cmd, "CANINIT")) {
-    printOK("can up @ 500000 bps");          // CAN is begun in setup(); this just acks
+    char b[32]; snprintf(b, sizeof(b), "can up @ %lu bps", (unsigned long)bitrate); printOK(b);
   } else if (!strcmp(cmd, "CANDUMP")) {
     if (simScenario) {
       long t = (millis() - simT0) / 1000;
@@ -277,6 +359,58 @@ static void handle(char* line) {
     uint8_t out[80]; const char* err = "error";
     int n = simScenario ? simObd(mode, pid, out, &err) : realObd(mode, pid, out, &err);
     if (n < 0) printERR(err); else printOKBytes(out, n);
+  } else if (!strcmp(cmd, "ISOTP")) {
+    // ISOTP <txidHex> <payloadHex> — raw request/response to any address (UDS etc.)
+    if (nt < 3) { printERR("ISOTP needs <txid> <hex>"); return; }
+    uint32_t txid = (uint32_t)strtol(tok[1], nullptr, 16);
+    uint8_t req[8]; int reqLen = 0;
+    const char* h = tok[2];
+    while (h[0] && h[1] && reqLen < 8) {
+      char bb[3] = { h[0], h[1], 0 };
+      req[reqLen++] = (uint8_t)strtol(bb, nullptr, 16);
+      h += 2;
+    }
+    uint8_t out[80];
+    int n = simScenario ? simIsotp(txid, req, reqLen, out)
+                        : isotpRequest(txid, req, reqLen, out, sizeof(out), nullptr);
+    if (n <= 0) printERR("no response"); else printOKBytes(out, n);
+  } else if (!strcmp(cmd, "REQDUMP")) {
+    // RE tool: send a request to <txid>, then capture every DISTINCT id seen for
+    // ~800 ms — reveals responses on non-standard addresses (Nissan etc.).
+    if (nt < 3) { printERR("REQDUMP needs <txid> <hex>"); return; }
+    if (simScenario) { printOK("7E8#0641004000 174#ffe7d4aa00000000 176#0000000000"); return; }
+    uint32_t txid = (uint32_t)strtol(tok[1], nullptr, 16);
+    uint8_t req[8]; int reqLen = 0;
+    const char* h = tok[2];
+    while (h[0] && h[1] && reqLen < 8) { char bb[3] = { h[0], h[1], 0 }; req[reqLen++] = (uint8_t)strtol(bb, nullptr, 16); h += 2; }
+    struct can2040_msg drain; while (popRx(&drain)) {}
+    uint8_t f[8]; f[0] = (uint8_t)reqLen;
+    for (int i = 0; i < reqLen; i++) f[1 + i] = req[i];
+    canSendFrame(txid, f, 1 + reqLen);
+    uint16_t seen[20]; int nseen = 0; String s;
+    uint32_t deadline = millis() + 800;
+    while ((long)(deadline - millis()) > 0) {
+      struct can2040_msg m;
+      if (!popRx(&m)) { delay(1); continue; }
+      uint32_t id = m.id & 0x1FFFFFFF;
+      bool known = false;
+      for (int i = 0; i < nseen; i++) if (seen[i] == id) known = true;
+      if (known || nseen >= 20) continue;
+      seen[nseen++] = (uint16_t)id;
+      char fr[40]; int k = snprintf(fr, sizeof(fr), "%lX#", (unsigned long)id);
+      for (uint32_t i = 0; i < m.dlc && i < 8; i++) { char hh[3]; snprintf(hh, sizeof(hh), "%02X", m.data[i]); fr[k++] = hh[0]; fr[k++] = hh[1]; }
+      fr[k] = 0; if (nseen > 1) s += ' '; s += fr;
+    }
+    printOK(nseen ? s.c_str() : "(no frames)");
+  } else if (!strcmp(cmd, "PROBE")) {
+    // Discover which modules answer (their CAN response addresses).
+    if (simScenario) { printOK("7E8 7E9 7EA 7EB"); return; }   // ECM, TCM, +2 modules (fake)
+    uint16_t ids[8];
+    int n = probeModules(ids, 8);
+    if (n == 0) { printOK("(none)"); return; }
+    String s;
+    for (int i = 0; i < n; i++) { if (i) s += ' '; char bb[6]; snprintf(bb, sizeof(bb), "%X", ids[i]); s += bb; }
+    printOK(s.c_str());
   } else if (!strcmp(cmd, "SIM")) {
     const char* arg = (nt > 1) ? tok[1] : "OFF";
     for (char* c = (char*)arg; *c; c++) *c = toupper(*c);
@@ -296,15 +430,43 @@ static void handle(char* line) {
 }
 
 // =============================================================================
+// Persistent calibration (flash-emulated EEPROM)
+static void saveRatio() {
+  EEPROM.put(0, CAL_MAGIC);
+  EEPROM.put(4, ratio);
+  EEPROM.commit();             // actually write the flash sector
+}
+
+static void saveBitrate(uint32_t b) {
+  EEPROM.put(0, CAL_MAGIC);
+  EEPROM.put(8, b);
+  EEPROM.commit();
+}
+
+static void loadConfig() {
+  uint32_t magic = 0;
+  EEPROM.get(0, magic);
+  if (magic == CAL_MAGIC) {
+    float r = 0;
+    EEPROM.get(4, r);
+    if (r > 0.1f && r < 100.0f) ratio = r;   // sanity-bound before trusting it
+  }
+  uint32_t b = 0;
+  EEPROM.get(8, b);
+  if (b == 250000 || b == 500000) bitrate = b;  // value-validated (handles un-set flash)
+}
+
 String inLine;
 
 void setup() {
   Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
   analogReadResolution(12);
+  EEPROM.begin(256);           // reserve a flash page for settings
+  loadConfig();                // restore stored calibration + bus speed, if any
   t0 = millis();
 
-  can = new ACAN2040(CAN_PIO, CAN_TX_PIN, CAN_RX_PIN, CAN_BITRATE, F_CPU, canCallback);
+  can = new ACAN2040(CAN_PIO, CAN_TX_PIN, CAN_RX_PIN, bitrate, F_CPU, canCallback);
   can->begin();
 
   Serial.println(String(FIRMWARE) + " ready. Type HELP and press Enter.");

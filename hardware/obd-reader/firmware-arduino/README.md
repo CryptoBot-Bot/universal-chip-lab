@@ -66,7 +66,22 @@ CANL↔CANL not swapped, and — if still nothing — try swapping `CAN_TX_PIN` 
 installed version). A single node alone can't transmit (CAN needs another node to
 ACK), so both must be running.
 
-## Next (after bring-up passes)
-We port the full reader firmware (`obd_reader/`) and write the bench `fake_ecu/`.
-At that point the desktop app's **Scan vehicle** / **Read codes** will work against
-real CAN — first the fake ECU on the bench, then a real car.
+## `obd_reader/` — the full firmware (real CAN, proven on a bench TCM)
+This is what you flash to the reader Pico. It speaks the same USB serial protocol
+as before, now backed by real can2040, and adds a multi-module diagnostic layer:
+
+| Command | Purpose |
+| --- | --- |
+| `PING` / `INFO` / `BATT` / `CAL <r>` / `RESET` | identity, telemetry, persistent calibration |
+| `CANDUMP` | drain received frames (passive monitor) |
+| `OBD <mode> [pid]` | OBD-II request to the functional address (0x7DF) |
+| **`ISOTP <txidHex> <hexPayload>`** | raw ISO-TP request to ANY address — the primitive behind UDS |
+| **`PROBE`** | list every module that answers (CAN response ids) |
+| `SIM <OFF\|IGNITION\|WEAK\|IDLE\|DRIVE>` | bench simulator (incl. fake modules + UDS) |
+
+Calibration persists in flash (`EEPROM`), so it follows the device to any PC.
+
+The desktop app's **OBD Reader** tab drives all of this: battery + calibration,
+**Full vehicle scan** (discover every module → read each one's DTCs + VIN over
+OBD-II/UDS), live data, per-module clear, and a passive **Bus monitor** with log
+export. Re-Upload this sketch whenever the firmware changes (auto-reset, no BOOTSEL).

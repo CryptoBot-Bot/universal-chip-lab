@@ -10,7 +10,8 @@
  */
 import { spawn } from "node:child_process";
 
-const SAFE_COMMAND = /^[A-Za-z0-9 ]+$/;
+// Allow '.'/'-' too so float args (e.g. "CAL 9.135") pass — serial, not shell.
+const SAFE_COMMAND = /^[A-Za-z0-9 .\-]+$/;
 const PORT_RE = /^COM\d+$/;
 
 /** Finds the Pico's COM port by USB vendor id 2E8A (RP2040). */

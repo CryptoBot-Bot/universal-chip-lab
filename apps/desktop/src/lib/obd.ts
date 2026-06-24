@@ -8,6 +8,7 @@
  * telemetry: battery voltage now, CAN frames once a can2040 firmware is flashed.
  */
 import { Api } from "./api";
+import { moduleFor, PHYSICAL_REQ_ADDRS, type ModuleAddr } from "./modules";
 import {
   decodeDtcs,
   decodePidResponse,
@@ -19,6 +20,25 @@ import {
   type Dtc,
   type PidReading,
 } from "./obd-protocol";
+import {
+  buildReadDataById,
+  buildReadDtcByStatus,
+  buildTesterPresent,
+  DID,
+  negativeResponse,
+  parseUdsDtcs,
+  parseUdsVin,
+} from "./uds";
+
+/** Everything we learned about one module in a full vehicle scan. */
+export interface ModuleReport {
+  addr: ModuleAddr;
+  dtcs: Dtc[];
+  vin?: string;
+  notes: string[];
+}
+
+const hx2 = (n: number) => n.toString(16).padStart(2, "0").toUpperCase();
 
 /** One battery sample, parsed from a `BATT` reply: `<ms>,<volts>,<state>,<vmin>,<vmax>`. */
 export interface Telemetry {
@@ -97,12 +117,61 @@ export const Obd = {
     return m ? Number(m[1]) : ratio;
   },
 
+  /** Reads the firmware's current divider ratio (from INFO). Defaults to 5.7. */
+  async readRatio(port: string): Promise<number> {
+    const reply = await Api.pico.command({ port, command: "INFO" });
+    throwIfErr(reply);
+    const m = payload(reply).match(/ratio=([\d.]+)/);
+    return m ? Number(m[1]) : 5.7;
+  },
+
+  /** Reads the active CAN bus bitrate (from INFO). Defaults to 500000. */
+  async readBitrate(port: string): Promise<number> {
+    const reply = await Api.pico.command({ port, command: "INFO" });
+    throwIfErr(reply);
+    const m = payload(reply).match(/can=up@(\d+)/);
+    return m ? Number(m[1]) : 500000;
+  },
+
+  /**
+   * Sets the CAN bus bitrate (250000 or 500000) — stored in flash; the reader
+   * reboots into the new speed, so the caller should reconnect afterwards.
+   */
+  async setBusSpeed(port: string, bitrate: number): Promise<void> {
+    await Api.pico.command({ port, command: `SPEED ${bitrate}`, timeoutMs: 2000 }).catch(() => undefined);
+  },
+
+  /**
+   * One-shot calibration to a known voltage. Reads the live value with the
+   * current ratio, then back-solves: newRatio = ratioNow × (actual / shown).
+   * Self-correcting even if the ratio was previously set wrong. Returns the new
+   * ratio. Throws if the sense pin reads ~0 V (no source connected yet).
+   */
+  async calibrateToVoltage(port: string, actualVolts: number): Promise<number> {
+    const ratioNow = await Obd.readRatio(port);
+    const sample = await Obd.readTelemetry(port);
+    if (sample.volts <= 0.1) {
+      throw new Error("Sense pin reads ~0 V — feed the known voltage into the 12 V input first, then calibrate.");
+    }
+    const newRatio = (ratioNow * actualVolts) / sample.volts;
+    return Obd.calibrate(port, newRatio);
+  },
+
   /**
    * Brings up the CAN bus. On stock MicroPython this throws an honest error
    * (RP2040 has no hardware CAN — needs a can2040 firmware build).
    */
   async canInit(port: string, bitrate = 500000): Promise<void> {
     throwIfErr(await Api.pico.command({ port, command: `CANINIT ${bitrate}` }));
+  },
+
+  /**
+   * Recovers a bus-off controller by rebooting the reader (re-inits can2040,
+   * reloads calibration). The USB port drops, so the caller should reconnect.
+   * Errors are swallowed — the reboot itself kills the in-flight reply.
+   */
+  async resetCan(port: string): Promise<void> {
+    await Api.pico.command({ port, command: "CANRESET", timeoutMs: 2000 }).catch(() => undefined);
   },
 
   /** Recent CAN frames, newest last. Empty array when the bus is quiet. */
@@ -184,6 +253,101 @@ export const Obd = {
   async readVin(port: string): Promise<string> {
     const data = await Obd.query(port, MODE.VEHICLE_INFO, VIN_PID);
     return decodeVin(data);
+  },
+
+  /**
+   * Raw ISO-TP request to any CAN address — the universal primitive behind both
+   * OBD-II and UDS. Returns the full response bytes (including the service byte).
+   * Throws on timeout / device error.
+   */
+  async isotp(port: string, txid: number, bytes: number[]): Promise<number[]> {
+    const command = `ISOTP ${txid.toString(16).toUpperCase()} ${bytes.map(hx2).join("")}`;
+    const reply = await Api.pico.command({ port, command });
+    throwIfErr(reply);
+    return hexBytes(payload(reply));
+  },
+
+  /**
+   * RE tool: sends a request to `txid`, then returns every DISTINCT frame seen on
+   * the bus for ~0.8 s. Reveals responses on non-standard addresses (any id that
+   * appears here but isn't a normal periodic broadcast is a candidate response).
+   */
+  async reqdump(port: string, txid: number, bytes: number[]): Promise<CanFrame[]> {
+    const command = `REQDUMP ${txid.toString(16).toUpperCase()} ${bytes.map(hx2).join("")}`;
+    const reply = await Api.pico.command({ port, command, timeoutMs: 4000 });
+    throwIfErr(reply);
+    return parseCanFrames(payload(reply));
+  },
+
+  /** Module discovery: returns the CAN response addresses that answered. */
+  async probe(port: string): Promise<number[]> {
+    const reply = await Api.pico.command({ port, command: "PROBE", timeoutMs: 4000 });
+    throwIfErr(reply);
+    const p = payload(reply);
+    if (!p || p === "(none)") return [];
+    return p.split(/\s+/).map((s) => parseInt(s, 16)).filter((n) => Number.isFinite(n));
+  },
+
+  /**
+   * Discovers every module on the bus: OBD-II functional discovery (PROBE) plus
+   * a UDS tester-present ping to each physical address (catches UDS-only modules
+   * like the TCM that don't answer generic OBD-II).
+   */
+  async discoverModules(port: string): Promise<ModuleAddr[]> {
+    const found = new Set<number>();
+    for (const r of await Obd.probe(port).catch(() => [])) found.add(r);
+    for (const req of PHYSICAL_REQ_ADDRS) {
+      if (found.has(req + 8)) continue;
+      try {
+        const resp = await Obd.isotp(port, req, buildTesterPresent());
+        if (resp.length) found.add(req + 8); // any reply (positive or negative) = present
+      } catch {
+        /* no response → module not present */
+      }
+    }
+    return [...found].sort((a, b) => a - b).map(moduleFor);
+  },
+
+  /**
+   * Full vehicle scan: discover all modules, then read each one's DTCs (UDS
+   * service 0x19) and VIN (0x22/F190). Calls onProgress per module so the UI can
+   * stream results.
+   */
+  async scanAllModules(
+    port: string,
+    onProgress?: (addr: ModuleAddr, index: number, total: number) => void,
+  ): Promise<ModuleReport[]> {
+    const modules = await Obd.discoverModules(port);
+    const reports: ModuleReport[] = [];
+    for (let i = 0; i < modules.length; i++) {
+      const m = modules[i];
+      onProgress?.(m, i, modules.length);
+      const report: ModuleReport = { addr: m, dtcs: [], notes: [] };
+      try {
+        const resp = await Obd.isotp(port, m.req, buildReadDtcByStatus(0xff));
+        const nrc = negativeResponse(resp);
+        if (nrc) report.notes.push(`DTCs: ${nrc}`);
+        else report.dtcs = parseUdsDtcs(resp);
+      } catch {
+        report.notes.push("DTCs: no response");
+      }
+      try {
+        const resp = await Obd.isotp(port, m.req, buildReadDataById(DID.VIN));
+        if (!negativeResponse(resp)) {
+          const vin = parseUdsVin(resp);
+          if (vin) report.vin = vin;
+        }
+      } catch {
+        /* not every module stores the VIN */
+      }
+      reports.push(report);
+    }
+    return reports;
+  },
+
+  /** Clears DTCs on a specific module via UDS service 0x14. WRITES to the car. */
+  async clearModuleDtcs(port: string, reqAddr: number): Promise<void> {
+    await Obd.isotp(port, reqAddr, [0x14, 0xff, 0xff, 0xff]).catch(() => undefined);
   },
 
   /** Drops the persistent serial session for this port. */
