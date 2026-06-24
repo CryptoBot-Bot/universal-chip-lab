@@ -1,6 +1,6 @@
 {
   "name": "@ecu/desktop",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Universal Chip Lab — lawful EEPROM/FLASH read, write, clone and analysis, driven by PicoForge.",
   "author": "Universal Chip Lab",
   "private": true,
