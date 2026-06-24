@@ -41,6 +41,9 @@ export function ObdTab() {
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
   const [ratio, setRatio] = useState(5.7);
   const [busSpeed, setBusSpeed] = useState(500000);
+  const [busSpeedMs, setBusSpeedMs] = useState(125000);
+  const [monitorBus, setMonitorBusState] = useState(0); // 0 = HS (6/14), 1 = MS (3/11)
+  const monitorBusRef = useRef(0);
   const [calTarget, setCalTarget] = useState("12.0");
   const [calMsg, setCalMsg] = useState<string | null>(null);
   const [sim, setSim] = useState<SimScenario | null>(null);
@@ -88,6 +91,7 @@ export function ObdTab() {
       setFirmware(banner);
       setRatio(await Obd.readRatio(found).catch(() => 5.7)); // show the device's actual ratio
       setBusSpeed(await Obd.readBitrate(found).catch(() => 500000));
+      setBusSpeedMs(await Obd.readBitrateMs(found).catch(() => 125000));
       setStatus("connected");
     } catch (err) {
       setError((err as Error).message);
@@ -166,7 +170,7 @@ export function ObdTab() {
         // not anything answered our requests. This is the key diagnostic.
         if (monitorOn.current || (liveOn.current && livePidsRef.current.length)) {
           try {
-            const frames = await Obd.canDump(port);
+            const frames = await Obd.canDump(port, monitorBusRef.current);
             if (!cancelled) {
               setCanFrames(frames);
               if (frames.length) setMonitorSeen((n) => n + frames.length);
@@ -282,11 +286,23 @@ export function ObdTab() {
     }
   }
 
-  // Change CAN bus speed: the reader stores it and reboots, so reconnect after.
-  async function changeBusSpeed(b: number) {
-    if (!port || b === busSpeed) return;
-    setBusSpeed(b);
-    await Obd.setBusSpeed(port, b);
+  // Switch which bus the passive monitor listens on (HS pins 6/14 vs MS pins 3/11).
+  function changeMonitorBus(bus: number) {
+    monitorBusRef.current = bus;
+    setMonitorBusState(bus);
+    setCanFrames([]);
+    setMonitorSeen(0);
+    seenAny.current = false;
+    emptyPolls.current = 0;
+    setCanStalled(false);
+  }
+
+  // Change a bus's speed: the reader stores it and reboots, so reconnect after.
+  async function changeBusSpeed(b: number, bus: number) {
+    const current = bus === 1 ? busSpeedMs : busSpeed;
+    if (!port || b === current) return;
+    if (bus === 1) setBusSpeedMs(b); else setBusSpeed(b);
+    await Obd.setBusSpeed(port, b, bus);
     disconnect();
     setTimeout(() => { void connect(); }, 3500); // reader reboots into the new speed
   }
@@ -555,8 +571,12 @@ export function ObdTab() {
         {/* Passive bus monitor — listens for raw frames regardless of requests */}
         <div className="card mt-16" style={{ borderColor: monitoring ? "var(--info)" : "var(--border)" }}>
           <div className="row spread">
-            <h3>Bus monitor <span className="tiny dim">— passive: just listen for raw frames</span></h3>
+            <h3>Bus monitor <span className="tiny dim">— passive · {monitorBus === 1 ? "MS-CAN (pins 3/11)" : "HS-CAN (pins 6/14)"}</span></h3>
             <div className="row" style={{ gap: 8 }}>
+              <div className="seg tiny">
+                <button className={monitorBus === 0 ? "active" : ""} onClick={() => changeMonitorBus(0)}>HS 6/14</button>
+                <button className={monitorBus === 1 ? "active" : ""} onClick={() => changeMonitorBus(1)}>MS 3/11</button>
+              </div>
               {logLines > 0 && (
                 <button className="tiny" onClick={downloadLog} title="Download captured frames as a .txt log">
                   Download log ({logLines})
@@ -571,12 +591,22 @@ export function ObdTab() {
             </div>
           </div>
           <div className="row mt-8" style={{ gap: 8, alignItems: "center" }}>
-            <span className="tiny dim">CAN speed</span>
+            <span className="tiny dim">{monitorBus === 1 ? "MS" : "HS"} speed</span>
             <div className="seg tiny">
-              <button className={busSpeed === 500000 ? "active" : ""} onClick={() => changeBusSpeed(500000)}>500k</button>
-              <button className={busSpeed === 250000 ? "active" : ""} onClick={() => changeBusSpeed(250000)}>250k</button>
+              {[500000, 250000, 125000].map((b) => {
+                const active = (monitorBus === 1 ? busSpeedMs : busSpeed) === b;
+                return (
+                  <button key={b} className={active ? "active" : ""} onClick={() => changeBusSpeed(b, monitorBus)}>
+                    {b / 1000}k
+                  </button>
+                );
+              })}
             </div>
-            <span className="tiny dim">500k = almost all 2008+ cars · 250k = some older/specific. Changing reboots the reader.</span>
+            <span className="tiny dim">
+              {monitorBus === 1
+                ? "MS-CAN (pins 3/11) is usually 125k. Changing reboots the reader."
+                : "HS-CAN (pins 6/14) is 500k on almost all 2008+ cars. Changing reboots the reader."}
+            </span>
           </div>
           {canStalled && (
             <div className="card compact mt-8" style={{ borderColor: "var(--warn)" }}>

@@ -26,7 +26,12 @@ static const uint32_t CAL_MAGIC = 0xCA11B007;
 static const uint8_t CAN_TX_PIN = 5;      // -> transceiver D / CTX
 static const uint8_t CAN_RX_PIN = 4;      // <- transceiver R / CRX
 static const uint8_t CAN_PIO    = 0;
-static uint32_t bitrate = 500000;          // current CAN bitrate (loaded from flash; 500k or 250k)
+static uint32_t bitrate = 500000;          // HS-CAN bitrate (flash; 125k/250k/500k)
+// Second (MS-CAN) bus: 2nd SN65HVD230 on GP7=TX / GP6=RX -> OBD pins 3/11.
+static const uint8_t MS_CAN_TX_PIN = 7;
+static const uint8_t MS_CAN_RX_PIN = 6;
+static const uint8_t MS_CAN_PIO    = 1;    // RP2040's second PIO block
+static uint32_t bitrateMs = 125000;        // MS-CAN bitrate (flash; default 125k)
 #define BATT_ADC A2                        // GP28 = ADC2
 
 // ---- battery calibration / thresholds ----
@@ -42,6 +47,7 @@ static const uint32_t OBD_TIMEOUT_MS = 1000;
 
 // ---- state ----
 ACAN2040* can = nullptr;
+ACAN2040* can2 = nullptr;   // MS-CAN, lazily created on first use (see ensureCan2)
 unsigned long t0 = 0;
 float vmin = 99.0f, vmax = 0.0f;
 
@@ -50,10 +56,12 @@ const char* simScenario = nullptr;   // nullptr = off
 unsigned long simT0 = 0;
 bool simCleared = false;
 
-// ---- CAN RX ring buffer (single-producer IRQ, single-consumer loop) ----
+// ---- CAN RX ring buffers (single-producer IRQ, single-consumer loop) ----
 #define RXBUF 48
 static struct can2040_msg rxq[RXBUF];
 volatile uint8_t rxHead = 0, rxTail = 0;
+static struct can2040_msg rxq2[RXBUF];   // MS-CAN
+volatile uint8_t rxHead2 = 0, rxTail2 = 0;
 
 static void canCallback(struct can2040* cd, uint32_t notify, struct can2040_msg* msg) {
   (void)cd;
@@ -71,6 +79,29 @@ static bool popRx(struct can2040_msg* out) {
   *out = rxq[rxTail];
   rxTail = (rxTail + 1) % RXBUF;
   return true;
+}
+
+static void canCallback2(struct can2040* cd, uint32_t notify, struct can2040_msg* msg) {
+  (void)cd;
+  if (notify & CAN2040_NOTIFY_RX) {
+    uint8_t n = (rxHead2 + 1) % RXBUF;
+    if (n != rxTail2) { rxq2[rxHead2] = *msg; rxHead2 = n; }
+  }
+}
+
+static bool popRx2(struct can2040_msg* out) {
+  if (rxTail2 == rxHead2) return false;
+  *out = rxq2[rxTail2];
+  rxTail2 = (rxTail2 + 1) % RXBUF;
+  return true;
+}
+
+// MS-CAN is lazily started on first use, so it can never affect HS-CAN boot.
+static void ensureCan2() {
+  if (!can2) {
+    can2 = new ACAN2040(MS_CAN_PIO, MS_CAN_TX_PIN, MS_CAN_RX_PIN, bitrateMs, F_CPU, canCallback2);
+    can2->begin();
+  }
 }
 
 // =============================================================================
@@ -299,11 +330,11 @@ static void handle(char* line) {
   if (!strcmp(cmd, "PING")) {
     printOK(FIRMWARE);
   } else if (!strcmp(cmd, "HELP")) {
-    printOK("PING INFO BATT CAL<r> SPEED<250|500> RESET CANINIT CANRESET CANDUMP OBD<mode>[<pid>] ISOTP<txid><hex> REQDUMP<txid><hex> PROBE SIM<OFF|IGNITION|WEAK|IDLE|DRIVE>");
+    printOK("PING INFO BATT CAL<r> SPEED<125|250|500> SPEEDMS<125|250|500> RESET CANINIT CANRESET CANDUMP CANDUMP2 OBD<mode>[<pid>] ISOTP<txid><hex> REQDUMP<txid><hex> PROBE SIM<OFF|IGNITION|WEAK|IDLE|DRIVE>");
   } else if (!strcmp(cmd, "INFO")) {
     char b[120];
-    snprintf(b, sizeof(b), "ratio=%.3f | low=%.1f charging=%.1f | can=up@%lu | sim=%s | can2040",
-             ratio, V_LOW, V_CHARGING, (unsigned long)bitrate, simScenario ? simScenario : "off");
+    snprintf(b, sizeof(b), "ratio=%.3f | low=%.1f charging=%.1f | can=up@%lu | ms=up@%lu | sim=%s | can2040",
+             ratio, V_LOW, V_CHARGING, (unsigned long)bitrate, (unsigned long)bitrateMs, simScenario ? simScenario : "off");
     printOK(b);
   } else if (!strcmp(cmd, "BATT")) {
     float vb = readBattery();
@@ -324,12 +355,21 @@ static void handle(char* line) {
     Serial.flush();
     delay(50);
     rp2040.reboot();
+  } else if (!strcmp(cmd, "SPEEDMS")) {
+    // MS-CAN bus speed (default 125k). Stored + reboot, like SPEED.
+    if (nt < 2) { printERR("SPEEDMS needs 125 / 250 / 500"); return; }
+    long v = strtol(tok[1], nullptr, 10);
+    if (v < 1000) v *= 1000;
+    if (v != 125000 && v != 250000 && v != 500000) { printERR("only 125000/250000/500000"); return; }
+    saveBitrateMs((uint32_t)v);
+    char b[40]; snprintf(b, sizeof(b), "ms speed=%ld, rebooting", v); printOK(b);
+    Serial.flush(); delay(50); rp2040.reboot();
   } else if (!strcmp(cmd, "SPEED")) {
     // SPEED <250000|500000> (or 250/500) — store the bus bitrate and reboot into it.
-    if (nt < 2) { printERR("SPEED needs 250 or 500 (kbit) / 250000 / 500000"); return; }
+    if (nt < 2) { printERR("SPEED needs 125 / 250 / 500 (kbit) or the full bps"); return; }
     long v = strtol(tok[1], nullptr, 10);
-    if (v < 1000) v *= 1000;                 // accept "250"/"500" shorthand
-    if (v != 250000 && v != 500000) { printERR("only 250000 or 500000 supported"); return; }
+    if (v < 1000) v *= 1000;                 // accept "125"/"250"/"500" shorthand
+    if (v != 125000 && v != 250000 && v != 500000) { printERR("only 125000/250000/500000 supported"); return; }
     saveBitrate((uint32_t)v);
     char b[40]; snprintf(b, sizeof(b), "speed=%ld, rebooting", v); printOK(b);
     Serial.flush(); delay(50); rp2040.reboot();
@@ -352,6 +392,17 @@ static void handle(char* line) {
       }
       printOK(count ? s.c_str() : "(no frames)");
     }
+  } else if (!strcmp(cmd, "CANDUMP2")) {
+    // Passive monitor of the MS-CAN bus (2nd transceiver, OBD pins 3/11).
+    if (simScenario) { printOK("520#0102030405060708 625#aa55aa55"); return; }
+    ensureCan2();                          // lazily start the 2nd CAN controller
+    String s; struct can2040_msg m; int count = 0;
+    while (popRx2(&m) && count < 24) {
+      char f[40]; int k = snprintf(f, sizeof(f), "%lX#", (unsigned long)(m.id & 0x1FFFFFFF));
+      for (uint32_t i = 0; i < m.dlc && i < 8; i++) { char h[3]; snprintf(h, sizeof(h), "%02X", m.data[i]); f[k++] = h[0]; f[k++] = h[1]; }
+      f[k] = 0; if (count) s += ' '; s += f; count++;
+    }
+    printOK(count ? s.c_str() : "(no frames)");
   } else if (!strcmp(cmd, "OBD")) {
     if (nt < 2) { printERR("OBD needs a mode"); return; }
     uint8_t mode = (uint8_t)strtol(tok[1], nullptr, 16);
@@ -443,6 +494,12 @@ static void saveBitrate(uint32_t b) {
   EEPROM.commit();
 }
 
+static void saveBitrateMs(uint32_t b) {
+  EEPROM.put(0, CAL_MAGIC);
+  EEPROM.put(12, b);
+  EEPROM.commit();
+}
+
 static void loadConfig() {
   uint32_t magic = 0;
   EEPROM.get(0, magic);
@@ -453,7 +510,10 @@ static void loadConfig() {
   }
   uint32_t b = 0;
   EEPROM.get(8, b);
-  if (b == 250000 || b == 500000) bitrate = b;  // value-validated (handles un-set flash)
+  if (b == 125000 || b == 250000 || b == 500000) bitrate = b;  // value-validated
+  uint32_t bm = 0;
+  EEPROM.get(12, bm);
+  if (bm == 125000 || bm == 250000 || bm == 500000) bitrateMs = bm;
 }
 
 String inLine;

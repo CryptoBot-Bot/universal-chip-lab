@@ -60,6 +60,7 @@ const hex3 = (n: number) => n.toString(16).toUpperCase().padStart(3, "0");
 
 export function SignalLab({ port }: { port: string }) {
   const [running, setRunning] = useState(false);
+  const [bus, setBus] = useState(0); // 0 = HS (6/14), 1 = MS (3/11)
   const agg = useRef<Map<number, IdRow>>(new Map());
   const [, setVersion] = useState(0);
   const busy = useRef(false);
@@ -74,7 +75,7 @@ export function SignalLab({ port }: { port: string }) {
       if (busy.current) return;
       busy.current = true;
       try {
-        const frames: CanFrame[] = await Obd.canDump(port);
+        const frames: CanFrame[] = await Obd.canDump(port, bus);
         const now = Date.now();
         for (const f of frames) {
           const bytes: number[] = [];
@@ -104,7 +105,7 @@ export function SignalLab({ port }: { port: string }) {
       cancelled = true;
       clearInterval(t);
     };
-  }, [running, port]);
+  }, [running, port, bus]);
 
   function persist(next: Signal[]) {
     setSignals(next);
@@ -136,8 +137,12 @@ export function SignalLab({ port }: { port: string }) {
   return (
     <div className="card mt-16">
       <div className="row spread">
-        <h3>Signal Lab <span className="tiny dim">— reverse-engineer raw frames</span></h3>
+        <h3>Signal Lab <span className="tiny dim">— reverse-engineer raw frames · {bus === 1 ? "MS 3/11" : "HS 6/14"}</span></h3>
         <div className="row" style={{ gap: 8 }}>
+          <div className="seg tiny">
+            <button className={bus === 0 ? "active" : ""} onClick={() => { setBus(0); clearCapture(); }}>HS</button>
+            <button className={bus === 1 ? "active" : ""} onClick={() => { setBus(1); clearCapture(); }}>MS</button>
+          </div>
           <button className="tiny" onClick={clearCapture}>Clear</button>
           <button className={running ? "primary" : ""} onClick={() => setRunning((r) => !r)}>
             {running ? "Stop" : "Start capture"}

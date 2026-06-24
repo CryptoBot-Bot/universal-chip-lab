@@ -125,7 +125,7 @@ export const Obd = {
     return m ? Number(m[1]) : 5.7;
   },
 
-  /** Reads the active CAN bus bitrate (from INFO). Defaults to 500000. */
+  /** Reads the HS-CAN bitrate (from INFO). Defaults to 500000. */
   async readBitrate(port: string): Promise<number> {
     const reply = await Api.pico.command({ port, command: "INFO" });
     throwIfErr(reply);
@@ -133,12 +133,22 @@ export const Obd = {
     return m ? Number(m[1]) : 500000;
   },
 
+  /** Reads the MS-CAN bitrate (from INFO). Defaults to 125000. */
+  async readBitrateMs(port: string): Promise<number> {
+    const reply = await Api.pico.command({ port, command: "INFO" });
+    throwIfErr(reply);
+    const m = payload(reply).match(/ms=up@(\d+)/);
+    return m ? Number(m[1]) : 125000;
+  },
+
   /**
-   * Sets the CAN bus bitrate (250000 or 500000) — stored in flash; the reader
+   * Sets a bus bitrate (125000/250000/500000) — stored in flash; the reader
    * reboots into the new speed, so the caller should reconnect afterwards.
+   * `bus` 0 = HS-CAN, 1 = MS-CAN.
    */
-  async setBusSpeed(port: string, bitrate: number): Promise<void> {
-    await Api.pico.command({ port, command: `SPEED ${bitrate}`, timeoutMs: 2000 }).catch(() => undefined);
+  async setBusSpeed(port: string, bitrate: number, bus = 0): Promise<void> {
+    const cmd = bus === 1 ? `SPEEDMS ${bitrate}` : `SPEED ${bitrate}`;
+    await Api.pico.command({ port, command: cmd, timeoutMs: 2000 }).catch(() => undefined);
   },
 
   /**
@@ -174,9 +184,12 @@ export const Obd = {
     await Api.pico.command({ port, command: "CANRESET", timeoutMs: 2000 }).catch(() => undefined);
   },
 
-  /** Recent CAN frames, newest last. Empty array when the bus is quiet. */
-  async canDump(port: string): Promise<CanFrame[]> {
-    const reply = await Api.pico.command({ port, command: "CANDUMP" });
+  /**
+   * Recent CAN frames, newest last. `bus` 0 = HS-CAN (pins 6/14), 1 = MS-CAN
+   * (pins 3/11, 2nd transceiver). Empty array when the bus is quiet.
+   */
+  async canDump(port: string, bus = 0): Promise<CanFrame[]> {
+    const reply = await Api.pico.command({ port, command: bus === 1 ? "CANDUMP2" : "CANDUMP" });
     throwIfErr(reply);
     return parseCanFrames(payload(reply));
   },
