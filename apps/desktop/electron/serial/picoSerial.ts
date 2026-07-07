@@ -14,15 +14,21 @@ import { spawn } from "node:child_process";
 const SAFE_COMMAND = /^[A-Za-z0-9 .\-]+$/;
 const PORT_RE = /^COM\d+$/;
 
-/** Finds the Pico's COM port by USB vendor id 2E8A (RP2040). */
+/** Finds the Pico's COM port by USB vendor id 2E8A (RP2040). First match. */
 export async function findPicoPort(): Promise<string | null> {
+  const ports = await findPicoPorts();
+  return ports[0] ?? null;
+}
+
+/** Lists ALL RP2040 (VID 2E8A) COM ports — there can be several (reader + fake ECU). */
+export async function findPicoPorts(): Promise<string[]> {
   const script =
     "Get-PnpDevice -Class Ports -PresentOnly -ErrorAction SilentlyContinue | " +
     "Where-Object { $_.InstanceId -match 'VID_2E8A' } | " +
     "ForEach-Object { if ($_.FriendlyName -match '(COM\\d+)') { $matches[1] } }";
   const out = await runPowerShell(script, 8000);
-  const m = out.match(/COM\d+/);
-  return m ? m[0] : null;
+  const matches = out.match(/COM\d+/g);
+  return matches ? [...new Set(matches)] : [];
 }
 
 /** Sends one command and returns the OK/ERR reply line. */

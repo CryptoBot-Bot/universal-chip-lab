@@ -10,6 +10,9 @@ import { Obd, type CanFrame } from "../lib/obd";
  * engine, the byte that lights up is your signal. Click a byte to define a named
  * signal (offset, length, endianness, scale, offset, unit); definitions persist
  * and decode live. This is how you build a Nissan signal map from scratch.
+ *
+ * `embedded` lets it live as a tab inside the bus cockpit, sharing the cockpit's
+ * bus selection and Go-live state instead of drawing its own card + controls.
  */
 interface IdRow {
   id: number;
@@ -58,15 +61,35 @@ function decodeSignal(sig: Signal, data: number[]): number | null {
 const hex2 = (n: number) => n.toString(16).toUpperCase().padStart(2, "0");
 const hex3 = (n: number) => n.toString(16).toUpperCase().padStart(3, "0");
 
-export function SignalLab({ port }: { port: string }) {
-  const [running, setRunning] = useState(false);
-  const [bus, setBus] = useState(0); // 0 = HS (6/14), 1 = MS (3/11)
+interface Props {
+  port: string;
+  embedded?: boolean;
+  bus?: number; // when embedded, driven by the cockpit
+  running?: boolean; // when embedded, driven by the cockpit's Go-live
+}
+
+export function SignalLab({ port, embedded = false, bus: busProp, running: runningProp }: Props) {
+  const [runningState, setRunning] = useState(false);
+  const [busState, setBus] = useState(0); // 0 = HS (6/14), 1 = MS (3/11)
+  const running = embedded ? !!runningProp : runningState;
+  const bus = embedded ? busProp ?? 0 : busState;
+
   const agg = useRef<Map<number, IdRow>>(new Map());
   const [, setVersion] = useState(0);
   const busy = useRef(false);
 
   const [signals, setSignals] = useState<Signal[]>(loadSignals);
   const [form, setForm] = useState<Signal>({ id: 0, start: 0, len: 1, be: true, scale: 1, offset: 0, unit: "", name: "" });
+
+  function clearCapture() {
+    agg.current = new Map();
+    setVersion((v) => v + 1);
+  }
+
+  // when the cockpit switches bus, start a fresh capture
+  useEffect(() => {
+    clearCapture();
+  }, [bus]);
 
   useEffect(() => {
     if (!running) return;
@@ -125,34 +148,39 @@ export function SignalLab({ port }: { port: string }) {
     persist(signals.filter((_, idx) => idx !== i));
   }
 
-  function clearCapture() {
-    agg.current = new Map();
-    setVersion((v) => v + 1);
-  }
-
   const rows = [...agg.current.values()].sort((a, b) => a.id - b.id);
   const now = Date.now();
   const latestFor = (id: number) => agg.current.get(id)?.data ?? [];
 
-  return (
-    <div className="card mt-16">
-      <div className="row spread">
-        <h3>Signal Lab <span className="tiny dim">— reverse-engineer raw frames · {bus === 1 ? "MS 3/11" : "HS 6/14"}</span></h3>
-        <div className="row" style={{ gap: 8 }}>
-          <div className="seg tiny">
-            <button className={bus === 0 ? "active" : ""} onClick={() => { setBus(0); clearCapture(); }}>HS</button>
-            <button className={bus === 1 ? "active" : ""} onClick={() => { setBus(1); clearCapture(); }}>MS</button>
-          </div>
+  const body = (
+    <>
+      {/* header — standalone gets its own controls; embedded borrows the cockpit's */}
+      {embedded ? (
+        <div className="row spread">
+          <span className="tiny dim">Reverse-engineer raw frames — click a changing byte to name it as a signal.</span>
           <button className="tiny" onClick={clearCapture}>Clear</button>
-          <button className={running ? "primary" : ""} onClick={() => setRunning((r) => !r)}>
-            {running ? "Stop" : "Start capture"}
-          </button>
         </div>
-      </div>
-      <p className="tiny dim mt-8">
-        Start capture, then change something on the vehicle (shift gear, blip throttle). The byte that <span style={{ color: "var(--warn)" }}>highlights</span> when
-        you do is your signal — click it to define and name it.
-      </p>
+      ) : (
+        <>
+          <div className="row spread">
+            <h3>Signal Lab <span className="tiny dim">— reverse-engineer raw frames · {bus === 1 ? "MS 3/11" : "HS 6/14"}</span></h3>
+            <div className="row" style={{ gap: 8 }}>
+              <div className="seg tiny">
+                <button className={bus === 0 ? "active" : ""} onClick={() => { setBus(0); clearCapture(); }}>HS</button>
+                <button className={bus === 1 ? "active" : ""} onClick={() => { setBus(1); clearCapture(); }}>MS</button>
+              </div>
+              <button className="tiny" onClick={clearCapture}>Clear</button>
+              <button className={runningState ? "primary" : ""} onClick={() => setRunning((r) => !r)}>
+                {runningState ? "Stop" : "Start capture"}
+              </button>
+            </div>
+          </div>
+          <p className="tiny dim mt-8">
+            Start capture, then change something on the vehicle (shift gear, blip throttle). The byte that <span style={{ color: "var(--warn)" }}>highlights</span> when
+            you do is your signal — click it to define and name it.
+          </p>
+        </>
+      )}
 
       {/* live per-id table */}
       {rows.length > 0 && (
@@ -196,6 +224,9 @@ export function SignalLab({ port }: { port: string }) {
         </div>
       )}
       {running && rows.length === 0 && <p className="tiny dim mt-12">Listening… no frames yet.</p>}
+      {!running && rows.length === 0 && embedded && (
+        <p className="tiny dim mt-12">Press <strong>Go live</strong> above, then change something on the vehicle to spot the byte that moves.</p>
+      )}
 
       {/* define a signal */}
       <div className="card compact mt-12">
@@ -242,6 +273,9 @@ export function SignalLab({ port }: { port: string }) {
           })}
         </div>
       )}
-    </div>
+    </>
   );
+
+  if (embedded) return <div className="mt-4">{body}</div>;
+  return <div className="card mt-16">{body}</div>;
 }

@@ -13,7 +13,13 @@ import {
 } from "@ecu/chip-db/store";
 import { JobEngine, ModuleJobEngine, SafetyEngine } from "@ecu/core";
 import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump-tools";
-import { createModuleRegistry } from "@ecu/vehicle-db";
+import { createModuleRegistry, mergeBusKnowledge } from "@ecu/vehicle-db";
+import type { BusModuleKnowledge } from "@ecu/vehicle-db";
+import {
+  deleteStoredBusKnowledge,
+  loadStoredBusKnowledge,
+  saveStoredBusKnowledge,
+} from "@ecu/vehicle-db/store";
 import { JobFileManager, WorkspaceManager } from "@ecu/workspace";
 
 import {
@@ -25,6 +31,7 @@ import {
   writeChipGuide,
 } from "../chipAssets";
 import { deleteDump, exportDump, listDumps, readDumpSlice, type DumpFormat } from "../dumps";
+import { mapBus, type BusMapInput } from "../resolver/busMapper";
 import {
   generateChipGuide,
   resolveChip,
@@ -33,7 +40,7 @@ import {
   type ResolveChipInput,
 } from "../resolver/chipResolver";
 import { clearApiKey, getKeyStatus, setApiKey } from "../settings";
-import { findPicoPort } from "../serial/picoSerial";
+import { findPicoPort, findPicoPorts } from "../serial/picoSerial";
 import { picoSessionCommand, stopPicoSession } from "../serial/picoSession";
 
 import type { IpcChannel, IpcResponse } from "./channels";
@@ -54,6 +61,7 @@ export async function registerIpcHandlers(
   const layout = await workspace.init();
   const jobFiles = new JobFileManager(layout);
   const chipAssetsDir = path.join(layout.root, "chip-assets");
+  const busIntelDir = path.join(layout.root, "vehicle-intel");
 
   // Hydrate operator/AI-resolved profiles from disk so they appear in the
   // chip list and survive restarts. Built-in seed profiles are always present.
@@ -421,6 +429,50 @@ export async function registerIpcHandlers(
   register("modules:brands", () => moduleRegistry.brands());
   register("modules:byBrand", (_e, p: { brand: any }) => moduleRegistry.byBrand(p.brand));
 
+  // ---- vehicle bus intelligence — the growing knowledge base of what each
+  // system on a real network answers, and what we can do with it. Seed records
+  // ship in @ecu/vehicle-db (travel with publishes); learned ones persist to
+  // disk here and merge on top; "bake" folds them into the bundled catalog.
+  register("busIntel:list", async () => {
+    const { records, errors } = await loadStoredBusKnowledge(busIntelDir);
+    if (errors.length > 0) {
+      console.warn(
+        `[ECL] Skipped ${errors.length} invalid bus-knowledge record(s):`,
+        errors.map((e) => `${e.file}: ${e.message}`).join("; "),
+      );
+    }
+    return mergeBusKnowledge(records);
+  });
+  register("busIntel:save", async (_e, record: BusModuleKnowledge) => {
+    await saveStoredBusKnowledge(busIntelDir, record, new Date().toISOString());
+    const { records } = await loadStoredBusKnowledge(busIntelDir);
+    return mergeBusKnowledge(records);
+  });
+  register("busIntel:delete", async (_e, p: { id: string }) => {
+    const removed = await deleteStoredBusKnowledge(busIntelDir, p.id);
+    const { records } = await loadStoredBusKnowledge(busIntelDir);
+    return { removed, records: mergeBusKnowledge(records) };
+  });
+  register("busIntel:analyze", (_e, input: BusMapInput) => mapBus(input));
+  // Bake learned records into the repo's bundled catalog so they ship with the
+  // next release. Only works running from source (a packaged build can't edit
+  // its own catalog). Mirrors chips:bakeCatalog.
+  register("busIntel:bake", async () => {
+    const { records } = await loadStoredBusKnowledge(busIntelDir);
+    const target = path.join(
+      opts.projectRoot,
+      "packages", "vehicle-db", "src", "busKnowledgeCommunity.json",
+    );
+    try {
+      await writeFile(target, `${JSON.stringify(records, null, 2)}\n`, "utf8");
+    } catch (err) {
+      throw new Error(
+        `Could not write the bundled catalog (${(err as Error).message}). This works when running from source (dev); a packaged build can't edit its own catalog.`,
+      );
+    }
+    return { path: target, count: records.length };
+  });
+
   // ---- module jobs
   register("moduleJobs:list", () => moduleJobEngine.listJobs());
   register("moduleJobs:get", (_e, p: { jobId: string }) => moduleJobEngine.getJob(p.jobId));
@@ -447,6 +499,7 @@ export async function registerIpcHandlers(
 
   // ---- PicoForge serial bridge (main-process serial via System.IO.Ports)
   register("pico:findPort", () => findPicoPort());
+  register("pico:findPorts", () => findPicoPorts());
   register(
     "pico:command",
     (_e, p: { port: string; command: string; reboot?: boolean; timeoutMs?: number }) =>

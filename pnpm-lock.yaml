@@ -143,6 +143,9 @@ importers:
         specifier: workspace:*
         version: link:../chip-db
     devDependencies:
+      '@types/node':
+        specifier: ^22.7.5
+        version: 22.19.19
       typescript:
         specifier: ^5.6.3
         version: 5.9.3

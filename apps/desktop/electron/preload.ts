@@ -65,6 +65,13 @@ const api = {
     brands:   () => invoke("modules:brands"),
     byBrand:  (brand: string) => invoke("modules:byBrand", { brand }),
   },
+  busIntel: {
+    list:    () => invoke("busIntel:list"),
+    save:    (record: unknown) => invoke("busIntel:save", record),
+    delete:  (id: string) => invoke("busIntel:delete", { id }),
+    analyze: (input: unknown) => invoke("busIntel:analyze", input),
+    bake:    () => invoke("busIntel:bake"),
+  },
   moduleJobs: {
     list:      () => invoke("moduleJobs:list"),
     get:       (jobId: string) => invoke("moduleJobs:get", { jobId }),
@@ -89,6 +96,7 @@ const api = {
   },
   pico: {
     findPort: () => invoke("pico:findPort"),
+    findPorts: () => invoke("pico:findPorts"),
     command: (input: { port: string; command: string; reboot?: boolean; timeoutMs?: number }) =>
       invoke("pico:command", input),
     disconnect: (input: { port: string }) => invoke("pico:disconnect", input),

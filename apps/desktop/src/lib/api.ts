@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { ModuleProfile, VehicleBrand } from "@ecu/vehicle-db";
+import type { BusModuleKnowledge, ModuleProfile, VehicleBrand } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -92,6 +92,27 @@ export interface KeyStatus {
   masked: string | null;
   encryptionAvailable: boolean;
   storedUnencrypted: boolean;
+}
+
+export interface BusObservationNode {
+  id: string;
+  name: string;
+  kind: "module" | "obd" | "bcast";
+  hz: number;
+  count: number;
+  lastData: string;
+}
+
+export interface BusMapRequest {
+  nodes: BusObservationNode[];
+  probeLog?: string;
+  snapshot?: string;
+  notes?: string;
+}
+
+export interface BusMapResult {
+  modules: BusModuleKnowledge[];
+  summary: string;
 }
 
 async function unwrap<T>(promise: Promise<IpcResponse<T>>): Promise<T> {
@@ -178,6 +199,15 @@ export const Api = {
     brands:  () => unwrap<VehicleBrand[]>(api.modules.brands() as never),
     byBrand: (b: VehicleBrand) => unwrap<ModuleProfile[]>(api.modules.byBrand(b) as never),
   },
+  busIntel: {
+    list:    () => unwrap<BusModuleKnowledge[]>(api.busIntel.list() as never),
+    save:    (record: BusModuleKnowledge) =>
+      unwrap<BusModuleKnowledge[]>(api.busIntel.save(record) as never),
+    delete:  (id: string) =>
+      unwrap<{ removed: boolean; records: BusModuleKnowledge[] }>(api.busIntel.delete(id) as never),
+    analyze: (input: BusMapRequest) => unwrap<BusMapResult>(api.busIntel.analyze(input) as never),
+    bake:    () => unwrap<{ path: string; count: number }>(api.busIntel.bake() as never),
+  },
   moduleJobs: {
     list:      () => unwrap<ModuleJobRecord[]>(api.moduleJobs.list() as never),
     get:       (id: string) => unwrap<ModuleJobRecord>(api.moduleJobs.get(id) as never),
@@ -210,6 +240,7 @@ export const Api = {
   },
   pico: {
     findPort: () => unwrap<string | null>(api.pico.findPort() as never),
+    findPorts: () => unwrap<string[]>(api.pico.findPorts() as never),
     command: (input: { port: string; command: string; reboot?: boolean; timeoutMs?: number }) =>
       unwrap<string>(api.pico.command(input) as never),
     disconnect: (port: string) =>

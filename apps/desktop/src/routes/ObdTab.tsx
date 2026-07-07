@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { SignalLab } from "../components/SignalLab";
+import { CanNetwork } from "../components/CanNetwork";
+import { DeviceHealth } from "../components/DeviceHealth";
 import { Topbar } from "../components/Topbar";
-import { UdsConsole } from "../components/UdsConsole";
 import { VehicleScan } from "../components/VehicleScan";
-import { Obd, type CanFrame, type SimScenario, type Telemetry } from "../lib/obd";
+import { Obd, type SimScenario, type Telemetry } from "../lib/obd";
 import type { Dtc, PidReading } from "../lib/obd-protocol";
 
 type Status = "idle" | "connecting" | "connected" | "error";
@@ -28,8 +28,23 @@ const SCENARIOS: { key: SimScenario; label: string }[] = [
   { key: "DRIVE", label: "Engine start → drive" },
 ];
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 function gaugePct(v: number): number {
   return Math.max(0, Math.min(100, ((v - GAUGE_MIN) / (GAUGE_MAX - GAUGE_MIN)) * 100));
+}
+
+/** A labelled divider that groups the tab into human-scannable sections. */
+function GroupHeader({ label, hint }: { label: string; hint?: string }) {
+  return (
+    <div className="row" style={{ margin: "26px 0 2px", alignItems: "center", gap: 12 }}>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--accent)" }}>
+        {label}
+      </span>
+      <span style={{ height: 1, flex: 1, background: "var(--border)" }} />
+      {hint && <span className="tiny dim">{hint}</span>}
+    </div>
+  );
 }
 
 export function ObdTab() {
@@ -42,8 +57,9 @@ export function ObdTab() {
   const [ratio, setRatio] = useState(5.7);
   const [busSpeed, setBusSpeed] = useState(500000);
   const [busSpeedMs, setBusSpeedMs] = useState(125000);
-  const [monitorBus, setMonitorBusState] = useState(0); // 0 = HS (6/14), 1 = MS (3/11)
-  const monitorBusRef = useRef(0);
+  const [bus, setBus] = useState(0); // 0 = HS (6/14), 1 = MS (3/11)
+  const [rebooting, setRebooting] = useState(false);
+  const rebootingRef = useRef(false);
   const [calTarget, setCalTarget] = useState("12.0");
   const [calMsg, setCalMsg] = useState<string | null>(null);
   const [sim, setSim] = useState<SimScenario | null>(null);
@@ -61,37 +77,42 @@ export function ObdTab() {
   const [diagError, setDiagError] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
 
-  // raw bus monitor (passive sniff — independent of any OBD request/response)
-  const [canFrames, setCanFrames] = useState<CanFrame[]>([]);
-  const [monitoring, setMonitoring] = useState(false);
-  const [monitorSeen, setMonitorSeen] = useState(0); // total frames seen since monitor start
-  const [probeFrames, setProbeFrames] = useState<CanFrame[] | null>(null);
-  const [probeBusy, setProbeBusy] = useState(false);
-
   const polling = useRef(false); // serial round-trips are serialised; skip if one is mid-flight
   const liveOn = useRef(false);
   const livePidsRef = useRef<number[]>([]);
-  const monitorOn = useRef(false);
-  const logRef = useRef<string[]>([]); // captured bus frames (timestamped) while monitoring
-  const [logLines, setLogLines] = useState(0);
-  const emptyPolls = useRef(0); // consecutive empty monitor polls after frames had flowed
-  const seenAny = useRef(false);
-  const [canStalled, setCanStalled] = useState(false);
 
   const connect = useCallback(async () => {
     setStatus("connecting");
     setError(null);
     try {
-      const found = await Obd.findPort();
-      if (!found) {
+      const ports = await Obd.findPorts();
+      if (ports.length === 0) {
         throw new Error("No Pico found. Plug the OBD reader in over USB, close Thonny, and check Device Manager.");
       }
-      const banner = await Obd.identify(found); // reboots firmware + verifies it's the OBD build
+      let found: string | null = null;
+      let banner = "";
+      for (const p of ports) {
+        try {
+          banner = await Obd.identify(p);
+          found = p;
+          break;
+        } catch {
+          await Obd.disconnect(p).catch(() => undefined);
+        }
+      }
+      if (!found) {
+        throw new Error(
+          `Found ${ports.length} Pico(s) (${ports.join(", ")}) but none is running OBD-Reader firmware. ` +
+            `Flash obd_reader.ino to the reader, or unplug other RP2040 boards.`,
+        );
+      }
       setPort(found);
       setFirmware(banner);
-      setRatio(await Obd.readRatio(found).catch(() => 5.7)); // show the device's actual ratio
+      setRatio(await Obd.readRatio(found).catch(() => 5.7));
       setBusSpeed(await Obd.readBitrate(found).catch(() => 500000));
       setBusSpeedMs(await Obd.readBitrateMs(found).catch(() => 125000));
+      setBus(0);
+      await Obd.selectBus(found, 0).catch(() => undefined); // start on HS, UI + firmware agree
       setStatus("connected");
     } catch (err) {
       setError((err as Error).message);
@@ -103,7 +124,6 @@ export function ObdTab() {
     if (port) Obd.disconnect(port).catch(() => undefined);
     liveOn.current = false;
     livePidsRef.current = [];
-    monitorOn.current = false;
     setStatus("idle");
     setPort(null);
     setFirmware(null);
@@ -113,16 +133,70 @@ export function ObdTab() {
     setLiveValues(new Map());
     setDtcs(null);
     setVin(null);
-    setCanFrames([]);
-    setMonitoring(false);
-    setMonitorSeen(0);
-    seenAny.current = false;
-    emptyPolls.current = 0;
-    setCanStalled(false);
   }, [port]);
 
-  // Bench simulator scenario (or OFF). Changing it resets diagnostics so stale
-  // sim codes/values don't linger across scenarios.
+  // Reboot the reader (speed change / bus-off recovery) and reconnect WITHOUT a
+  // second reboot, polling until the port re-enumerates. The connected view stays
+  // mounted (so Live Network keeps its state) and everything pauses meanwhile.
+  const rebootAndReconnect = useCallback(async (issue: () => Promise<void>) => {
+    if (!port) return;
+    rebootingRef.current = true;
+    setRebooting(true);
+    setError(null);
+    try {
+      await issue();
+    } catch {
+      /* the reboot kills the in-flight reply; expected */
+    }
+    await Obd.disconnect(port).catch(() => undefined);
+    await sleep(1200); // let USB drop + start to re-enumerate
+    const deadline = Date.now() + 9000;
+    let ok = false;
+    while (Date.now() < deadline) {
+      try {
+        const ports = await Obd.findPorts();
+        const tgt = ports.includes(port) ? port : ports[0];
+        if (tgt) {
+          const banner = await Obd.reconnect(tgt);
+          setPort(tgt);
+          setFirmware(banner);
+          setBusSpeed(await Obd.readBitrate(tgt).catch(() => 500000));
+          setBusSpeedMs(await Obd.readBitrateMs(tgt).catch(() => 125000));
+          ok = true;
+          break;
+        }
+      } catch {
+        /* not back yet — keep polling */
+      }
+      await sleep(600);
+    }
+    rebootingRef.current = false;
+    setRebooting(false);
+    if (!ok) {
+      setError("Reader didn't come back after the reboot — unplug/replug the USB and hit Connect again.");
+      setStatus("error");
+    }
+  }, [port]);
+
+  async function changeBus(next: number) {
+    setBus(next); // instant — no reboot
+    // Point transmit + ISO-TP at the selected bus so Send/VIN/DTCs/Console/Run
+    // talk to whatever is on these pins (HS 6/14 or MS 3/11).
+    if (port) await Obd.selectBus(port, next);
+  }
+
+  async function changeBusSpeed(bps: number) {
+    const current = bus === 1 ? busSpeedMs : busSpeed;
+    if (!port || bps === current) return;
+    if (bus === 1) setBusSpeedMs(bps); else setBusSpeed(bps);
+    await rebootAndReconnect(() => Obd.setBusSpeed(port, bps, bus));
+  }
+
+  async function resetCanAndReconnect() {
+    if (!port) return;
+    await rebootAndReconnect(() => Obd.resetCan(port));
+  }
+
   async function chooseScenario(next: SimScenario) {
     if (!port) return;
     setError(null);
@@ -134,20 +208,19 @@ export function ObdTab() {
       setLiveValues(new Map());
       setDtcs(null);
       setVin(null);
-      setCanFrames([]);
       setSim(next === "OFF" ? null : next);
     } catch (err) {
       setError((err as Error).message);
     }
   }
 
-  // One poll tick: battery always; live PIDs when a scan is active; raw frames
-  // alongside. All sequential because the device handles one command at a time.
+  // One poll tick: battery always; live PIDs when a scan is active. Paused during
+  // a reboot so a dropped session doesn't surface as a connection error.
   useEffect(() => {
     if (status !== "connected" || !port) return;
     let cancelled = false;
     const tick = async () => {
-      if (polling.current) return;
+      if (polling.current || rebootingRef.current) return;
       polling.current = true;
       try {
         const t = await Obd.readTelemetry(port);
@@ -165,41 +238,8 @@ export function ObdTab() {
           }
           if (!cancelled) setLiveValues(next);
         }
-
-        // Passive bus monitor: just listen for whatever frames arrive, whether or
-        // not anything answered our requests. This is the key diagnostic.
-        if (monitorOn.current || (liveOn.current && livePidsRef.current.length)) {
-          try {
-            const frames = await Obd.canDump(port, monitorBusRef.current);
-            if (!cancelled) {
-              setCanFrames(frames);
-              if (frames.length) setMonitorSeen((n) => n + frames.length);
-              if (monitorOn.current && frames.length) {
-                const ts = Date.now();
-                for (const f of frames) {
-                  logRef.current.push(`${ts} ${f.id.toString(16).toUpperCase().padStart(3, "0")} ${f.data}`);
-                }
-                if (logRef.current.length > 10000) logRef.current.splice(0, logRef.current.length - 10000);
-                setLogLines(logRef.current.length);
-              }
-              // Stall detection: frames were flowing, then stopped → likely bus-off.
-              if (monitorOn.current) {
-                if (frames.length) {
-                  seenAny.current = true;
-                  emptyPolls.current = 0;
-                  if (canStalled) setCanStalled(false);
-                } else if (seenAny.current) {
-                  emptyPolls.current++;
-                  if (emptyPolls.current >= 5 && !canStalled) setCanStalled(true);
-                }
-              }
-            }
-          } catch {
-            /* best-effort */
-          }
-        }
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && !rebootingRef.current) {
           setError((err as Error).message);
           setStatus("error");
         }
@@ -231,7 +271,7 @@ export function ObdTab() {
     try {
       const newRatio = await Obd.calibrateToVoltage(port, actual);
       setRatio(newRatio);
-      const fresh = await Obd.readTelemetry(port); // refresh the gauge immediately, don't wait for the poll
+      const fresh = await Obd.readTelemetry(port);
       setTelemetry(fresh);
       setCalMsg(`Calibrated: ratio = ${newRatio.toFixed(3)} — now reading ${fresh.volts.toFixed(2)} V (target ${actual.toFixed(2)}).`);
     } catch (err) {
@@ -253,13 +293,13 @@ export function ObdTab() {
     setScanning(true);
     setLiveError(null);
     try {
-      await Obd.canInit(port).catch(() => undefined); // harmless if already up / sim
+      await Obd.canInit(port).catch(() => undefined);
       const pids = await Obd.scanSupportedPids(port);
       setLivePids(pids);
       livePidsRef.current = pids;
       liveOn.current = true;
       if (pids.length === 0) {
-        setLiveError("No module answered the OBD-II request. Try Monitor bus below to see whether any raw frames arrive at all.");
+        setLiveError("No module answered the OBD-II request. Use Live network above to see whether raw frames arrive at all.");
       }
     } catch (err) {
       liveOn.current = false;
@@ -267,81 +307,6 @@ export function ObdTab() {
     } finally {
       setScanning(false);
     }
-  }
-
-  function toggleMonitor() {
-    if (!port) return;
-    const next = !monitorOn.current;
-    monitorOn.current = next;
-    setMonitoring(next);
-    if (next) {
-      setCanFrames([]);
-      setMonitorSeen(0);
-      logRef.current = [];
-      setLogLines(0);
-      seenAny.current = false;
-      emptyPolls.current = 0;
-      setCanStalled(false);
-      Obd.canInit(port).catch(() => undefined); // ensure CAN is up (no-op on this firmware)
-    }
-  }
-
-  // Switch which bus the passive monitor listens on (HS pins 6/14 vs MS pins 3/11).
-  function changeMonitorBus(bus: number) {
-    monitorBusRef.current = bus;
-    setMonitorBusState(bus);
-    setCanFrames([]);
-    setMonitorSeen(0);
-    seenAny.current = false;
-    emptyPolls.current = 0;
-    setCanStalled(false);
-  }
-
-  // Change a bus's speed: the reader stores it and reboots, so reconnect after.
-  async function changeBusSpeed(b: number, bus: number) {
-    const current = bus === 1 ? busSpeedMs : busSpeed;
-    if (!port || b === current) return;
-    if (bus === 1) setBusSpeedMs(b); else setBusSpeed(b);
-    await Obd.setBusSpeed(port, b, bus);
-    disconnect();
-    setTimeout(() => { void connect(); }, 3500); // reader reboots into the new speed
-  }
-
-  // Recover from a bus-off stall: reboot the reader, then auto-reconnect.
-  async function resetCanAndReconnect() {
-    if (!port) return;
-    setCanStalled(false);
-    seenAny.current = false;
-    emptyPolls.current = 0;
-    await Obd.resetCan(port);
-    disconnect();
-    setTimeout(() => { void connect(); }, 3500); // reader reboots + re-enumerates
-  }
-
-  async function probeAndCapture() {
-    if (!port) return;
-    setProbeBusy(true);
-    setProbeFrames(null);
-    setError(null);
-    try {
-      // Send a functional OBD-II supported-PIDs request, capture everything that follows.
-      const frames = await Obd.reqdump(port, 0x7df, [0x01, 0x00]);
-      setProbeFrames(frames);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setProbeBusy(false);
-    }
-  }
-
-  function downloadLog() {
-    const blob = new Blob([logRef.current.join("\n")], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `can-log-${Date.now()}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   async function readCodes() {
@@ -387,7 +352,7 @@ export function ObdTab() {
             <p className="tiny dim mt-8">
               Flash <span className="mono">hardware/obd-reader/firmware/main.py</span> to the Pico (see{" "}
               <span className="mono">FLASH.md</span>), plug it in over USB, and close Thonny. Then connect to read live
-              battery voltage, scan all live data, and pull trouble codes.
+              battery voltage, map the bus, and pull trouble codes.
             </p>
             <div className="row mt-12">
               <button className="primary" onClick={connect} disabled={status === "connecting"}>
@@ -436,6 +401,7 @@ export function ObdTab() {
             </p>
           </div>
         )}
+
         {/* Bench simulator */}
         <div className="card" style={{ borderColor: sim ? "var(--warn)" : "var(--border)" }}>
           <div className="row spread">
@@ -493,7 +459,25 @@ export function ObdTab() {
           {calMsg && <p className="tiny mt-8" style={{ color: "var(--accent)" }}>{calMsg}</p>}
         </div>
 
-        {/* Full vehicle scan — discover every module + read its codes/VIN */}
+        {/* ───────────────── THE BUS COCKPIT ───────────────── */}
+        <GroupHeader label="The bus cockpit" hint="map · raw · signals · console — one place to watch & talk" />
+
+        {!sim && <DeviceHealth port={port!} firmware={firmware} />}
+
+        <CanNetwork
+          port={port!}
+          sim={!!sim}
+          bus={bus}
+          speed={bus === 1 ? busSpeedMs : busSpeed}
+          rebooting={rebooting}
+          onBus={changeBus}
+          onSpeed={changeBusSpeed}
+          onReset={resetCanAndReconnect}
+        />
+
+        {/* ───────────────── GUIDED DIAGNOSTICS ───────────────── */}
+        <GroupHeader label="Guided diagnostics" hint="discover every module · read codes · live data" />
+
         <VehicleScan port={port!} sim={!!sim} />
 
         {/* Live data — active OBD-II query scan */}
@@ -568,112 +552,6 @@ export function ObdTab() {
           )}
         </div>
 
-        {/* Passive bus monitor — listens for raw frames regardless of requests */}
-        <div className="card mt-16" style={{ borderColor: monitoring ? "var(--info)" : "var(--border)" }}>
-          <div className="row spread">
-            <h3>Bus monitor <span className="tiny dim">— passive · {monitorBus === 1 ? "MS-CAN (pins 3/11)" : "HS-CAN (pins 6/14)"}</span></h3>
-            <div className="row" style={{ gap: 8 }}>
-              <div className="seg tiny">
-                <button className={monitorBus === 0 ? "active" : ""} onClick={() => changeMonitorBus(0)}>HS 6/14</button>
-                <button className={monitorBus === 1 ? "active" : ""} onClick={() => changeMonitorBus(1)}>MS 3/11</button>
-              </div>
-              {logLines > 0 && (
-                <button className="tiny" onClick={downloadLog} title="Download captured frames as a .txt log">
-                  Download log ({logLines})
-                </button>
-              )}
-              <button className="tiny" onClick={resetCanAndReconnect} title="Reboot the reader to clear a bus-off and reconnect">
-                Reset CAN
-              </button>
-              <button className={monitoring ? "primary" : ""} onClick={toggleMonitor}>
-                {monitoring ? "Stop monitoring" : "Monitor bus"}
-              </button>
-            </div>
-          </div>
-          <div className="row mt-8" style={{ gap: 8, alignItems: "center" }}>
-            <span className="tiny dim">{monitorBus === 1 ? "MS" : "HS"} speed</span>
-            <div className="seg tiny">
-              {[500000, 250000, 125000].map((b) => {
-                const active = (monitorBus === 1 ? busSpeedMs : busSpeed) === b;
-                return (
-                  <button key={b} className={active ? "active" : ""} onClick={() => changeBusSpeed(b, monitorBus)}>
-                    {b / 1000}k
-                  </button>
-                );
-              })}
-            </div>
-            <span className="tiny dim">
-              {monitorBus === 1
-                ? "MS-CAN (pins 3/11) is usually 125k. Changing reboots the reader."
-                : "HS-CAN (pins 6/14) is 500k on almost all 2008+ cars. Changing reboots the reader."}
-            </span>
-          </div>
-          {canStalled && (
-            <div className="card compact mt-8" style={{ borderColor: "var(--warn)" }}>
-              <p className="tiny" style={{ color: "var(--warn)", margin: 0 }}>
-                ⚠ Frames stopped — the controller likely went <strong>bus-off</strong> (a transmit wasn't ACK'd). This
-                won't happen on a real multi-module car.{" "}
-                <button className="tiny primary" style={{ marginLeft: 6 }} onClick={resetCanAndReconnect}>Reset CAN now</button>
-              </p>
-            </div>
-          )}
-          {monitoring && (
-            <p className="tiny dim mt-8">
-              Listening on CAN-H/CAN-L… <strong>{monitorSeen}</strong> frame{monitorSeen === 1 ? "" : "s"} seen.
-              {monitorSeen === 0 && " If this stays 0, nothing is reaching the reader — see the checklist below."}
-            </p>
-          )}
-          {canFrames.length > 0 && (
-            <pre className="mono tiny" style={{ margin: 0, marginTop: 10, maxHeight: "24vh", overflow: "auto" }}>
-              {canFrames.map((f) => `${f.id.toString(16).toUpperCase().padStart(3, "0")}  ${f.data}`).join("\n")}
-            </pre>
-          )}
-          {monitoring && monitorSeen === 0 && (
-            <ul className="tiny dim mt-8" style={{ lineHeight: 1.7, paddingLeft: 18 }}>
-              <li><strong>Swap CAN-H / CAN-L</strong> — they're easy to get backwards.</li>
-              <li><strong>Common ground</strong> tied: reader GND ↔ TCM ground ↔ supply minus.</li>
-              <li>Terminator across the CAN pair (your 100 Ω).</li>
-              <li>If a powered, known-good module still shows 0 frames, the issue is likely our reader's CAN — a known-broadcasting partner (2nd Pico) would prove it.</li>
-            </ul>
-          )}
-
-          {/* Active probe — find responses on ANY address (incl. non-standard) */}
-          <div className="row spread mt-12" style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-            <span className="tiny dim">Active probe — send a request, capture every id that follows</span>
-            <button className="tiny" onClick={probeAndCapture} disabled={probeBusy}>
-              {probeBusy ? "Probing…" : "Probe & capture"}
-            </button>
-          </div>
-          {probeFrames && (
-            <div className="mt-8">
-              {probeFrames.length === 0 ? (
-                <p className="tiny dim">Nothing on the bus after the request.</p>
-              ) : (
-                <>
-                  <p className="tiny dim">Distinct ids seen after the request (a diagnostic response shows in <span style={{ color: "var(--accent)" }}>green</span>):</p>
-                  <pre className="mono tiny" style={{ margin: 0, marginTop: 6, maxHeight: "20vh", overflow: "auto" }}>
-                    {probeFrames.map((f) => {
-                      const isResp = f.id >= 0x7e8 && f.id <= 0x7ef;
-                      const line = `${f.id.toString(16).toUpperCase().padStart(3, "0")}  ${f.data}${isResp ? "   ← response" : ""}`;
-                      return isResp ? <span key={f.id} style={{ color: "var(--accent)" }}>{line + "\n"}</span> : line + "\n";
-                    })}
-                  </pre>
-                  <p className="tiny dim mt-8">
-                    If you only see your known broadcast ids (174/176/177/421/560) and no response, this module isn't
-                    answering tester requests standalone — normal for a bench TCM without the rest of the car's network.
-                    On a real car the engine ECM does answer. Tell me any new id and I'll target it.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Signal Lab — reverse-engineer raw broadcast frames into named signals */}
-        <SignalLab port={port!} />
-
-        {/* UDS console — send any service to any module (diagnostic control) */}
-        <UdsConsole port={port!} />
       </div>
     </>
   );

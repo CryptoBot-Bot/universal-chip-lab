@@ -57,7 +57,9 @@ unsigned long simT0 = 0;
 bool simCleared = false;
 
 // ---- CAN RX ring buffers (single-producer IRQ, single-consumer loop) ----
-#define RXBUF 48
+// Big enough that a busy car bus can't overflow it and drop our reply between
+// the request and when we drain it.
+#define RXBUF 256
 static struct can2040_msg rxq[RXBUF];
 volatile uint8_t rxHead = 0, rxTail = 0;
 static struct can2040_msg rxq2[RXBUF];   // MS-CAN
@@ -194,42 +196,38 @@ static void canSendFrame(uint32_t id, const uint8_t* d, int dlc) {
   can->send_message(&m);
 }
 
-// Sends a single-frame request (<=7 bytes) to txid, then reassembles the first
-// response from any 0x7E8-0x7EF (single + multi-frame w/ flow control). `out`
-// gets the RAW response INCLUDING the service byte. Returns length, 0 on timeout.
-static int isotpRequest(uint32_t txid, const uint8_t* req, int reqLen,
-                        uint8_t* out, int outMax, uint32_t* respId) {
-  if (!can || reqLen > 7) return -1;          // single-frame requests only
-
+// One send + receive-window attempt. Returns assembled length (0 = no response).
+static int isotpAttempt(uint32_t txid, const uint8_t* req, int reqLen,
+                        uint8_t* out, int outMax, uint32_t* respId, uint32_t windowMs) {
   struct can2040_msg drain;
-  while (popRx(&drain)) {}                     // flush stale frames
+  while (popRx(&drain)) {}                       // flush stale frames
 
   uint8_t f[8];
-  f[0] = (uint8_t)reqLen;                       // single-frame PCI = length
+  f[0] = (uint8_t)reqLen;                         // single-frame PCI = length
   for (int i = 0; i < reqLen; i++) f[1 + i] = req[i];
   canSendFrame(txid, f, 1 + reqLen);
 
   int asmLen = 0, expected = -1;
   uint32_t rid = 0;
-  uint32_t deadline = millis() + OBD_TIMEOUT_MS;
+  uint32_t deadline = millis() + windowMs;
 
   while ((long)(deadline - millis()) > 0) {
     struct can2040_msg m;
     if (!popRx(&m)) { delay(1); continue; }
     uint32_t id = m.id & 0x1FFFFFFF;
-    if (id < 0x7E8 || id > 0x7EF) continue;
+    if (id < 0x7E8 || id > 0x7EF) continue;       // OBD/UDS responses only
     uint8_t pci = m.data[0] & 0xF0;
-    if (pci == 0x00) {                          // single frame
+    if (pci == 0x00) {                            // single frame
       int len = m.data[0] & 0x0F;
       for (int i = 0; i < len && i < outMax; i++) out[i] = m.data[1 + i];
       asmLen = len; rid = id; break;
-    } else if (pci == 0x10) {                   // first frame
+    } else if (pci == 0x10) {                     // first frame
       expected = ((m.data[0] & 0x0F) << 8) | m.data[1];
       for (int i = 0; i < 6 && asmLen < outMax; i++) out[asmLen++] = m.data[2 + i];
       rid = id;
-      uint8_t fc[3] = { 0x30, 0x00, 0x00 };     // flow control -> responder's request id
+      uint8_t fc[3] = { 0x30, 0x00, 0x00 };       // flow control -> responder's request id
       canSendFrame(id - 8, fc, 3);
-    } else if (pci == 0x20) {                    // consecutive frame
+    } else if (pci == 0x20) {                     // consecutive frame
       for (int i = 0; i < 7 && asmLen < expected && asmLen < outMax; i++)
         out[asmLen++] = m.data[1 + i];
       if (expected > 0 && asmLen >= expected) break;
@@ -237,6 +235,20 @@ static int isotpRequest(uint32_t txid, const uint8_t* req, int reqLen,
   }
   if (respId) *respId = rid;
   return asmLen;
+}
+
+// Sends a single-frame request and reassembles the response, RETRYING a few
+// times — on a busy car bus a low-priority 0x7DF can lose arbitration or its
+// reply can be missed, so one shot isn't enough. `out` gets the RAW response
+// INCLUDING the service byte. Returns length, 0 on no response.
+static int isotpRequest(uint32_t txid, const uint8_t* req, int reqLen,
+                        uint8_t* out, int outMax, uint32_t* respId) {
+  if (!can || reqLen > 7) return -1;            // single-frame requests only
+  for (int attempt = 0; attempt < 3; attempt++) {
+    int n = isotpAttempt(txid, req, reqLen, out, outMax, respId, 400);
+    if (n > 0) return n;
+  }
+  return 0;
 }
 
 // OBD-II to the functional address; returns the response AFTER the service byte
@@ -330,7 +342,7 @@ static void handle(char* line) {
   if (!strcmp(cmd, "PING")) {
     printOK(FIRMWARE);
   } else if (!strcmp(cmd, "HELP")) {
-    printOK("PING INFO BATT CAL<r> SPEED<125|250|500> SPEEDMS<125|250|500> RESET CANINIT CANRESET CANDUMP CANDUMP2 OBD<mode>[<pid>] ISOTP<txid><hex> REQDUMP<txid><hex> PROBE SIM<OFF|IGNITION|WEAK|IDLE|DRIVE>");
+    printOK("PING INFO BATT CANSTAT CAL<r> SPEED<125|250|500> SPEEDMS<125|250|500> RESET CANINIT CANRESET CANDUMP CANDUMP2 OBD<mode>[<pid>] ISOTP<txid><hex> REQDUMP<txid><hex> PROBE SIM<OFF|IGNITION|WEAK|IDLE|DRIVE>");
   } else if (!strcmp(cmd, "INFO")) {
     char b[120];
     snprintf(b, sizeof(b), "ratio=%.3f | low=%.1f charging=%.1f | can=up@%lu | ms=up@%lu | sim=%s | can2040",
@@ -373,6 +385,16 @@ static void handle(char* line) {
     saveBitrate((uint32_t)v);
     char b[40]; snprintf(b, sizeof(b), "speed=%ld, rebooting", v); printOK(b);
     Serial.flush(); delay(50); rp2040.reboot();
+  } else if (!strcmp(cmd, "CANSTAT")) {
+    // can2040's own counters — the truth about transmit. txAttempt>0 & tx=0 means
+    // we're trying to send but frames never complete (no ACK / not reaching bus).
+    struct can2040_stats st = { 0, 0, 0, 0 };
+    if (can) can->get_statistics(&st);
+    char b[110];
+    snprintf(b, sizeof(b), "HS rx=%lu tx=%lu txAttempt=%lu parseErr=%lu",
+             (unsigned long)st.rx_total, (unsigned long)st.tx_total,
+             (unsigned long)st.tx_attempt, (unsigned long)st.parse_error);
+    printOK(b);
   } else if (!strcmp(cmd, "CANINIT")) {
     char b[32]; snprintf(b, sizeof(b), "can up @ %lu bps", (unsigned long)bitrate); printOK(b);
   } else if (!strcmp(cmd, "CANDUMP")) {

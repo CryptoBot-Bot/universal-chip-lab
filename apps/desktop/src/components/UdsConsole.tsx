@@ -9,6 +9,9 @@ import { negativeResponse } from "../lib/uds";
  * own (sessions, read/write data, routines, security access). Reuses the
  * firmware's ISOTP primitive.
  *
+ * `embedded` drops the outer card + intro so it can live as a tab inside the
+ * bus cockpit; standalone it renders its own card.
+ *
  * Note: Security Access (0x27) returns a seed; the matching key uses an
  * OEM-specific algorithm you must supply for the target module — this console
  * sends/receives the bytes, it does not compute proprietary keys.
@@ -40,7 +43,7 @@ function parseHex(s: string): number[] {
   return out;
 }
 
-export function UdsConsole({ port }: { port: string }) {
+export function UdsConsole({ port, embedded = false }: { port: string; embedded?: boolean }) {
   const [addr, setAddr] = useState("7E1"); // TCM physical request id by default
   const [input, setInput] = useState("3E 00");
   const [busy, setBusy] = useState(false);
@@ -66,15 +69,19 @@ export function UdsConsole({ port }: { port: string }) {
     }
   }
 
-  return (
-    <div className="card mt-16">
-      <h3>UDS console <span className="tiny dim">— send any service to any module</span></h3>
-      <p className="tiny dim mt-8">
-        Power tool for diagnostic control of a module you own: sessions, read/write data, routines, security access.
-        Best used on a live vehicle — transmitting onto an unACKed bench bus can bus-off the controller.
-      </p>
+  const body = (
+    <>
+      {!embedded && (
+        <>
+          <h3>UDS console <span className="tiny dim">— send any service to any module</span></h3>
+          <p className="tiny dim mt-8">
+            Power tool for diagnostic control of a module you own: sessions, read/write data, routines, security access.
+            Best used on a live vehicle — transmitting onto an unACKed bench bus can bus-off the controller.
+          </p>
+        </>
+      )}
 
-      <div className="row wrap mt-12" style={{ gap: 6, alignItems: "center" }}>
+      <div className="row wrap mt-8" style={{ gap: 6, alignItems: "center" }}>
         <span className="tiny dim">to id</span>
         <input value={addr} onChange={(e) => setAddr(e.target.value)} style={{ width: 70 }} className="mono" />
         <input
@@ -111,6 +118,9 @@ export function UdsConsole({ port }: { port: string }) {
         Security Access (Request seed → send key) needs the OEM key algorithm for this specific module — supply it from
         legitimate tooling. This console moves the bytes; it doesn't compute proprietary keys.
       </p>
-    </div>
+    </>
   );
+
+  if (embedded) return <div className="mt-4">{body}</div>;
+  return <div className="card mt-16">{body}</div>;
 }

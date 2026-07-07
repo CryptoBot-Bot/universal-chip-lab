@@ -79,6 +79,9 @@ export const Obd = {
   /** Auto-detect the Pico's COM port (RP2040 USB id 2E8A). Null if not found. */
   findPort: (): Promise<string | null> => Api.pico.findPort(),
 
+  /** ALL RP2040 COM ports — there can be several (reader + fake ECU, etc.). */
+  findPorts: (): Promise<string[]> => Api.pico.findPorts(),
+
   /**
    * Connects (reboots the firmware so we start clean) and confirms the Pico is
    * running the OBD-Reader firmware — not PicoForge on the same RP2040 USB id.
@@ -95,6 +98,54 @@ export const Obd = {
       );
     }
     return banner;
+  },
+
+  /**
+   * Re-opens the serial session after a firmware reboot WITHOUT triggering
+   * another reboot (identify resets on connect; this doesn't). Returns the
+   * banner; throws until the port is back on OBD-Reader firmware.
+   */
+  async reconnect(port: string): Promise<string> {
+    const reply = await Api.pico.command({ port, command: "PING" });
+    throwIfErr(reply);
+    const banner = payload(reply);
+    if (!/OBD/i.test(banner)) throw new Error(`Pico on ${port} isn't the OBD-Reader firmware yet.`);
+    return banner;
+  },
+
+  /** Raw INFO line (firmware settings snapshot), for the troubleshoot report. */
+  async info(port: string): Promise<string> {
+    const reply = await Api.pico.command({ port, command: "INFO" });
+    throwIfErr(reply);
+    return payload(reply);
+  },
+
+  /**
+   * Raw CANSTAT counters (`rx tx txAttempt parseErr`) straight from can2040 —
+   * the truth about transmit. Empty string if the firmware predates the command.
+   */
+  async canStat(port: string): Promise<string> {
+    try {
+      const reply = await Api.pico.command({ port, command: "CANSTAT" });
+      if (reply.startsWith("ERR")) return "";
+      return payload(reply);
+    } catch {
+      return "";
+    }
+  },
+
+  /**
+   * Full device + wiring self-test. Reads INFO, then samples CANSTAT twice ~900 ms
+   * apart so we can tell not just whether each MCP2515 initialised (up/down) but
+   * whether it's actually RECEIVING frames (rx climbing). Returns a structured
+   * report the health cockpit renders and the copy-diagnostics button bundles.
+   */
+  async selfTest(port: string): Promise<DeviceHealth> {
+    const info = await Obd.info(port);
+    const canstat1 = await Obd.canStat(port);
+    await new Promise((r) => setTimeout(r, 900));
+    const canstat2 = await Obd.canStat(port);
+    return parseDeviceHealth(info, canstat1, canstat2);
   },
 
   /** One live battery sample. */
@@ -125,19 +176,27 @@ export const Obd = {
     return m ? Number(m[1]) : 5.7;
   },
 
-  /** Reads the HS-CAN bitrate (from INFO). Defaults to 500000. */
+  /**
+   * Reads the HS-CAN bitrate (from INFO). Matches whether the controller is
+   * up or down (`can=up@500000` / `can=DOWN@500000`) so the saved speed still
+   * shows even when the bus didn't come up. Defaults to 500000.
+   */
   async readBitrate(port: string): Promise<number> {
     const reply = await Api.pico.command({ port, command: "INFO" });
     throwIfErr(reply);
-    const m = payload(reply).match(/can=up@(\d+)/);
+    const m = payload(reply).match(/can=\w+@(\d+)/i);
     return m ? Number(m[1]) : 500000;
   },
 
-  /** Reads the MS-CAN bitrate (from INFO). Defaults to 125000. */
+  /**
+   * Reads the MS-CAN bitrate (from INFO). Matches up OR down (`ms=up@125000` /
+   * `ms=DOWN@500000`) — crucial so a saved MS speed isn't misreported as the
+   * 125k default just because the 2nd MCP2515 isn't initialising. Defaults 125000.
+   */
   async readBitrateMs(port: string): Promise<number> {
     const reply = await Api.pico.command({ port, command: "INFO" });
     throwIfErr(reply);
-    const m = payload(reply).match(/ms=up@(\d+)/);
+    const m = payload(reply).match(/ms=\w+@(\d+)/i);
     return m ? Number(m[1]) : 125000;
   },
 
@@ -149,6 +208,16 @@ export const Obd = {
   async setBusSpeed(port: string, bitrate: number, bus = 0): Promise<void> {
     const cmd = bus === 1 ? `SPEEDMS ${bitrate}` : `SPEED ${bitrate}`;
     await Api.pico.command({ port, command: cmd, timeoutMs: 2000 }).catch(() => undefined);
+  },
+
+  /**
+   * Selects which bus TRANSMITS (and which ISO-TP listens on): 0 = HS (6/14),
+   * 1 = MS (3/11). Instant — no reboot. Both buses always receive passively, so
+   * monitoring the other bus keeps working. Silently ignored on firmware that
+   * predates the CANBUS command (older builds stay HS-only).
+   */
+  async selectBus(port: string, bus: number): Promise<void> {
+    await Api.pico.command({ port, command: `CANBUS ${bus === 1 ? "MS" : "HS"}` }).catch(() => undefined);
   },
 
   /**
@@ -367,6 +436,105 @@ export const Obd = {
   disconnect: (port: string): Promise<{ stopped: boolean }> => Api.pico.disconnect(port),
 };
 
+/** Health of one CAN controller, parsed from INFO + CANSTAT. */
+export interface BusHealth {
+  label: string;              // "HS-CAN (6/14)" / "MS-CAN (3/11)"
+  present: boolean;           // controller initialised (INFO up)
+  bitrate: number;
+  rx: number;
+  tx: number;
+  txFail: number | null;
+  tec: number | null;         // transmit error counter (255 = bus-off)
+  rec: number | null;         // receive error counter
+  eflg: number | null;        // MCP2515 EFLG register
+  rxDelta: number;            // frames received during the ~0.9 s sample window
+  verdict: "healthy" | "idle" | "busoff" | "down";
+  note: string;
+}
+
+/** Whole-device self-test result. */
+export interface DeviceHealth {
+  firmware: string;
+  xtalMHz: number | null;
+  txbus: "HS" | "MS" | null;
+  ratio: number | null;
+  hs: BusHealth;
+  ms: BusHealth;
+  raw: { info: string; canstat1: string; canstat2: string };
+}
+
+function num(re: RegExp, s: string): number | null {
+  const m = s.match(re);
+  return m ? Number(m[1]) : null;
+}
+
+function busHealth(
+  label: string,
+  key: "can" | "ms",
+  info: string,
+  cs1: string,
+  cs2: string,
+): BusHealth {
+  const up = new RegExp(`${key}=up@(\\d+)`, "i");
+  const any = new RegExp(`${key}=\\w+@(\\d+)`, "i");
+  const present = up.test(info);
+  const bitrate = num(any, info) ?? (key === "ms" ? 125000 : 500000);
+
+  // CANSTAT segments: "HS rx=.. tx=.. txFail=.. tec=.. rec=.. eflg=0x.." and
+  // "MS rx=.. tx=.. eflg=0x.." (or "MS down").
+  const seg = (s: string): string => {
+    const parts = s.split("|").map((p) => p.trim());
+    const want = key === "ms" ? /^MS\b/i : /^HS\b/i;
+    return parts.find((p) => want.test(p)) ?? "";
+  };
+  const s1 = seg(cs1), s2 = seg(cs2);
+  const rx1 = num(/rx=(\d+)/, s1) ?? 0;
+  const rx = num(/rx=(\d+)/, s2) ?? rx1;
+  const tx = num(/tx=(\d+)/, s2) ?? 0;
+  const txFail = num(/txFail=(\d+)/, s2);
+  const tec = num(/tec=(-?\d+)/, s2);
+  const rec = num(/rec=(-?\d+)/, s2);
+  const eflgM = s2.match(/eflg=0x([0-9A-Fa-f]+)/);
+  const eflg = eflgM ? parseInt(eflgM[1], 16) : null;
+  const rxDelta = Math.max(0, rx - rx1);
+
+  let verdict: BusHealth["verdict"];
+  let note: string;
+  if (!present) {
+    verdict = "down";
+    note =
+      key === "ms"
+        ? "Not detected. The Pico shares SCK/MOSI/MISO with HS (which works), so the fault is specific to this module: check CS→GP15, its VCC + a COMMON ground with the Pico, and swap the module if those are good."
+        : "Not detected. Check CS→GP17, power/ground, and the 8/16 MHz crystal setting.";
+  } else if (tec !== null && tec >= 255) {
+    verdict = "busoff";
+    note = "Bus-off — transmit errors hit the limit (no ACK / bad termination). Reset CAN and check ~60 Ω across the pair.";
+  } else if (rxDelta > 0) {
+    verdict = "healthy";
+    note = `Receiving ${rxDelta} frame${rxDelta === 1 ? "" : "s"} in ~0.9 s — wired and listening.`;
+  } else {
+    verdict = "idle";
+    note = "Initialised, but no frames arriving — bus idle, nothing on these pins, or wrong speed for this bus.";
+  }
+  if (eflg && eflg & 0x40) note += " (RX overflow flag set — some frames dropped on a busy bus.)";
+
+  return { label, present, bitrate, rx, tx, txFail, tec, rec, eflg, rxDelta, verdict, note };
+}
+
+/** Parses INFO + two CANSTAT samples into a {@link DeviceHealth}. */
+export function parseDeviceHealth(info: string, cs1: string, cs2: string): DeviceHealth {
+  const txbusM = info.match(/txbus=(HS|MS)/i);
+  return {
+    firmware: "",
+    xtalMHz: num(/xtal=(\d+)/i, info),
+    txbus: txbusM ? (txbusM[1].toUpperCase() as "HS" | "MS") : null,
+    ratio: num(/ratio=([\d.]+)/, info),
+    hs: busHealth("HS-CAN (pins 6/14)", "can", info, cs1, cs2),
+    ms: busHealth("MS-CAN (pins 3/11)", "ms", info, cs1, cs2),
+    raw: { info, canstat1: cs1, canstat2: cs2 },
+  };
+}
+
 /** Parses `<ms>,<volts>,<state>,<vmin>,<vmax>` into a Telemetry. Throws on garbage. */
 export function parseTelemetry(csv: string): Telemetry {
   const f = csv.split(",");
@@ -380,14 +548,22 @@ export function parseTelemetry(csv: string): Telemetry {
   return { ms, volts, state, vmin, vmax };
 }
 
-/** Parses `id#hex id#hex …` (the CANDUMP payload) into frames. "(no frames)" → []. */
+/**
+ * Parses `id#hex id#hex …` (the CANDUMP payload) into frames. "(no frames)" → [].
+ * A real frame token ALWAYS contains "#", so tokens without it are ignored — this
+ * prevents a human-readable status line (e.g. "(MS controller down …)") from being
+ * mis-parsed into phantom nodes like 00C/00D/002.
+ */
 export function parseCanFrames(text: string): CanFrame[] {
   if (!text || text === "(no frames)") return [];
   const out: CanFrame[] = [];
   for (const tok of text.split(/\s+/)) {
+    if (!tok.includes("#")) continue; // not a frame — skip status words
     const [idHex, data] = tok.split("#");
     const id = parseInt(idHex, 16);
-    if (Number.isFinite(id)) out.push({ id, data: (data ?? "").toLowerCase() });
+    if (Number.isFinite(id) && /^[0-9a-fA-F]+$/.test(idHex)) {
+      out.push({ id, data: (data ?? "").toLowerCase() });
+    }
   }
   return out;
 }
