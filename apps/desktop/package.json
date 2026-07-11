@@ -19,6 +19,10 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.102.0",
+    "@react-three/drei": "^9.114.0",
+    "@react-three/fiber": "^8.17.10",
+    "@types/three": "^0.169.0",
+    "three": "^0.169.0",
     "@ecu/adapters": "workspace:*",
     "@ecu/chip-db": "workspace:*",
     "@ecu/core": "workspace:*",

@@ -72,6 +72,13 @@ const api = {
     analyze: (input: unknown) => invoke("busIntel:analyze", input),
     bake:    () => invoke("busIntel:bake"),
   },
+  vehicleLib: {
+    list:    () => invoke("vehicleLib:list"),
+    save:    (record: unknown) => invoke("vehicleLib:save", record),
+    delete:  (id: string) => invoke("vehicleLib:delete", { id }),
+    bake:    () => invoke("vehicleLib:bake"),
+    analyze: (scan: unknown) => invoke("vehicleLib:analyze", scan),
+  },
   moduleJobs: {
     list:      () => invoke("moduleJobs:list"),
     get:       (jobId: string) => invoke("moduleJobs:get", { jobId }),
@@ -87,6 +94,16 @@ const api = {
   },
   tools: {
     detect: () => invoke("tools:detect"),
+  },
+  superDevice: {
+    status: (host?: string) => invoke("superDevice:status", { host }),
+    readVin: (host?: string, iface?: string) => invoke("superDevice:vin", { host, iface }),
+    setUp: (host: string | undefined, iface: string, bitrate: number, fd: boolean) =>
+      invoke("superDevice:up", { host, iface, bitrate, fd }),
+    setDown: (host: string | undefined, iface: string) => invoke("superDevice:down", { host, iface }),
+    get: (host: string | undefined, path: string) => invoke("superDevice:get", { host, path }),
+    post: (host: string | undefined, path: string, body?: unknown) => invoke("superDevice:post", { host, path, body }),
+    discover: () => invoke("superDevice:discover"),
   },
   settings: {
     getKeyStatus: () => invoke("settings:getKeyStatus"),

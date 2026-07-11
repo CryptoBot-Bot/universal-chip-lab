@@ -9,6 +9,9 @@ const ITEMS: { to: string; label: string; icon: string }[] = [
   { to: "/chips", label: "Chip Database", icon: "◇" },
   { to: "/dumps", label: "Dumps",         icon: "▤" },
   { to: "/obd",   label: "OBD Reader",    icon: "🚗" },
+  { to: "/cockpit", label: "Vehicle Cockpit", icon: "🧭" },
+  { to: "/vehicles", label: "Vehicle Database", icon: "🗂" },
+  { to: "/training", label: "AI Training Room", icon: "🧠" },
   { to: "/settings", label: "Settings",   icon: "⚙" },
 ];
 

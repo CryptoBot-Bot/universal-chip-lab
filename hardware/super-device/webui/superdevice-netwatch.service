@@ -1,0 +1,11 @@
+[Unit]
+Description=SuperDevice WiFi fallback (setup hotspot when offline)
+After=NetworkManager.service network.target
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/superdevice/netwatch.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -5,8 +5,11 @@ import { Layout } from "./components/Layout";
 import { Api } from "./lib/api";
 import { PicoProvider } from "./lib/pico-connection";
 import { ChipDatabase } from "./routes/ChipDatabase";
+import { CockpitTab } from "./routes/CockpitTab";
 import { DumpsTab } from "./routes/DumpsTab";
 import { ObdTab } from "./routes/ObdTab";
+import { TrainingRoom } from "./routes/TrainingRoom";
+import { VehicleDatabase } from "./routes/VehicleDatabase";
 import { ReadTab } from "./routes/ReadTab";
 import { SettingsTab } from "./routes/SettingsTab";
 import { WriteTab } from "./routes/WriteTab";
@@ -48,6 +51,9 @@ export default function App() {
           <Route path="/chips" element={<ChipDatabase />} />
           <Route path="/dumps" element={<DumpsTab />} />
           <Route path="/obd" element={<ObdTab />} />
+          <Route path="/cockpit" element={<CockpitTab />} />
+          <Route path="/vehicles" element={<VehicleDatabase />} />
+          <Route path="/training" element={<TrainingRoom />} />
           <Route path="/settings" element={<SettingsTab />} />
           <Route path="*" element={<Navigate to="/read" />} />
         </Routes>

@@ -1,0 +1,13 @@
+[Unit]
+Description=SuperDevice CAN Control Panel (web UI)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/superdevice/superdevice_ui.py
+Restart=on-failure
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { BusModuleKnowledge, ModuleProfile, VehicleBrand } from "@ecu/vehicle-db";
+import type { BusModuleKnowledge, ModuleProfile, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -114,6 +114,67 @@ export interface BusMapResult {
   modules: BusModuleKnowledge[];
   summary: string;
 }
+
+export interface EcuObservation {
+  responseId: string;
+  requestId?: string;
+  supportedPids: string[];
+  identifiers: { did: string; ascii: string }[];
+  dtcs: string[];
+  liveSample: { name: string; value: string }[];
+}
+
+export interface VehicleScan {
+  vin: string;
+  year: number | null;
+  make: string | null;
+  country: string;
+  ecus: EcuObservation[];
+  notes?: string;
+}
+
+export interface MappedModule {
+  responseId: string;
+  name: string;
+  category: string;
+  supplier: string;
+  protocol: string;
+  memoryRead: string;
+  capabilities: string[];
+  confidence: "low" | "medium" | "high";
+  rationale: string;
+}
+
+export interface VehicleMapResult {
+  vehicle: { year: string; make: string; model: string; platform: string; summary: string };
+  modules: MappedModule[];
+}
+
+// ---- SuperDevice (Raspberry Pi 5 CAN interface) ----
+export interface SuperDeviceIface {
+  name: string;
+  present: boolean;
+  up?: boolean;
+  bitrate?: number;
+  dbitrate?: number;
+  fd?: boolean;
+  canstate?: string;
+  rx?: number;
+  tx?: number;
+  rxerr?: number;
+  role?: string;
+}
+export interface SuperDeviceStatus {
+  ifaces: SuperDeviceIface[];
+  sys: { temp: number | null; uptime: string; model: string; kernel: string; load: string };
+}
+export interface VinReadResult {
+  ok: boolean;
+  vin?: string;
+  error?: string;
+  raw?: string;
+}
+export interface DiscoveredDevice { host: string; ip: string; hostname: string; model: string }
 
 async function unwrap<T>(promise: Promise<IpcResponse<T>>): Promise<T> {
   const resp = await promise;
@@ -208,6 +269,14 @@ export const Api = {
     analyze: (input: BusMapRequest) => unwrap<BusMapResult>(api.busIntel.analyze(input) as never),
     bake:    () => unwrap<{ path: string; count: number }>(api.busIntel.bake() as never),
   },
+  vehicleLib: {
+    list:   () => unwrap<VehicleProfile[]>(api.vehicleLib.list() as never),
+    save:   (record: VehicleProfile) => unwrap<VehicleProfile[]>(api.vehicleLib.save(record) as never),
+    delete: (id: string) =>
+      unwrap<{ removed: boolean; records: VehicleProfile[] }>(api.vehicleLib.delete(id) as never),
+    bake:   () => unwrap<{ path: string; count: number }>(api.vehicleLib.bake() as never),
+    analyze: (scan: VehicleScan) => unwrap<VehicleMapResult>(api.vehicleLib.analyze(scan) as never),
+  },
   moduleJobs: {
     list:      () => unwrap<ModuleJobRecord[]>(api.moduleJobs.list() as never),
     get:       (id: string) => unwrap<ModuleJobRecord>(api.moduleJobs.get(id) as never),
@@ -230,6 +299,20 @@ export const Api = {
   },
   tools: {
     detect: () => unwrap<ToolStatus[]>(api.tools.detect() as never),
+  },
+  superDevice: {
+    status:  (host?: string) => unwrap<SuperDeviceStatus>(api.superDevice.status(host) as never),
+    readVin: (host?: string, iface?: string) =>
+      unwrap<VinReadResult>(api.superDevice.readVin(host, iface) as never),
+    setUp:   (host: string | undefined, iface: string, bitrate: number, fd: boolean) =>
+      unwrap<{ result: string }>(api.superDevice.setUp(host, iface, bitrate, fd) as never),
+    setDown: (host: string | undefined, iface: string) =>
+      unwrap<{ result: string }>(api.superDevice.setDown(host, iface) as never),
+    get:  <T = unknown>(host: string | undefined, path: string) =>
+      unwrap<T>(api.superDevice.get(host, path) as never),
+    post: <T = unknown>(host: string | undefined, path: string, body?: unknown) =>
+      unwrap<T>(api.superDevice.post(host, path, body) as never),
+    discover: () => unwrap<DiscoveredDevice[]>(api.superDevice.discover() as never),
   },
   settings: {
     getKeyStatus: () => unwrap<KeyStatus>(api.settings.getKeyStatus() as never),

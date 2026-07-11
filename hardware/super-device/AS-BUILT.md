@@ -275,6 +275,31 @@ Make it a **device**: everything routed to a labeled, keyed panel.
   ```
   Bring up: `sudo ip link set can0 up type can bitrate 500000 dbitrate 2000000 fd on`
   (classic HS: `bitrate 500000`; MS: `bitrate 125000`).
+
+### 8.1 AS-CONFIGURED — Waveshare isolated 2-CH HAT on Pi 5 (verified 2026-07-10)
+
+The generic two-`spi0` skeleton above did **not** work for this board on a Pi 5.
+Key facts learned on the bench:
+
+- The Waveshare **isolated** 2-CH CAN-FD HAT selects **Mode A (two separate SPI
+  buses) by default**, set by four **0 Ω solder-jumpers** (item 13). CAN_0 → SPI0/CE0,
+  **CAN_1 → SPI1** (GPIO 18/19/20/21). Mode B (shared SPI0 CE0/CE1) would need
+  desoldering — avoided.
+- On **Pi 5**, `dtoverlay=mcp251xfd,spi1-0` does **not** bring up the aux SPI1 (its
+  pinctrl isn't RP1-ready), so CAN_1 never enumerated. `dtoverlay=spi1-1cs` *does*
+  enable SPI1 — proving the bus works — so a **custom overlay** was written that
+  enables SPI1 the same way and binds the mcp251xfd at CS0.
+- **`dtparam=audio=off`** is required — onboard I2S otherwise holds GPIO 18–21.
+
+Working `/boot/firmware/config.txt` tail:
+```
+dtparam=audio=off
+dtparam=spi=on
+dtoverlay=mcp251xfd,spi0-0,interrupt=25      # can0 = HS-CAN (SPI0 CE0)
+dtoverlay=mcp-can1-spi1                        # can1 = MS-CAN (SPI1, custom overlay)
+```
+Custom overlay source + the web UI live in `hardware/super-device/webui/`
+(`mcp-can1-spi1.dts` documented there). Both channels pass internal loopback.
 - **Libraries:** `python-can`, kernel `can-isotp`, `udsoncan` (full UDS/ISO-14229 incl.
   SecurityAccess + RequestDownload/TransferData for lawful reflash), `cantools` (DBC/ARXML
   decode into named signals), `can-utils` (candump/canplayer for capture+replay).
@@ -350,8 +375,9 @@ Open honest gaps: **Tricore-class locked MCUs** (§3.5) are only partially reach
 
 | Subsystem | State | Notes |
 |---|---|---|
-| Pi 5 + OS + SocketCAN | ☐ | |
-| 2-CH CAN-FD HAT (HS+MS) | ☐ | confirm INT GPIOs/xtal/termination vs Waveshare wiki |
+| Pi 5 + OS + SocketCAN | ☑ | Bookworm 64-bit, kernel 6.18, can-utils, headless SSH. 2026-07-10. |
+| 2-CH CAN-FD HAT (HS+MS) | ☑ | can0=SPI0/INT25 (HS), can1=SPI1/INT24 (MS) via custom Mode-A overlay (§8.1). Both loopback-PASS. |
+| Web control panel (CAN UI) | ☑ | `hardware/super-device/webui/`; systemd `superdevice-ui`; http://superdevice.local:8080. 2026-07-10. |
 | Daemon speaking legacy protocol | ☐ | drop-in `.ino` replacement |
 | App link (USB-gadget serial) | ☐ | |
 | Power: buck 5 A + UPS + protection + RTC | ☐ | |

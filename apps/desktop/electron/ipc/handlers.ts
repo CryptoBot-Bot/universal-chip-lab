@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
@@ -13,13 +14,18 @@ import {
 } from "@ecu/chip-db/store";
 import { JobEngine, ModuleJobEngine, SafetyEngine } from "@ecu/core";
 import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump-tools";
-import { createModuleRegistry, mergeBusKnowledge } from "@ecu/vehicle-db";
-import type { BusModuleKnowledge } from "@ecu/vehicle-db";
+import { createModuleRegistry, mergeBusKnowledge, mergeVehicleProfiles } from "@ecu/vehicle-db";
+import type { BusModuleKnowledge, VehicleProfile } from "@ecu/vehicle-db";
 import {
   deleteStoredBusKnowledge,
   loadStoredBusKnowledge,
   saveStoredBusKnowledge,
 } from "@ecu/vehicle-db/store";
+import {
+  deleteStoredVehicleProfile,
+  loadStoredVehicleProfiles,
+  saveStoredVehicleProfile,
+} from "@ecu/vehicle-db/vehicleStore";
 import { JobFileManager, WorkspaceManager } from "@ecu/workspace";
 
 import {
@@ -32,6 +38,7 @@ import {
 } from "../chipAssets";
 import { deleteDump, exportDump, listDumps, readDumpSlice, type DumpFormat } from "../dumps";
 import { mapBus, type BusMapInput } from "../resolver/busMapper";
+import { mapVehicle, type VehicleScan } from "../resolver/vehicleMapper";
 import {
   generateChipGuide,
   resolveChip,
@@ -50,6 +57,78 @@ interface RegisterOptions {
   appVersion: string;
 }
 
+/** Talk to the SuperDevice Pi's HTTP API from the main process (renderer is behind CSP). */
+const DEFAULT_PI_HOST = "superdevice.local:8080";
+async function piGet(host: string | undefined, pathq: string): Promise<unknown> {
+  const h = (host && host.trim()) || DEFAULT_PI_HOST;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`http://${h}${pathq}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`SuperDevice HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot reach SuperDevice at ${h} — ${m}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Sweep the local /24 subnet(s) for SuperDevices (they answer /api/device). */
+async function discoverDevices(): Promise<{ host: string; ip: string; hostname: string; model: string }[]> {
+  const bases = new Set<string>();
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list ?? []) {
+      if (ni.family === "IPv4" && !ni.internal) {
+        const p = ni.address.split(".");
+        if (p.length === 4) bases.add(`${p[0]}.${p[1]}.${p[2]}`);
+      }
+    }
+  }
+  const targets: string[] = [];
+  for (const base of bases) for (let h = 1; h <= 254; h++) targets.push(`${base}.${h}`);
+  const found: { host: string; ip: string; hostname: string; model: string }[] = [];
+  let idx = 0;
+  async function worker() {
+    while (idx < targets.length) {
+      const ip = targets[idx++];
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 700);
+      try {
+        const res = await fetch(`http://${ip}:8080/api/device`, { signal: controller.signal });
+        if (res.ok) {
+          const d = (await res.json()) as { hostname?: string; model?: string };
+          if (d?.hostname) found.push({ host: `${ip}:8080`, ip, hostname: d.hostname, model: d.model || "" });
+        }
+      } catch { /* not a SuperDevice */ } finally { clearTimeout(timer); }
+    }
+  }
+  await Promise.all(Array.from({ length: 48 }, () => worker()));
+  return found.sort((a, b) => a.ip.localeCompare(b.ip));
+}
+
+async function piPost(host: string | undefined, pathq: string, body: unknown): Promise<unknown> {
+  const h = (host && host.trim()) || DEFAULT_PI_HOST;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`http://${h}${pathq}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`SuperDevice HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot reach SuperDevice at ${h} — ${m}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function registerIpcHandlers(
   ipcMain: IpcMain,
   opts: RegisterOptions,
@@ -62,6 +141,7 @@ export async function registerIpcHandlers(
   const jobFiles = new JobFileManager(layout);
   const chipAssetsDir = path.join(layout.root, "chip-assets");
   const busIntelDir = path.join(layout.root, "vehicle-intel");
+  const vehicleLibDir = path.join(layout.root, "vehicle-library");
 
   // Hydrate operator/AI-resolved profiles from disk so they appear in the
   // chip list and survive restarts. Built-in seed profiles are always present.
@@ -112,6 +192,24 @@ export async function registerIpcHandlers(
   }
 
   register("workspace:init", () => ({ root: layout.root, jobsDir: layout.jobsDir }));
+
+  // ---- SuperDevice (Raspberry Pi 5 CAN interface, over its HTTP API)
+  register("superDevice:status", (_e, p: { host?: string }) => piGet(p?.host, "/api/status"));
+  register("superDevice:vin", (_e, p: { host?: string; iface?: string }) =>
+    piGet(p?.host, `/api/vin${p?.iface ? `?iface=${encodeURIComponent(p.iface)}` : ""}`));
+  register("superDevice:up", (_e, p: { host?: string; iface: string; bitrate?: number; fd?: boolean }) =>
+    piPost(p?.host, "/api/up", { iface: p.iface, bitrate: p.bitrate ?? 500000, dbitrate: 2000000, fd: !!p.fd }));
+  register("superDevice:down", (_e, p: { host?: string; iface: string }) =>
+    piPost(p?.host, "/api/down", { iface: p.iface }));
+  register("superDevice:get", (_e, p: { host?: string; path: string }) => {
+    if (!p.path?.startsWith("/api/")) throw new Error("bad path");
+    return piGet(p.host, p.path);
+  });
+  register("superDevice:post", (_e, p: { host?: string; path: string; body?: unknown }) => {
+    if (!p.path?.startsWith("/api/")) throw new Error("bad path");
+    return piPost(p.host, p.path, p.body ?? {});
+  });
+  register("superDevice:discover", () => discoverDevices());
 
   // ---- chips
   register("chips:list", () => chipRegistry.list());
@@ -468,6 +566,43 @@ export async function registerIpcHandlers(
     } catch (err) {
       throw new Error(
         `Could not write the bundled catalog (${(err as Error).message}). This works when running from source (dev); a packaged build can't edit its own catalog.`,
+      );
+    }
+    return { path: target, count: records.length };
+  });
+
+  // ---- vehicle library (Year/Make/Model profiles for the 3D cockpit)
+  // Seed profiles ship in @ecu/vehicle-db (travel with publishes); learned ones
+  // persist to disk here and merge on top; "bake" folds them into the bundle.
+  register("vehicleLib:list", async () => {
+    const { records, errors } = await loadStoredVehicleProfiles(vehicleLibDir);
+    if (errors.length > 0) {
+      console.warn(`[ECL] Skipped ${errors.length} invalid vehicle profile(s):`, errors.join("; "));
+    }
+    return mergeVehicleProfiles(records);
+  });
+  register("vehicleLib:save", async (_e, record: VehicleProfile) => {
+    await saveStoredVehicleProfile(vehicleLibDir, record, new Date().toISOString());
+    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
+    return mergeVehicleProfiles(records);
+  });
+  register("vehicleLib:delete", async (_e, p: { id: string }) => {
+    const removed = await deleteStoredVehicleProfile(vehicleLibDir, p.id);
+    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
+    return { removed, records: mergeVehicleProfiles(records) };
+  });
+  register("vehicleLib:analyze", (_e, scan: VehicleScan) => mapVehicle(scan));
+  register("vehicleLib:bake", async () => {
+    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
+    const target = path.join(
+      opts.projectRoot,
+      "packages", "vehicle-db", "src", "vehicleProfileCommunity.json",
+    );
+    try {
+      await writeFile(target, `${JSON.stringify(records, null, 2)}\n`, "utf8");
+    } catch (err) {
+      throw new Error(
+        `Could not write the bundled vehicle catalog (${(err as Error).message}). This works when running from source (dev); a packaged build can't edit its own catalog.`,
       );
     }
     return { path: target, count: records.length };
