@@ -8,7 +8,7 @@ bitrate (classic or CAN-FD), streams live bus traffic, and sends frames.
 Runs as root (via systemd) so it can drive `ip`/`cansend` directly.
 Open from the laptop at:  http://superdevice.local:8080
 """
-import json, re, shlex, subprocess
+import json, os, re, shlex, subprocess, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -103,20 +103,77 @@ def _ensure_up(iface, bitrate=500000):
         sh(f"ip link set {iface} up type can bitrate {bitrate} loopback off restart-ms 100")
 
 
-def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0):
-    """One ISO-TP request/response (kernel can_isotp handles multi-frame + flow control)."""
+def _isotp_socket(iface, tx_id, rx_id, timeout):
+    """Open a padded ISO-TP socket. TX/RX padding to 8 bytes is enabled — many
+    modules (Nissan/Infiniti, Toyota, etc.) silently ignore short/unpadded single
+    frames, so padding is required for them to answer; it's harmless otherwise."""
     import socket as _s
+    import struct as _st
     CAN_ISOTP = getattr(_s, "CAN_ISOTP", 6)
     _ensure_up(iface)
     sh("modprobe can_isotp")
     sock = _s.socket(_s.AF_CAN, _s.SOCK_DGRAM, CAN_ISOTP)
+    # struct can_isotp_options: flags(u32) frame_txtime(u32) ext_addr(u8) txpad(u8) rxpad(u8) rx_ext(u8)
+    SOL_CAN_ISOTP, CAN_ISOTP_OPTS = 106, 1
+    CAN_ISOTP_TX_PADDING, CAN_ISOTP_RX_PADDING = 0x004, 0x008
+    try:
+        opts = _st.pack("=IIBBBB", CAN_ISOTP_TX_PADDING | CAN_ISOTP_RX_PADDING, 0, 0, 0x00, 0x00, 0)
+        sock.setsockopt(SOL_CAN_ISOTP, CAN_ISOTP_OPTS, opts)
+    except OSError:
+        pass  # padding unsupported on this kernel — fall back to unpadded
     sock.settimeout(timeout)
     sock.bind((iface, rx_id, tx_id))   # (interface, rx_id, tx_id)
+    return sock
+
+
+def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0):
+    """One ISO-TP request/response (kernel can_isotp handles multi-frame + flow control)."""
+    sock = _isotp_socket(iface, tx_id, rx_id, timeout)
     try:
         sock.send(bytes(payload))
         return sock.recv(4095)
     finally:
         sock.close()
+
+
+def bus_monitor(iface, ms=700):
+    """Sniff the bus for a short window and aggregate per CAN id: latest bytes,
+    frame count and rate. Powers the live per-id bus view (polled) and the AI
+    explorer's bus-read tool. Read-only."""
+    if iface not in IFACES:
+        return {"ok": False, "error": "bad iface"}
+    _ensure_up(iface)
+    try:
+        dur = max(0.1, min(float(ms) / 1000.0, 3.0))
+    except (ValueError, TypeError):
+        dur = 0.7
+    try:
+        r = subprocess.run(["timeout", f"{dur}", "candump", iface],
+                           capture_output=True, text=True, timeout=dur + 2)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    frames = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        # default candump: "  can0  174   [8]  FF E7 D4 AA ..." -> [iface, id, [dlc], b0..]
+        if len(parts) < 3 or parts[0] != iface:
+            continue
+        cid = parts[1]
+        try:
+            dlc = int(parts[2].strip("[]"))
+        except ValueError:
+            continue
+        data = parts[3:3 + dlc]
+        f = frames.setdefault(cid, {"id": cid, "dlc": dlc, "bytes": "", "count": 0})
+        f["bytes"] = " ".join(data)
+        f["dlc"] = dlc
+        f["count"] += 1
+    out = []
+    for f in frames.values():
+        f["hz"] = round(f["count"] / dur, 1)
+        out.append(f)
+    out.sort(key=lambda x: int(x["id"], 16))
+    return {"ok": True, "window_ms": int(dur * 1000), "count": len(out), "frames": out}
 
 
 def read_vin(iface="can0"):
@@ -136,7 +193,194 @@ def read_vin(iface="can0"):
     return {"ok": False, "error": "no VIN in response (ignition on? ECM present?)", "raw": raw}
 
 
-# ---- device management (identity + network) --------------------------------
+def isotp_http(iface, tx_hex, rx_hex, data_hex, timeout=2.0):
+    """Generic diagnostic request over ISO-TP for the Bench Module Master.
+    tx_hex/rx_hex = diagnostic ids (e.g. "7E1"/"7E9"); data_hex = the raw service
+    payload (e.g. "1081" or "22 F1 90"). Returns the raw response hex + the first
+    byte so the app can tell a positive response (0x40+SID) from a negative (0x7F)."""
+    if iface not in IFACES:
+        return {"ok": False, "error": "bad iface"}
+    try:
+        tx_id = int(str(tx_hex), 16)
+        rx_id = int(str(rx_hex), 16)
+        payload = bytes.fromhex((data_hex or "").replace(" ", ""))
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "bad hex (tx/rx/data)"}
+    if not payload:
+        return {"ok": False, "error": "empty request"}
+    try:
+        t = float(timeout)
+    except (ValueError, TypeError):
+        t = 2.0
+    t = max(0.2, min(t, 8.0))
+    try:
+        data = isotp_request(iface, tx_id, rx_id, list(payload), timeout=t)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "request": payload.hex()}
+    raw = data.hex() if data else ""
+    if not data:
+        return {"ok": False, "error": "no response (module powered/ignition on? right ids/speed? bus terminated?)", "request": payload.hex()}
+    negative = len(data) >= 3 and data[0] == 0x7F
+    return {
+        "ok": not negative,
+        "request": payload.hex(),
+        "response": raw,
+        "sid": data[0],
+        "negative": negative,
+        "nrc": (data[2] if negative and len(data) >= 3 else None),
+    }
+
+
+def isotp_seq(iface, tx_hex, rx_hex, requests, timeout=2.0):
+    """Run a SEQUENCE of ISO-TP requests over ONE socket so a diagnostic session
+    persists across them (needed for session-gated reads like live-data blocks).
+    `requests` is a list of hex payload strings. Returns a list of per-request
+    results in order."""
+    if iface not in IFACES:
+        return {"ok": False, "error": "bad iface"}
+    try:
+        tx_id = int(str(tx_hex), 16)
+        rx_id = int(str(rx_hex), 16)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "bad hex (tx/rx)"}
+    if not isinstance(requests, list) or not requests:
+        return {"ok": False, "error": "no requests"}
+    try:
+        t = max(0.2, min(float(timeout), 8.0))
+    except (ValueError, TypeError):
+        t = 2.0
+    try:
+        sock = _isotp_socket(iface, tx_id, rx_id, t)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    out = []
+    try:
+        for r in requests[:24]:
+            try:
+                payload = bytes.fromhex(str(r).replace(" ", ""))
+            except (ValueError, TypeError):
+                out.append({"request": str(r), "ok": False, "error": "bad hex"}); continue
+            if not payload:
+                out.append({"request": "", "ok": False, "error": "empty"}); continue
+            try:
+                sock.send(payload)
+                data = sock.recv(4095)
+            except Exception as e:
+                out.append({"request": payload.hex(), "ok": False, "error": f"{type(e).__name__}: {e}", "response": ""}); continue
+            resp = data.hex() if data else ""
+            negative = len(data) >= 3 and data[0] == 0x7F
+            out.append({
+                "request": payload.hex(), "response": resp,
+                "ok": bool(data) and not negative, "negative": negative,
+                "nrc": (data[2] if negative and len(data) >= 3 else None),
+            })
+    finally:
+        sock.close()
+    return {"ok": True, "results": out}
+
+
+# ---- occupancy claim (which PC "owns" this device right now) ----------------
+# A claim is a soft lock so two laptops don't drive the same buses at once.
+# The owning PC renews it (heartbeat); a stale claim expires on its own, so a
+# crashed laptop can never brick the device into "occupied" forever.
+
+CLAIM_PATH = "/run/superdevice/claim.json"
+CLAIM_TTL = 120  # seconds between heartbeats before a claim goes stale
+
+
+def _claim_read():
+    try:
+        c = json.loads(open(CLAIM_PATH).read())
+        if time.time() > float(c.get("expires", 0)):
+            return None
+        return c
+    except Exception:
+        return None
+
+
+def claim_info():
+    c = _claim_read()
+    if not c:
+        return None
+    return {
+        "owner": c.get("owner", "?"),
+        "since": c.get("since", ""),
+        "expires_in": max(0, int(float(c.get("expires", 0)) - time.time())),
+    }
+
+
+def claim_acquire(owner, force=False):
+    owner = (owner or "").strip()[:64]
+    if not owner:
+        return {"ok": False, "error": "no owner"}
+    c = _claim_read()
+    if c and c.get("owner") != owner and not force:
+        return {"ok": False, "error": f"occupied by {c.get('owner')}", "occupied_by": c.get("owner")}
+    since = c.get("since") if (c and c.get("owner") == owner) else time.strftime("%Y-%m-%dT%H:%M:%S")
+    rec = {"owner": owner, "since": since, "expires": time.time() + CLAIM_TTL}
+    try:
+        os.makedirs(os.path.dirname(CLAIM_PATH), exist_ok=True)
+        with open(CLAIM_PATH, "w") as f:
+            f.write(json.dumps(rec))
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "claim": claim_info()}
+
+
+def claim_release(owner, force=False):
+    c = _claim_read()
+    if c and c.get("owner") != (owner or "").strip()[:64] and not force:
+        return {"ok": False, "error": f"occupied by {c.get('owner')}", "occupied_by": c.get("owner")}
+    try:
+        os.remove(CLAIM_PATH)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
+# ---- device management (identity + network + battery) -----------------------
+
+def _swap16(v):
+    return ((v & 0xFF) << 8) | (v >> 8)
+
+
+def battery_info():
+    """Geekworm X1200 UPS fuel gauge (MAX17040-class, I2C addr 0x36). Registers
+    are big-endian; i2cget word reads are little-endian, hence the byte swap.
+    Best-effort: returns present=False on a Pi without the UPS HAT."""
+    r = sh("i2cget -y 1 0x36 0x02 w")
+    if r.returncode != 0 or not r.stdout.strip():
+        return {"present": False}
+    try:
+        vcell = _swap16(int(r.stdout.strip(), 16))
+        soc = _swap16(int(sh("i2cget -y 1 0x36 0x04 w").stdout.strip(), 16))
+    except (ValueError, TypeError):
+        return {"present": False}
+    out = {
+        "present": True,
+        "voltage": round((vcell >> 4) * 1.25 / 1000.0, 2),
+        "percent": min(100.0, round(soc / 256.0, 1)),
+    }
+    # X1200 PLD on GPIO6: LOW = external 5 V present, HIGH = running on cells.
+    sh("pinctrl set 6 ip")  # make sure the pin is an input before sampling it
+    p = sh("pinctrl get 6").stdout
+    if "| lo" in p or "| hi" in p:
+        out["external_power"] = "| lo" in p
+    return out
+
+
+def power_guard_state():
+    """State published by powerguard.py (superdevice-power.service): 'ok',
+    'countdown' (+seconds_left), 'shutting-down', or 'no-ups'. None if the
+    guard service isn't running on this Pi."""
+    try:
+        st = json.loads(open("/run/superdevice/power.json").read())
+        return st if isinstance(st, dict) else None
+    except Exception:
+        return None
+
 
 def device_info():
     ip = sh("hostname -I").stdout.strip().split()
@@ -151,6 +395,9 @@ def device_info():
         "ip": ip[0] if ip else "",
         "ssid": ssid,
         "model": model,
+        "claim": claim_info(),
+        "battery": battery_info(),
+        "power": power_guard_state(),
     }
 
 
@@ -175,6 +422,31 @@ def wifi_scan():
         except Exception:
             pass
     return {"networks": sorted(nets.values(), key=lambda n: -n["signal"])}
+
+
+def wifi_saved():
+    """Every WiFi network this Pi remembers (NetworkManager saved connections),
+    with which one is active right now and whether it auto-connects."""
+    active = set(sh("nmcli -t -f NAME connection show --active").stdout.strip().splitlines())
+    nets = []
+    for line in sh("nmcli -t -f NAME,TYPE,AUTOCONNECT connection show").stdout.splitlines():
+        p = line.split(":")
+        if len(p) >= 2 and "wireless" in p[1]:
+            nets.append({
+                "name": p[0],
+                "autoconnect": (p[2] if len(p) > 2 else "") == "yes",
+                "active": p[0] in active,
+            })
+    nets.sort(key=lambda n: (not n["active"], n["name"].lower()))
+    return {"networks": nets}
+
+
+def wifi_forget(name):
+    if not name:
+        return {"ok": False, "error": "no name"}
+    r = sh(f"nmcli connection delete {shlex.quote(name)}")
+    ok = r.returncode == 0
+    return {"ok": ok, "error": "" if ok else (r.stderr.strip() or r.stdout.strip())}
 
 
 def wifi_set(ssid, password):
@@ -280,8 +552,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(device_info())
         elif u.path == "/api/wifi/scan":
             self._json(wifi_scan())
+        elif u.path == "/api/wifi/saved":
+            self._json(wifi_saved())
         elif u.path == "/api/net":
             self._json(net_status())
+        elif u.path == "/api/bus/monitor":
+            q = parse_qs(u.query)
+            self._json(bus_monitor(q.get("iface", ["can0"])[0], int(q.get("ms", ["700"])[0] or 700)))
         elif u.path == "/api/stream":
             q = parse_qs(u.query)
             ifs = [i for i in q.get("ifaces", ["can0,can1"])[0].split(",") if i in IFACES] or list(IFACES)
@@ -313,6 +590,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"result": send_frame(d.get("iface"), (d.get("id") or "").strip(), (d.get("data") or "").replace(" ", ""))})
         elif u.path == "/api/wifi/set":
             self._json(wifi_set(d.get("ssid"), d.get("password")))
+        elif u.path == "/api/wifi/forget":
+            self._json(wifi_forget((d.get("name") or "").strip()))
+        elif u.path == "/api/claim":
+            self._json(claim_acquire(d.get("owner"), bool(d.get("force"))))
+        elif u.path == "/api/release":
+            self._json(claim_release(d.get("owner"), bool(d.get("force"))))
         elif u.path == "/api/hostname":
             self._json(set_hostname((d.get("name") or "").strip()))
         elif u.path == "/api/reboot":
@@ -321,6 +604,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(provision(d.get("ssid"), d.get("password")))
         elif u.path == "/api/ap":
             self._json(ap_control(d.get("action")))
+        elif u.path == "/api/isotp":
+            self._json(isotp_http(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("data"), d.get("timeout", 2.0)))
+        elif u.path == "/api/isotp/seq":
+            self._json(isotp_seq(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("requests"), d.get("timeout", 2.0)))
         else:
             self._json({"error": "not found"}, 404)
 

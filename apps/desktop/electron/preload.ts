@@ -79,6 +79,19 @@ const api = {
     bake:    () => invoke("vehicleLib:bake"),
     analyze: (scan: unknown) => invoke("vehicleLib:analyze", scan),
   },
+  benchModules: {
+    list:    () => invoke("benchModules:list"),
+    save:    (record: unknown) => invoke("benchModules:save", record),
+    delete:  (id: string) => invoke("benchModules:delete", { id }),
+    analyze: (input: { images: { data: string; mediaType: string }[]; description: string }) =>
+      invoke("benchModules:analyze", input),
+    bake:    () => invoke("benchModules:bake"),
+    listAssets: (moduleId: string) => invoke("benchModules:listAssets", { moduleId }),
+    addAsset: (input: { moduleId: string; fileName: string; base64: string; mediaType: string; caption?: string }) =>
+      invoke("benchModules:addAsset", input),
+    readAsset: (input: { moduleId: string; assetId: string }) => invoke("benchModules:readAsset", input),
+    deleteAsset: (input: { moduleId: string; assetId: string }) => invoke("benchModules:deleteAsset", input),
+  },
   moduleJobs: {
     list:      () => invoke("moduleJobs:list"),
     get:       (jobId: string) => invoke("moduleJobs:get", { jobId }),
@@ -104,6 +117,30 @@ const api = {
     get: (host: string | undefined, path: string) => invoke("superDevice:get", { host, path }),
     post: (host: string | undefined, path: string, body?: unknown) => invoke("superDevice:post", { host, path, body }),
     discover: () => invoke("superDevice:discover"),
+  },
+  devices: {
+    list: () => invoke("devices:list"),
+    pair: (input: { host: string; hostname?: string; model?: string; nickname?: string }) =>
+      invoke("devices:pair", input),
+    unpair: (id: string) => invoke("devices:unpair", { id }),
+    update: (id: string, patch: Record<string, unknown>) => invoke("devices:update", { id, patch }),
+    claim: (host: string | undefined, force?: boolean) => invoke("devices:claim", { host, force }),
+    release: (host: string | undefined, force?: boolean) => invoke("devices:release", { host, force }),
+  },
+  moduleExplorer: {
+    start: (payload: { host?: string; iface: string; tx: string; rx: string; module: unknown }) =>
+      invoke("moduleExplorer:start", payload),
+    stop: () => invoke("moduleExplorer:stop"),
+    listRuns: (moduleId: string) => invoke("moduleExplorer:listRuns", { moduleId }),
+    saveRun: (run: unknown) => invoke("moduleExplorer:saveRun", run),
+    deleteRun: (moduleId: string, runId: string) => invoke("moduleExplorer:deleteRun", { moduleId, runId }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onEvent: (cb: (e: any) => void) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handler = (_e: unknown, ev: any) => cb(ev);
+      ipcRenderer.on("moduleExplorer:event", handler);
+      return () => ipcRenderer.removeListener("moduleExplorer:event", handler);
+    },
   },
   settings: {
     getKeyStatus: () => invoke("settings:getKeyStatus"),

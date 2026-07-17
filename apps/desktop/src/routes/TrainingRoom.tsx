@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { VehicleProfile } from "@ecu/vehicle-db";
 
 import { Topbar } from "../components/Topbar";
+import { ModuleCalibration } from "../components/training/ModuleCalibration";
 import { Api, type VehicleScan, type VehicleMapResult } from "../lib/api";
 import { buildScan, compareMap, formatRawReport, type Comparison } from "../lib/busScan";
 import { perturbScan, normalizeForScoring, scoreRobustness, formatHardSection, type PerturbedScan, type RobustnessResult } from "../lib/hardMode";
@@ -14,7 +15,10 @@ import { VehicleSimulator } from "../lib/vehicleSim";
  * against the gold Corolla and emit a copy-pasteable report to review with Claude.
  */
 
+type MapperMode = "vehicle" | "module";
+
 export function TrainingRoom() {
+  const [mapperMode, setMapperMode] = useState<MapperMode>("vehicle");
   const [profiles, setProfiles] = useState<VehicleProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string>("2020-toyota-corolla");
   const [profile, setProfile] = useState<VehicleProfile | null>(null);
@@ -98,10 +102,17 @@ export function TrainingRoom() {
 
   return (
     <>
-      <Topbar title="AI Training Room" crumb={profile ? `${profile.year} ${profile.make} ${profile.model}` : "loading…"} />
+      <Topbar title="AI Training Room" crumb={mapperMode === "vehicle" ? (profile ? `${profile.year} ${profile.make} ${profile.model}` : "loading…") : "Bench module mapper"} />
       <div className="content">
         <div className="tr">
           <style>{styles}</style>
+
+          <div className="tr-modeseg seg">
+            <button className={mapperMode === "vehicle" ? "active" : ""} onClick={() => setMapperMode("vehicle")}>🚗 Vehicle mapper</button>
+            <button className={mapperMode === "module" ? "active" : ""} onClick={() => setMapperMode("module")}>🔩 Module mapper (bench)</button>
+          </div>
+
+          {mapperMode === "module" ? <ModuleCalibration /> : (<>
 
           <div className="card tr-intro">
             <h3>Calibrate the mapper against a known truth</h3>
@@ -237,6 +248,8 @@ export function TrainingRoom() {
               )}
             </div>
           )}
+
+          </>)}
         </div>
       </div>
     </>
@@ -245,6 +258,7 @@ export function TrainingRoom() {
 
 const styles = `
 .tr { display: flex; flex-direction: column; gap: 12px; }
+.tr-modeseg { align-self: flex-start; }
 .tr-intro h3 { margin: 0 0 4px; }
 .tr-steps { margin: 8px 0 0; padding-left: 18px; line-height: 1.7; color: var(--fg-2); }
 .tr-vehsel { display: flex; align-items: center; gap: 8px; margin-top: 10px; }

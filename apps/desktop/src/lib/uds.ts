@@ -106,3 +106,115 @@ export function parseUdsText(resp: number[]): string {
   const ascii = resp.slice(3).filter((c) => c >= 0x20 && c < 0x7f);
   return String.fromCharCode(...ascii).trim();
 }
+
+// ---- hex-string helpers for the REAL cockpit (device returns hex) -----------
+
+/** "59 02 0B…" / "59020b…" → [0x59,0x02,0x0B,…] */
+export function bytesFromHex(hex: string): number[] {
+  const clean = (hex || "").replace(/[^0-9a-fA-F]/g, "");
+  const out: number[] = [];
+  for (let i = 0; i + 1 < clean.length; i += 2) out.push(parseInt(clean.slice(i, i + 2), 16));
+  return out;
+}
+
+export interface DtcRow { code: string; description: string; statusByte: string; status: string }
+
+function dtcStatusFlags(s: number): string {
+  const f: string[] = [];
+  if (s & 0x01) f.push("failed");
+  if (s & 0x02) f.push("failed-this-cycle");
+  if (s & 0x08) f.push("confirmed");
+  if (s & 0x40) f.push("pending");
+  if (s & 0x80) f.push("MIL");
+  return f.join(" · ") || "—";
+}
+
+/** Decode a 0x19/0x02 response (hex) into detailed rows, keeping the status byte. */
+export function parseUdsDtcsFromHex(hex: string): DtcRow[] {
+  const b = bytesFromHex(hex);
+  const start = b.findIndex((_, k) => b[k] === 0x59 && b[k + 1] === 0x02);
+  if (start < 0) return [];
+  const body = b.slice(start + 3);
+  const out: DtcRow[] = [];
+  for (let i = 0; i + 3 < body.length; i += 4) {
+    const [h, m, l, st] = [body[i], body[i + 1], body[i + 2], body[i + 3]];
+    if (h === 0 && m === 0 && l === 0 && st === 0) continue;
+    const base = decodeDtc(h, m);
+    out.push({
+      code: l ? `${base}-${l.toString(16).toUpperCase().padStart(2, "0")}` : base,
+      description: dtcDescription(base),
+      statusByte: st.toString(16).toUpperCase().padStart(2, "0"),
+      status: dtcStatusFlags(st),
+    });
+  }
+  return out;
+}
+
+/**
+ * Decode an OBD-II mode 03/07/0A DTC response (hex) into rows. Layout over CAN:
+ * [SID(+0x40) , count , {2-byte DTC}…]. 03→stored, 07→pending, 0A→permanent. Unlike
+ * UDS there is no per-DTC status byte, so `status` carries the report kind.
+ */
+export function parseObdDtcsFromHex(hex: string): DtcRow[] {
+  const b = bytesFromHex(hex);
+  if (b.length < 2) return [];
+  const kind = b[0] === 0x43 ? "stored" : b[0] === 0x47 ? "pending" : b[0] === 0x4a ? "permanent" : "";
+  if (!kind) return [];
+  // A count byte usually follows the SID on CAN; trust it only if it matches the
+  // number of DTC pairs actually present, else assume the pairs start right away.
+  let i = 1;
+  if (b[1] === Math.floor((b.length - 2) / 2)) i = 2;
+  const out: DtcRow[] = [];
+  for (; i + 1 < b.length; i += 2) {
+    const h = b[i], m = b[i + 1];
+    if (h === 0 && m === 0) continue;
+    const base = decodeDtc(h, m);
+    out.push({ code: base, description: dtcDescription(base), statusByte: "", status: kind });
+  }
+  return out;
+}
+
+/**
+ * Decode a live OBD-II mode-01 PID response into an engineering value with units,
+ * so the cockpit shows "13.92 V" instead of raw bytes. Returns null when the PID
+ * isn't one we have a formula for (caller falls back to hex). `reqHex` is the
+ * request (e.g. "0142"), `respHex` the reply (e.g. "41 42 36 60").
+ */
+export function decodeObdPid(reqHex: string, respHex: string): string | null {
+  const req = bytesFromHex(reqHex);
+  const b = bytesFromHex(respHex);
+  if (req.length < 2 || req[0] !== 0x01 || b.length < 2) return null;
+  const pid = req[1];
+  const idx = b.findIndex((_, k) => b[k] === 0x41 && b[k + 1] === pid);
+  if (idx < 0) return null;
+  const A = b[idx + 2] ?? 0, B = b[idx + 3] ?? 0;
+  const n = (v: number, u: string, d = 0) => `${v.toFixed(d)} ${u}`;
+  switch (pid) {
+    case 0x05: case 0x0f: case 0x46: case 0x5c: return n(A - 40, "°C");
+    case 0x0c: return n((A * 256 + B) / 4, "rpm");
+    case 0x0d: return n(A, "km/h");
+    case 0x04: case 0x11: case 0x2f: case 0x45: case 0x47: case 0x49: case 0x4a: case 0x4b: return n((A * 100) / 255, "%", 1);
+    case 0x06: case 0x07: case 0x08: case 0x09: return n((A * 100) / 128 - 100, "%", 1);
+    case 0x10: return n((A * 256 + B) / 100, "g/s", 2);
+    case 0x0b: return n(A, "kPa");
+    case 0x0a: return n(A * 3, "kPa");
+    case 0x0e: return n(A / 2 - 64, "°", 1);
+    case 0x42: return n((A * 256 + B) / 1000, "V", 2);
+    case 0x43: return n((A * 256 + B) * 100 / 255, "%", 1);
+    case 0x1f: return n(A * 256 + B, "s");
+    default: return null;
+  }
+}
+
+/** Best-effort ASCII from a hex response, skipping `skip` leading bytes (SID/DID). */
+export function asciiFromHex(hex: string, skip = 0): string {
+  const b = bytesFromHex(hex).slice(skip);
+  return b.map((x) => (x >= 0x20 && x < 0x7f ? String.fromCharCode(x) : "")).join("").trim();
+}
+
+/** Auto-skip a positive read SID (0x62 UDS → 3, 0x61 KWP → 2) then return the ASCII. */
+export function identifierAscii(hex: string): string {
+  const b = bytesFromHex(hex);
+  const skip = b[0] === 0x62 ? 3 : b[0] === 0x61 ? 2 : 0;
+  return asciiFromHex(hex, skip);
+}

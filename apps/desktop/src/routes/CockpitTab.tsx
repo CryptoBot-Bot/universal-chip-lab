@@ -13,6 +13,7 @@ import { Topbar } from "../components/Topbar";
 import { WriteConfirmModal } from "../components/WriteConfirmModal";
 import type { PendingWrite } from "../lib/writeActions";
 import { Api, type SuperDeviceStatus, type SuperDeviceIface, type DiscoveredDevice } from "../lib/api";
+import { useSuperDevice } from "../lib/superdevice-connection";
 import { VehicleSimulator, type SimScenario, type SimReading } from "../lib/vehicleSim";
 
 /**
@@ -74,7 +75,8 @@ export function CockpitTab() {
   const [stubModel, setStubModel] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
 
-  // --- REAL: SuperDevice link ---
+  // --- REAL: SuperDevice link (backed by the app-wide shared connection) ---
+  const sd = useSuperDevice();
   const [piHost, setPiHost] = useState(DEFAULT_HOST);
   const [link, setLink] = useState<LinkState>("idle");
   const [pi, setPi] = useState<SuperDeviceStatus | null>(null);
@@ -112,31 +114,44 @@ export function CockpitTab() {
 
   function identify() { identifyWith(vin); }
 
-  // load saved prefs + auto-connect if we were on REAL
+  // load saved prefs + auto-connect if we were on REAL and nothing is connected yet
   useEffect(() => {
     const p = loadPrefs();
     setMode(p.mode);
     setPiHost(p.host);
     setBusPref(p.bus);
-    if (p.mode === "real" && p.host) void connectPi(p.host);
+    if (p.mode === "real" && p.host && sd.link !== "online" && sd.link !== "connecting") void connectPi(p.host);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // adopt the app-wide connection: if the app is already linked to a Pi
+  // (connected from Pi Devices / Bench / a previous session), show it ONLINE
+  // here instantly instead of starting from offline.
+  useEffect(() => {
+    if (sd.link === "online" && link !== "online") {
+      setPiHost(sd.host);
+      setPi(sd.status);
+      setLink("online");
+      setMode("real");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sd.link, sd.host]);
+
   function chooseMode(m: Mode) { setMode(m); persistPrefs({ mode: m }); }
 
-  // ---- SuperDevice connection ----
+  // ---- SuperDevice connection (routes through the shared app-wide link) ----
   async function connectPi(host = piHost) {
     setLink("connecting");
     setLinkErr(null);
     setPi(null);
     prevRxRef.current = {};
-    try {
-      const st = await Api.superDevice.status(host);
-      setPi(st);
+    const r = await sd.connect(host);
+    if (r.ok) {
       setLink("online");
       persistPrefs({ host });
-    } catch (e) {
-      setLinkErr((e as Error).message);
+      // the 1.5 s health poll below fills `pi` immediately after link flips
+    } else {
+      setLinkErr(r.error ?? "connect failed");
       setLink("error");
     }
   }
@@ -167,6 +182,7 @@ export function CockpitTab() {
     setLink("idle");
     setPi(null);
     setLinkErr(null);
+    void sd.disconnect(); // releases the claim app-wide, not just in this tab
   }
 
   async function scanNetwork() {

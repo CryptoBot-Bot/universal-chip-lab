@@ -4,10 +4,12 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { Api } from "./lib/api";
 import { PicoProvider } from "./lib/pico-connection";
+import { SuperDeviceProvider } from "./lib/superdevice-connection";
 import { ChipDatabase } from "./routes/ChipDatabase";
 import { CockpitTab } from "./routes/CockpitTab";
+import { DevicesTab } from "./routes/DevicesTab";
 import { DumpsTab } from "./routes/DumpsTab";
-import { ObdTab } from "./routes/ObdTab";
+import { BenchTab } from "./routes/BenchTab";
 import { TrainingRoom } from "./routes/TrainingRoom";
 import { VehicleDatabase } from "./routes/VehicleDatabase";
 import { ReadTab } from "./routes/ReadTab";
@@ -44,20 +46,24 @@ export default function App() {
 
   return (
     <PicoProvider>
+      <SuperDeviceProvider>
       <Layout>
         <Routes>
           <Route path="/read" element={<ReadTab />} />
           <Route path="/write" element={<WriteTab />} />
           <Route path="/chips" element={<ChipDatabase />} />
           <Route path="/dumps" element={<DumpsTab />} />
-          <Route path="/obd" element={<ObdTab />} />
+          <Route path="/bench" element={<BenchTab />} />
+          <Route path="/obd" element={<Navigate to="/bench" replace />} />
           <Route path="/cockpit" element={<CockpitTab />} />
           <Route path="/vehicles" element={<VehicleDatabase />} />
           <Route path="/training" element={<TrainingRoom />} />
+          <Route path="/devices" element={<DevicesTab />} />
           <Route path="/settings" element={<SettingsTab />} />
           <Route path="*" element={<Navigate to="/read" />} />
         </Routes>
       </Layout>
+      </SuperDeviceProvider>
     </PicoProvider>
   );
 }

@@ -14,8 +14,8 @@ import {
 } from "@ecu/chip-db/store";
 import { JobEngine, ModuleJobEngine, SafetyEngine } from "@ecu/core";
 import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump-tools";
-import { createModuleRegistry, mergeBusKnowledge, mergeVehicleProfiles } from "@ecu/vehicle-db";
-import type { BusModuleKnowledge, VehicleProfile } from "@ecu/vehicle-db";
+import { createModuleRegistry, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, VehicleProfile } from "@ecu/vehicle-db";
 import {
   deleteStoredBusKnowledge,
   loadStoredBusKnowledge,
@@ -26,6 +26,11 @@ import {
   loadStoredVehicleProfiles,
   saveStoredVehicleProfile,
 } from "@ecu/vehicle-db/vehicleStore";
+import {
+  deleteStoredBenchModule,
+  loadStoredBenchModules,
+  saveStoredBenchModule,
+} from "@ecu/vehicle-db/moduleStore";
 import { JobFileManager, WorkspaceManager } from "@ecu/workspace";
 
 import {
@@ -36,8 +41,12 @@ import {
   readChipGuide,
   writeChipGuide,
 } from "../chipAssets";
+import { loadPairedDevices, savePairedDevices, type PairedDevice } from "../deviceRegistry";
 import { deleteDump, exportDump, listDumps, readDumpSlice, type DumpFormat } from "../dumps";
 import { mapBus, type BusMapInput } from "../resolver/busMapper";
+import { deleteExplorerRun, listExplorerRuns, saveExplorerRun, type StoredExplorerRun } from "../explorerRuns";
+import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSkeleton, type SeqItem, type BusFrame } from "../resolver/moduleExplorer";
+import { mapModule, type MapModuleInput } from "../resolver/moduleMapper";
 import { mapVehicle, type VehicleScan } from "../resolver/vehicleMapper";
 import {
   generateChipGuide,
@@ -59,10 +68,10 @@ interface RegisterOptions {
 
 /** Talk to the SuperDevice Pi's HTTP API from the main process (renderer is behind CSP). */
 const DEFAULT_PI_HOST = "superdevice.local:8080";
-async function piGet(host: string | undefined, pathq: string): Promise<unknown> {
+async function piGet(host: string | undefined, pathq: string, timeoutMs = 8000): Promise<unknown> {
   const h = (host && host.trim()) || DEFAULT_PI_HOST;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`http://${h}${pathq}`, { signal: controller.signal });
     if (!res.ok) throw new Error(`SuperDevice HTTP ${res.status}`);
@@ -108,10 +117,10 @@ async function discoverDevices(): Promise<{ host: string; ip: string; hostname: 
   return found.sort((a, b) => a.ip.localeCompare(b.ip));
 }
 
-async function piPost(host: string | undefined, pathq: string, body: unknown): Promise<unknown> {
+async function piPost(host: string | undefined, pathq: string, body: unknown, timeoutMs = 8000): Promise<unknown> {
   const h = (host && host.trim()) || DEFAULT_PI_HOST;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`http://${h}${pathq}`, {
       method: "POST",
@@ -142,6 +151,8 @@ export async function registerIpcHandlers(
   const chipAssetsDir = path.join(layout.root, "chip-assets");
   const busIntelDir = path.join(layout.root, "vehicle-intel");
   const vehicleLibDir = path.join(layout.root, "vehicle-library");
+  const benchModuleDir = path.join(layout.root, "bench-modules");
+  const benchModuleAssetsDir = path.join(layout.root, "bench-module-assets");
 
   // Hydrate operator/AI-resolved profiles from disk so they appear in the
   // chip list and survive restarts. Built-in seed profiles are always present.
@@ -210,6 +221,119 @@ export async function registerIpcHandlers(
     return piPost(p.host, p.path, p.body ?? {});
   });
   register("superDevice:discover", () => discoverDevices());
+
+  // ---- Pi device fleet: pairing registry + occupancy claims.
+  // "Pairing" is a local bookmark; the claim (who is driving the device right
+  // now) lives ON the Pi so every PC sees the same occupied/available truth.
+  const devicesDir = path.join(layout.root, "devices");
+  const claimOwner = os.hostname();
+  register("devices:list", async () => ({
+    owner: claimOwner,
+    devices: await loadPairedDevices(devicesDir),
+  }));
+  register("devices:pair", async (_e, p: { host: string; hostname?: string; model?: string; nickname?: string }) => {
+    const raw = (p.host || "").trim();
+    if (!raw) throw new Error("no host");
+    const host = raw.includes(":") ? raw : `${raw}:8080`;
+    const devices = await loadPairedDevices(devicesDir);
+    let dev = devices.find((d) => d.host === host);
+    if (!dev) {
+      dev = {
+        id: `dev-${Date.now().toString(36)}`,
+        host,
+        hostname: p.hostname ?? "",
+        model: p.model ?? "",
+        nickname: p.nickname,
+        pairedAt: new Date().toISOString(),
+      };
+      devices.push(dev);
+      await savePairedDevices(devicesDir, devices);
+    }
+    return devices;
+  });
+  register("devices:unpair", async (_e, p: { id: string }) => {
+    const devices = await loadPairedDevices(devicesDir);
+    const next = devices.filter((d) => d.id !== p.id);
+    await savePairedDevices(devicesDir, next);
+    return next;
+  });
+  register("devices:update", async (_e, p: { id: string; patch: Partial<Pick<PairedDevice, "host" | "hostname" | "model" | "nickname" | "lastSeenAt">> }) => {
+    const devices = await loadPairedDevices(devicesDir);
+    const dev = devices.find((d) => d.id === p.id);
+    if (!dev) throw new Error("device not paired");
+    Object.assign(dev, p.patch);
+    await savePairedDevices(devicesDir, devices);
+    return devices;
+  });
+  register("devices:claim", (_e, p: { host?: string; force?: boolean }) =>
+    piPost(p?.host, "/api/claim", { owner: claimOwner, force: !!p?.force }));
+  register("devices:release", (_e, p: { host?: string; force?: boolean }) =>
+    piPost(p?.host, "/api/release", { owner: claimOwner, force: !!p?.force }));
+
+  // ---- AI Module Explorer (autonomous read-only diagnostic agent, streamed)
+  const explorerRunsDir = path.join(layout.root, "explorer-runs");
+  // Fold every prior run's verified result (plus the module's own known surface)
+  // into a single prior the agent starts from — the self-improving run-to-run loop.
+  function buildPriorKnowledge(
+    runs: StoredExplorerRun[],
+    module: { capabilities?: string[]; identity?: string; knownDtcs?: { code: string; desc: string }[] },
+  ): PriorKnowledge {
+    const services = new Set<string>();
+    const capabilities = new Set<string>(module.capabilities ?? []);
+    const dtcs = new Map<string, { code: string; desc: string }>();
+    (module.knownDtcs ?? []).forEach((d) => dtcs.set(d.code, d));
+    let identity = module.identity ?? "";
+    for (const r of runs) {
+      if (!r.result) continue;
+      r.result.services.forEach((s) => services.add(s));
+      r.result.capabilities.forEach((s) => capabilities.add(s));
+      r.result.dtcs.forEach((d) => { if (!dtcs.has(d.code)) dtcs.set(d.code, d); });
+      if (r.result.identity && r.result.identity.length > identity.length && r.result.identity !== "unknown") identity = r.result.identity;
+    }
+    return { runCount: runs.length, identity: identity || undefined, services: [...services], capabilities: [...capabilities], dtcs: [...dtcs.values()] };
+  }
+
+  let explorerStop = false;
+  register("moduleExplorer:stop", () => { explorerStop = true; return { ok: true }; });
+  register("moduleExplorer:start", async (event, p: {
+    host?: string; iface: string; tx: string; rx: string;
+    module: { moduleId?: string; displayName: string; brand: string; category: string; protocol: string; capabilities?: string[]; identity?: string; knownDtcs?: { code: string; desc: string }[]; skeleton?: ExplorerSkeleton };
+  }) => {
+    explorerStop = false;
+    const send = (e: ExplorerEvent) => { try { event.sender.send("moduleExplorer:event", e); } catch { /* window gone */ } };
+    let prior: PriorKnowledge | undefined;
+    if (p.module.moduleId) {
+      const runs = await listExplorerRuns(explorerRunsDir, p.module.moduleId);
+      prior = buildPriorKnowledge(runs, p.module);
+    }
+    const deps = {
+      probe: async (requests: string[]): Promise<SeqItem[]> => {
+        const r = await piPost(p.host, "/api/isotp/seq", { iface: p.iface, tx: p.tx, rx: p.rx, requests, timeout: 2.0 }, 40000) as { results?: SeqItem[] };
+        return r.results ?? [];
+      },
+      scanBus: async (ms: number): Promise<{ frames: BusFrame[]; window_ms?: number }> => {
+        const r = await piGet(p.host, `/api/bus/monitor?iface=${encodeURIComponent(p.iface)}&ms=${ms}`, 12000) as { frames?: BusFrame[]; window_ms?: number };
+        return { frames: r.frames ?? [], window_ms: r.window_ms };
+      },
+      onEvent: send,
+      shouldStop: () => explorerStop,
+    };
+    try {
+      return await exploreModule({ ...p.module, iface: p.iface, requestId: p.tx, responseId: p.rx, prior }, deps);
+    } catch (e) {
+      send({ type: "error", text: (e as Error).message });
+      throw e;
+    }
+  });
+  register("moduleExplorer:listRuns", (_e, p: { moduleId: string }) => listExplorerRuns(explorerRunsDir, p.moduleId));
+  register("moduleExplorer:saveRun", async (_e, run: StoredExplorerRun) => {
+    await saveExplorerRun(explorerRunsDir, run);
+    return listExplorerRuns(explorerRunsDir, run.moduleId);
+  });
+  register("moduleExplorer:deleteRun", async (_e, p: { moduleId: string; runId: string }) => {
+    const removed = await deleteExplorerRun(explorerRunsDir, p.moduleId, p.runId);
+    return { removed, runs: await listExplorerRuns(explorerRunsDir, p.moduleId) };
+  });
 
   // ---- chips
   register("chips:list", () => chipRegistry.list());
@@ -607,6 +731,67 @@ export async function registerIpcHandlers(
     }
     return { path: target, count: records.length };
   });
+
+  // ---- bench modules (Bench Module Master: the growing hookup + diagnostics
+  // knowledge base). Seed modules ship in @ecu/vehicle-db; learned ones persist
+  // to disk here and merge on top; "bake" folds them into the bundled catalog.
+  // Same trust ladder as chips: analyze produces an ai_suggested draft; a real
+  // bench session promotes it to bench_verified (an AI guess never writes).
+  register("benchModules:list", async () => {
+    const { records, errors } = await loadStoredBenchModules(benchModuleDir);
+    if (errors.length > 0) {
+      console.warn(`[ECL] Skipped ${errors.length} invalid bench module(s):`, errors.join("; "));
+    }
+    return mergeBenchModules(records);
+  });
+  register("benchModules:save", async (_e, record: BenchModuleProfile) => {
+    await saveStoredBenchModule(benchModuleDir, record, new Date().toISOString());
+    const { records } = await loadStoredBenchModules(benchModuleDir);
+    return mergeBenchModules(records);
+  });
+  register("benchModules:delete", async (_e, p: { id: string }) => {
+    const removed = await deleteStoredBenchModule(benchModuleDir, p.id);
+    const { records } = await loadStoredBenchModules(benchModuleDir);
+    return { removed, records: mergeBenchModules(records) };
+  });
+  register("benchModules:analyze", (_e, input: MapModuleInput) => mapModule(input));
+  register("benchModules:bake", async () => {
+    const { records } = await loadStoredBenchModules(benchModuleDir);
+    const target = path.join(
+      opts.projectRoot,
+      "packages", "vehicle-db", "src", "benchModuleCommunity.json",
+    );
+    try {
+      await writeFile(target, `${JSON.stringify(records, null, 2)}\n`, "utf8");
+    } catch (err) {
+      throw new Error(
+        `Could not write the bundled module catalog (${(err as Error).message}). This works when running from source (dev); a packaged build can't edit its own catalog.`,
+      );
+    }
+    return { path: target, count: records.length };
+  });
+  // Photo gallery per saved module — reuses the chip-asset store under a separate
+  // dir. The renderer refers to a module by its id; paths are sanitised server-side.
+  register("benchModules:listAssets", (_e, p: { moduleId: string }) =>
+    listChipAssets(benchModuleAssetsDir, p.moduleId),
+  );
+  register(
+    "benchModules:addAsset",
+    (_e, p: { moduleId: string; fileName: string; base64: string; mediaType: string; caption?: string }) =>
+      addChipAsset(benchModuleAssetsDir, p.moduleId, {
+        fileName: p.fileName,
+        base64: p.base64,
+        mediaType: p.mediaType,
+        kind: "photo",
+        ...(p.caption ? { caption: p.caption } : {}),
+      }),
+  );
+  register("benchModules:readAsset", (_e, p: { moduleId: string; assetId: string }) =>
+    readChipAsset(benchModuleAssetsDir, p.moduleId, p.assetId),
+  );
+  register("benchModules:deleteAsset", (_e, p: { moduleId: string; assetId: string }) =>
+    deleteChipAsset(benchModuleAssetsDir, p.moduleId, p.assetId),
+  );
 
   // ---- module jobs
   register("moduleJobs:list", () => moduleJobEngine.listJobs());

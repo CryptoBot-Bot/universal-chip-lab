@@ -193,7 +193,29 @@ Pi/laptop — your ground-loop hazard is handled in hardware. Still run the lapt
 
 ### 4.2 K-Line pod (L9637D → USB-UART)
 
-Functional wiring (match numbers to the **L9637D datasheet**, SO-8):
+**AS-RECEIVED (2026-07-17): MikroElektronika "ISO 9141 Click"** — an L9637D (SO-8, U1)
+on a mikroBUS board. Screw terminals: **VS + / −** (12 V transceiver supply) and **K / L**
+(bus lines). Right header: **TX, RX, 5V, GND**; left header: **3V3, GND** (rest NC).
+**VCC SEL solder jumper is set to 3V3 as received** — logic side is 3.3 V, so it wires
+straight to the FT232H (or a Pi UART) with **no level shifter**. Pod hookup:
+
+| ISO 9141 Click | Connect to | Note |
+|---|---|---|
+| VS + | fused OBD pin-16 12 V leg | transceiver needs real battery volts to drive K |
+| VS − | common ground | ties to OBD pin 4/5 ground |
+| K | OBD **pin 7** | L → pin 15 only for the rare L-line-init car |
+| 3V3 | FT232H 3V3 out | powers/levels the logic side (VCC SEL = 3V3) |
+| GND (header) | FT232H GND | logic ground |
+| TX | FT232H **TXD** (ADBUS0) | mikroBUS names are host-side: click TX = input |
+| RX | FT232H **RXD** (ADBUS1) | L9637D RX mirrors the K line |
+| 5V header pin | leave unconnected | only for boards jumpered to 5V |
+
+**Built-in self-test (no car needed):** power VS with 12 V, open the FT232H port at
+10400 baud, send bytes — the L9637D echoes everything you transmit back on RX via the
+K line. Echo = wiring + both directions proven. No echo → check VS power first (PWR LED),
+then swap TX/RX (harmless). K should idle near battery voltage when VS is powered.
+
+Generic wiring for any other L9637D board:
 
 - **VS** ← vehicle **12 V** (through the reverse-polarity + fuse of the main feed).
 - **GND** ← common ground.
@@ -263,6 +285,75 @@ Make it a **device**: everything routed to a labeled, keyed panel.
 
 ---
 
+### 7.1 AS-CONFIGURED power (2026-07-13)
+
+Parts on hand and how they chain:
+
+- **Buck:** DROK **waterproof 11–90 V → 5 V @ 6 A** (fixed output, potted). **Reverse-polarity
+  + wide-input protection built into the module** (per DROK spec) — a backwards clip or a
+  24 V truck won't hurt it. Pack of 2 (one spare / second bus box).
+- **UPS:** Geekworm **X1200** (5.1 V / 5 A output, USB-C/5 V charge input, I²C fuel gauge,
+  power-loss-detect GPIO, auto power-on, safe-shutdown script). 18650 cells NOT included.
+
+Chain: `OBD pin16 (+12V) → 5A blade fuse → DROK IN+` · `OBD pin4 (GND) → DROK IN−` ·
+`DROK OUT (MEASURE 5.0–5.2V first) → X1200 USB-C input jack` · `X1200 → Pi 5 (5.1V/5A + PLD GPIO)`.
+The DROK feeds the **UPS input**, never the Pi directly — the X1200 runs the Pi and rides
+through crank sag / power loss so Linux shuts down clean.
+
+**Feed method (LOCKED 2026-07-14 — supersedes the CGTime+cable combo):** the X1200's ONLY 5 V
+entry is its **USB-C "PWR In" jack** — verified by photo that there are **NO bare VBUS/GND solder
+pads** on the board (the "pads" were the connector's SMD legs — do not solder to them). So power
+enters through the jack, using **one purpose-built part**:
+
+- **USB-C male 6-wire PD pigtail, 1 ft, 5 A** (bare-wire open end breaking out **CC1, CC2, D+,
+  D−, VCC, GND**). This is the winning part because it **exposes the CC lines** — so we present
+  the source pull-up ourselves instead of hunting for a cable that happens to contain one.
+
+**Pigtail as received (2 pcs, 1 ft, 5 A, 2026-07-17) — wire color map:**
+red 20 AWG = VBUS/+5 V · black 20 AWG = GND · green 28 AWG = D+ · white 28 AWG = D− ·
+yellow 28 AWG = CC1 · blue 28 AWG = CC2.
+
+Wiring (solder, then heatshrink the junction):
+```
+DROK 5V OUT ─────────────► VCC   (pigtail red)
+DROK GND    ─────────────► GND   (pigtail black)
+CC1 (yellow) ──[56 kΩ]──► VCC (red / 5 V rail)   ← source pull-up (Rp)
+CC2 (blue)   ──[56 kΩ]──► VCC (red / 5 V rail)   ← both, so it's orientation-proof
+D+  (green)  ── open, insulated
+D−  (white)  ── open, insulated
+```
+Then the USB-C plug goes into the X1200 "PWR In".
+
+**Three rules:** (1) 56 kΩ from each CC line to **VBUS/5 V, NOT to GND** — pull-**up** = "a source
+is present" (Rp). Pulling CC to GND is the *sink/decoy* config (Rd) and is the wrong direction —
+the X1200 won't enable. (2) One 56 kΩ on **CC1** and one on **CC2**, both to VBUS; **never tie CC1
+directly to CC2**. Doing both makes the feed work regardless of plug orientation. (3) **D+/D− stay
+disconnected** — power-only, no data. 56 kΩ is the standard "default source" advertisement, all the
+X1200 needs to switch its input on; its own charge IC then governs actual current (~2.3–3 A).
+
+WHY this beats the old CGTime + 56 kΩ-cable combo: fewer connectors in the path (no A-female
+breakout + separate A→C cable), purpose-built, and we control the CC advertisement directly on
+bare wire instead of trusting a cable's hidden resistor. Same electrical result (source presents
+Rp), cleaner mechanically. Requires soldering two resistors — trivial with the on-hand iron/ESD
+gear. In the car, feed ONLY the X1200 — never also plug a PSU into the Pi's USB-C.
+
+*(Superseded fallback, still valid if you ever want no-solder: CGTime USB-A female screw breakout +
+short USB-A→USB-C cable containing a 56 kΩ — the cable's 56 kΩ is the same Rp, just pre-installed.)*
+
+Stack: X1200 (bottom, pogo 5V + I²C) → Pi 5 → 2-CH isolated CAN-FD HAT (top, owns 40-pin).
+No header contention (UPS = I²C GPIO2/3 + one PLD GPIO; HAT = SPI/INT). Confirm the X1200
+PLD GPIO + input method against the Geekworm wiki for the board rev; install the X1200
+shutdown service.
+
+**Hard rule:** meter the DROK output before it touches the X1200/Pi. **Fuse the pin-16 feed
+(5 A) — mandatory.** HAT 120 Ω termination jumper OFF in a car (harness already terminates);
+ON only for a lone bench module. Pin 16 is always-hot → rely on the UPS auto-shutdown, don't
+leave plugged for days.
+
+**Still open on the 12 V input:** a **load-dump TVS** (e.g. SMBJ33A, ~53 V clamp) for the
+rare transient *above* the DROK's 90 V ceiling — the wide input already absorbs most
+suppressed load dumps, so this is margin, not mandatory. RTC coin cell for offline timestamps.
+
 ## 8. Software stack (hardware-relevant summary)
 
 - **OS:** Raspberry Pi OS 64-bit (Bookworm). Consider read-only rootfs / overlayfs for
@@ -319,7 +410,7 @@ Every item here is a thing real builds forget. All are addressed above.
 
 - [x] **SD/NVMe corruption on power loss** → UPS/supercap + clean-shutdown GPIO (§7)
 - [x] **Bench CAN termination** (no vehicle harness) → 120 Ω jumpers (§4.1)
-- [x] **Reverse polarity + load dump** on 12 V feed → P-MOSFET + TVS + fuse (§7)
+- [x] **Reverse polarity** on 12 V feed → **built into the DROK buck** (§7.1); **load-dump TVS** still open (margin above the DROK's 90 V ceiling); **5 A fuse mandatory** (§7.1)
 - [x] **Ground loop** laptop↔car → isolated HAT + laptop on battery (§4.1/§7)
 - [x] **Thermal** in a hot car → Pi 5 active cooler (§3.1)
 - [x] **Offline timestamps** → RTC + battery (§3.2)
@@ -377,18 +468,72 @@ Open honest gaps: **Tricore-class locked MCUs** (§3.5) are only partially reach
 |---|---|---|
 | Pi 5 + OS + SocketCAN | ☑ | Bookworm 64-bit, kernel 6.18, can-utils, headless SSH. 2026-07-10. |
 | 2-CH CAN-FD HAT (HS+MS) | ☑ | can0=SPI0/INT25 (HS), can1=SPI1/INT24 (MS) via custom Mode-A overlay (§8.1). Both loopback-PASS. |
-| Web control panel (CAN UI) | ☑ | `hardware/super-device/webui/`; systemd `superdevice-ui`; http://superdevice.local:8080. 2026-07-10. |
+| Web control panel (CAN UI) | ☑ | `hardware/super-device/webui/`; systemd `superdevice-ui`; http://superdevice.local:8080. 2026-07-10. **2026-07-17: +saved-wifi list/forget, X1200 battery gauge (I²C 0x36 + PLD GPIO6), occupancy claim API — needs `deploy.py` push when the Pi is on.** |
 | Daemon speaking legacy protocol | ☐ | drop-in `.ino` replacement |
 | App link (USB-gadget serial) | ☐ | |
-| Power: buck 5 A + UPS + protection + RTC | ☐ | |
+| Power: buck 5 A + UPS + protection + RTC | ◪ | DROK buck + X1200 (cells in) + pigtail feed SOLDERED & PROVEN (charges cells) 2026-07-17. **Power-loss guard service installed** (30 s ride-through → clean shutdown, §13 Stage 4 note); I²C enabled; fuel gauge appears once X1200 is stacked under the Pi. Still: stack assembly, Stage-4 live test, 5 A fuse install, load-dump TVS (margin), RTC coin cell. |
 | Enclosure + keyed front panel | ☐ | |
-| K-Line pod | ☐ | |
+| K-Line pod | ◪ | **MikroE ISO 9141 Click (L9637D)** arrived 2026-07-17, VCC SEL = 3V3 (photo-verified) — no level shifter needed. Full hookup table + echo self-test in §4.2. Next: wire to FT232H, bench echo test, then 5-baud/fast-init firmware. |
 | LIN pod | ☐ | optional |
 | Extra USB-CAN bus 3/4 | ☐ | optional |
 | Bench-Memory: T48 + PicoForge + clips + gate | ☐ | Ceremony wired |
 | Bench-MCU: JTAG/SWD + BDM | ☐ | advanced |
 | DoIP T1 converter | ☐ | frontier |
 | Live decode (cantools) → AI | ☐ | |
+
+---
+
+## 13. Bench-test → first-car-plug checklist (do IN ORDER)
+
+**Rule of the whole procedure: prove each stage on the bench with a lab supply / spare
+12 V before the OBD port ever sees the device. A wiring fault is harmless on the bench and
+expensive at the car.** Do not skip ahead — each gate protects the next.
+
+### Stage 0 — Build the power feed (no Pi attached yet)
+- [ ] Solder the pigtail per §7.1: DROK 5V→VCC, DROK GND→GND, **56 kΩ CC1→VBUS**, **56 kΩ CC2→VBUS**, D+/D− snipped + insulated. Heatshrink the junction.
+- [ ] **Continuity/meter check BEFORE any power:** VCC↔GND **not shorted**; each CC reads ~56 kΩ to VCC and **open to GND**; CC1 **not** tied to CC2.
+- [ ] Install the **5 A blade fuse** in the pin-16 (+12 V) leg now, so it's never forgotten.
+
+### Stage 1 — DROK output alone (no X1200, no Pi)
+- [ ] Feed DROK IN from a **bench supply / spare 12 V** (through the 5 A fuse): IN+ = 12 V, IN− = GND.
+- [ ] **Meter the DROK OUTPUT: must read 5.0–5.2 V.** If not in range, STOP — do not connect the X1200. (Potted/fixed module; if it's wrong, the unit is bad.)
+- [ ] Confirm polarity at the pigtail's USB-C plug: VBUS pin = +5 V, GND pin = 0 V. Correct polarity here protects the X1200 and Pi.
+
+### Stage 2 — X1200 recognizes the source (no Pi yet)
+- [ ] With cells **out**, plug the pigtail into the X1200 "PWR In." Power the DROK.
+- [ ] X1200 **charge/power LED lights** = it saw the 56 kΩ Rp and enabled its input. **This is the make-or-break test for the CC resistors.** If dark: re-check CC→**VBUS** (not GND), value ~56 kΩ, and that a CC line is actually landing.
+- [ ] Power down. Install **2× flat-top protected 18650** (correct polarity per the X1200 silkscreen). Re-apply DROK power; confirm it now **charges the cells** (fuel-gauge/LEDs climb).
+
+### Stage 3 — Pi boots off the UPS
+- [ ] Mount the stack: X1200 (bottom) → Pi 5 → CAN-FD HAT (top). Do **not** also plug a PSU into the Pi's own USB-C — the X1200 pogo pins feed it.
+- [ ] Apply DROK power. Pi boots. SSH in (`superdevice.local` / 192.168.1.67). Check `vcgencmd get_throttled` = `0x0` (no undervoltage flag) under load.
+- [ ] Verify the X1200 I²C fuel gauge is visible: `i2cdetect -y 1` shows **0x36**. Install/enable the **X1200 safe-shutdown service** (Geekworm script) and confirm it's active.
+
+### Stage 4 — Power-loss ride-through + clean shutdown (the reason the UPS exists)
+> **Shutdown service INSTALLED 2026-07-17:** `superdevice-power.service` runs
+> `/opt/superdevice/powerguard.py` (in `webui/`, pushed by `deploy.py`). Contract:
+> power lost (PLD GPIO6 hi) → **30 s countdown** (visible in the app's Pi Devices tab)
+> → power returns = countdown cancels, nothing happens → else **clean `shutdown -h`**;
+> battery ≤5 % shortens the grace to 5 s. Self-disarms when the fuel gauge (0x36) is
+> absent, and GPIO6 has a pull-down, so it is safe on an unstacked Pi. Status file:
+> `/run/superdevice/power.json`, surfaced in `/api/device` as `power`.
+> Reminder: once the X1200 is stacked, power the Pi ONLY through the X1200 — a guard-armed
+> Pi fed from its own USB-C would see "power lost" on the idle X1200 and halt after 30 s.
+- [ ] Pi running off DROK+battery. **Pull the DROK feed** (simulate key-off / lost 12 V).
+- [ ] Pi **keeps running** on batteries — no reboot, no SD corruption. The PLD GPIO fires; the shutdown service counts down and Linux **halts cleanly** before the cells cut. Watch the console/logs to confirm it *initiated shutdown*, not just died.
+- [ ] Re-apply DROK power → X1200 **auto-powers the Pi back on** (auto-on set). This is the crank-sag / power-cycle behavior you'll see every drive.
+
+### Stage 5 — CAN sanity on the bench (still no car)
+- [ ] `ip -details link show can0` / `can1` UP at expected bitrate, **loopback off**. Quick self-test per §8.1 (loopback-PASS).
+- [ ] Optional: wake the mapped **bench TCM** (12 V + ignition, HAT **120 Ω termination ON** for a lone module) and confirm a live read through the Pi (`10 81`→`50 81`), exactly as in the Phase-1 milestone. Confirms the whole chain end-to-end before a real vehicle.
+
+### Stage 6 — First car plug
+- [ ] **HAT 120 Ω termination jumper OFF** (the vehicle harness already terminates — leaving it ON double-terminates the bus).
+- [ ] Build/verify the OBD harness: **pin 16 → 5 A fuse → DROK IN+**, **pin 4 → DROK IN−**, **pin 6/14 → HS-CAN H/L**, **pin 3/11 → MS-CAN** (Ford/Mazda). Meter pin 16 = ~12 V and confirm fuse continuity **before** plugging the device side.
+- [ ] Plug in. Pi powers up off the OBD 12 V through the whole proven chain. Read-only first (VIN / DTCs) to confirm the bus before anything else.
+- [ ] **Pin 16 is always-hot** → don't leave it plugged for days; rely on the UPS auto-shutdown, and unplug when parked.
+
+**Abort triggers (stop and diagnose, don't push through):** DROK output outside 5.0–5.2 V · X1200 input LED stays dark with the pigtail (CC problem) · `get_throttled` shows undervoltage · Pi does **not** stay up when you pull the DROK feed · any CAN interface won't come up. Each of these is cheaper to fix on the bench than at the car.
 
 ---
 

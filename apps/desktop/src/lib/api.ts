@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { BusModuleKnowledge, ModuleProfile, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, ModuleProfile, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -150,6 +150,94 @@ export interface VehicleMapResult {
   modules: MappedModule[];
 }
 
+// ---- Bench Module Master (AI module mapper output; mirrors electron/resolver/moduleMapper) ----
+export interface MappedHookupPin {
+  pin: string;
+  signal: "power" | "ignition" | "ground" | "can_h" | "can_l" | "kline" | "lin" | "wake" | "flexray" | "other";
+  connectTo: string;
+  required: boolean;
+  note: string;
+}
+export interface MappedBus {
+  name: string;
+  protocol: "uds" | "kwp2000" | "obd2" | "canfd" | "kline" | "unknown";
+  bitrate: number;
+  requestId: string;
+  responseId: string;
+  termination: boolean;
+}
+export interface ModuleMapResult {
+  displayName: string;
+  brand: string;
+  category: "ecm" | "tcm" | "abs" | "srs" | "bcm" | "ipc" | "hvac" | "gateway" | "immo" | "eps" | "adas" | "radio" | "other";
+  partNumbers: string[];
+  applications: string[];
+  powerNote: string;
+  hookup: MappedHookupPin[];
+  buses: MappedBus[];
+  asciiConnector: string;
+  cautions: string[];
+  references: { label: string; url: string }[];
+  capabilities: string[];
+  knownDtcs: { code: string; desc: string }[];
+  confidence: "low" | "medium" | "high";
+  rationale: string;
+}
+export interface ModuleMapRequest {
+  images: { data: string; mediaType: string }[];
+  description: string;
+}
+
+// ---- AI Module Explorer (autonomous read-only agent, streamed) ----
+export interface PriorKnowledge {
+  runCount: number; identity?: string; services: string[]; capabilities: string[];
+  dtcs: { code: string; desc: string }[];
+}
+export interface ExplorerResult {
+  summary: string; identity: string; services: string[]; capabilities: string[];
+  dtcs: { code: string; desc: string }[]; confidence: "low" | "medium" | "high"; verification: string;
+  outcome: "concluded" | "partial"; tokensIn: number; tokensOut: number; steps: number; newFindings: string[];
+  sessions?: { id: string; label: string }[];
+  identification?: { id: string; label: string; value: string; session?: string }[];
+  liveData?: { id: string; label: string; session?: string; note?: string }[];
+  broadcastFrames?: { canId: string; hz?: number; decode?: string }[];
+  operations?: { op: string; status: string; request?: string; session?: string; nrc?: string; detail?: string }[];
+}
+export type ExplorerEvent =
+  | { type: "status"; text: string }
+  | { type: "prior"; knowledge: PriorKnowledge }
+  | { type: "thought"; text: string }
+  | { type: "action"; tool: string; input: unknown }
+  | { type: "observation"; tool: string; summary: string; detail?: string }
+  | { type: "finding"; kind: string; title: string; detail: string }
+  | { type: "usage"; inputTokens: number; outputTokens: number; steps: number }
+  | { type: "done"; result: ExplorerResult }
+  | { type: "error"; text: string };
+export interface ExplorerSkeleton {
+  partNumbers: string[];
+  applications: string[];
+  bitrate?: number;
+  fd?: boolean;
+  sessions: { id: string; label: string }[];
+  services: string[];
+  identification: { id: string; label: string; value?: string; session?: string }[];
+  liveData: { id: string; label: string; session?: string }[];
+  broadcastFrames: { canId: string; hz?: number; decode?: string }[];
+  operations: { op: string; status: string; request?: string; session?: string }[];
+  dtcs: { code: string; desc: string }[];
+  cloneVerdict?: string;
+}
+export interface ExplorerStartInput {
+  host?: string; iface: string; tx: string; rx: string;
+  module: { moduleId?: string; displayName: string; brand: string; category: string; protocol: string; capabilities?: string[]; identity?: string; knownDtcs?: { code: string; desc: string }[]; skeleton?: ExplorerSkeleton };
+}
+export interface ExplorerRun {
+  id: string; moduleId: string; displayName: string; iface: string; tx: string; rx: string;
+  startedAt: string; endedAt: string; outcome: "concluded" | "partial" | "error";
+  result: ExplorerResult | null; newFindings: string[]; priorRunCount: number;
+  tokensIn: number; tokensOut: number; steps: number; transcript: string;
+}
+
 // ---- SuperDevice (Raspberry Pi 5 CAN interface) ----
 export interface SuperDeviceIface {
   name: string;
@@ -175,6 +263,32 @@ export interface VinReadResult {
   raw?: string;
 }
 export interface DiscoveredDevice { host: string; ip: string; hostname: string; model: string }
+
+// ---- Pi device fleet (Devices tab) ----
+export interface PairedDevice {
+  id: string;
+  host: string;
+  hostname: string;
+  model: string;
+  nickname?: string;
+  pairedAt: string;
+  lastSeenAt?: string;
+}
+export interface DeviceClaim { owner: string; since: string; expires_in: number }
+export interface DeviceBattery { present: boolean; voltage?: number; percent?: number; external_power?: boolean }
+export interface PowerGuardState { state: "ok" | "countdown" | "shutting-down" | "no-ups" | "ups-degraded"; seconds_left?: number; grace?: number; soc?: number }
+export interface PiDeviceInfo {
+  hostname: string;
+  ip: string;
+  ssid: string;
+  model: string;
+  claim: DeviceClaim | null;
+  battery: DeviceBattery;
+  power?: PowerGuardState | null;
+}
+export interface SavedWifiNetwork { name: string; autoconnect: boolean; active: boolean }
+export interface NearbyWifiNetwork { ssid: string; signal: number; secure: boolean }
+export interface ClaimResult { ok: boolean; claim?: DeviceClaim; occupied_by?: string; error?: string }
 
 async function unwrap<T>(promise: Promise<IpcResponse<T>>): Promise<T> {
   const resp = await promise;
@@ -277,6 +391,30 @@ export const Api = {
     bake:   () => unwrap<{ path: string; count: number }>(api.vehicleLib.bake() as never),
     analyze: (scan: VehicleScan) => unwrap<VehicleMapResult>(api.vehicleLib.analyze(scan) as never),
   },
+  benchModules: {
+    list:    () => unwrap<BenchModuleProfile[]>(api.benchModules.list() as never),
+    save:    (record: BenchModuleProfile) => unwrap<BenchModuleProfile[]>(api.benchModules.save(record) as never),
+    delete:  (id: string) =>
+      unwrap<{ removed: boolean; records: BenchModuleProfile[] }>(api.benchModules.delete(id) as never),
+    analyze: (input: ModuleMapRequest) => unwrap<ModuleMapResult>(api.benchModules.analyze(input) as never),
+    bake:    () => unwrap<{ path: string; count: number }>(api.benchModules.bake() as never),
+    listAssets: (moduleId: string) => unwrap<ChipAsset[]>(api.benchModules.listAssets(moduleId) as never),
+    addAsset: (input: { moduleId: string; fileName: string; base64: string; mediaType: string; caption?: string }) =>
+      unwrap<ChipAsset>(api.benchModules.addAsset(input) as never),
+    readAsset: (input: { moduleId: string; assetId: string }) =>
+      unwrap<{ base64: string; mediaType: string; fileName: string }>(api.benchModules.readAsset(input) as never),
+    deleteAsset: (input: { moduleId: string; assetId: string }) =>
+      unwrap<{ removed: boolean }>(api.benchModules.deleteAsset(input) as never),
+  },
+  moduleExplorer: {
+    start: (p: ExplorerStartInput) => unwrap<ExplorerResult>(api.moduleExplorer.start(p) as never),
+    stop: () => unwrap<{ ok: boolean }>(api.moduleExplorer.stop() as never),
+    onEvent: (cb: (e: ExplorerEvent) => void) => api.moduleExplorer.onEvent(cb),
+    listRuns: (moduleId: string) => unwrap<ExplorerRun[]>(api.moduleExplorer.listRuns(moduleId) as never),
+    saveRun: (run: ExplorerRun) => unwrap<ExplorerRun[]>(api.moduleExplorer.saveRun(run) as never),
+    deleteRun: (moduleId: string, runId: string) =>
+      unwrap<{ removed: boolean; runs: ExplorerRun[] }>(api.moduleExplorer.deleteRun(moduleId, runId) as never),
+  },
   moduleJobs: {
     list:      () => unwrap<ModuleJobRecord[]>(api.moduleJobs.list() as never),
     get:       (id: string) => unwrap<ModuleJobRecord>(api.moduleJobs.get(id) as never),
@@ -313,6 +451,18 @@ export const Api = {
     post: <T = unknown>(host: string | undefined, path: string, body?: unknown) =>
       unwrap<T>(api.superDevice.post(host, path, body) as never),
     discover: () => unwrap<DiscoveredDevice[]>(api.superDevice.discover() as never),
+  },
+  devices: {
+    list: () => unwrap<{ owner: string; devices: PairedDevice[] }>(api.devices.list() as never),
+    pair: (input: { host: string; hostname?: string; model?: string; nickname?: string }) =>
+      unwrap<PairedDevice[]>(api.devices.pair(input) as never),
+    unpair: (id: string) => unwrap<PairedDevice[]>(api.devices.unpair(id) as never),
+    update: (id: string, patch: Partial<Pick<PairedDevice, "host" | "hostname" | "model" | "nickname" | "lastSeenAt">>) =>
+      unwrap<PairedDevice[]>(api.devices.update(id, patch) as never),
+    claim: (host: string | undefined, force?: boolean) =>
+      unwrap<ClaimResult>(api.devices.claim(host, force) as never),
+    release: (host: string | undefined, force?: boolean) =>
+      unwrap<ClaimResult>(api.devices.release(host, force) as never),
   },
   settings: {
     getKeyStatus: () => unwrap<KeyStatus>(api.settings.getKeyStatus() as never),

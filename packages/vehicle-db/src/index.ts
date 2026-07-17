@@ -1,5 +1,9 @@
 export * from "./moduleProfile.schema.js";
 export * from "./moduleRegistry.js";
+
+// Bench Module Master — hookup + diagnostics knowledge base (browser-safe).
+export * from "./benchModule.schema.js";
+export * from "./benchModuleRegistry.js";
 export * from "./busKnowledge.schema.js";
 export * from "./busKnowledgeRegistry.js";
 
