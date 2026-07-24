@@ -88,7 +88,17 @@ async function api<T>(serverUrl: string, pathq: string, init: RequestInit, timeo
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${serverUrl}${pathq}`, { ...init, signal: controller.signal });
+    // Present browser-like headers: a JobCount deployment behind Cloudflare
+    // (Bot Fight Mode) 403s the default Node/undici user-agent, so a device
+    // request would never reach the app. These make us look like a normal
+    // browser client — the endpoints are still bearer/pairing-code authed.
+    const headers: Record<string, string> = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      Accept: "application/json, text/plain, */*",
+      "Accept-Language": "en-US,en;q=0.9",
+      ...(init.headers as Record<string, string> | undefined),
+    };
+    const res = await fetch(`${serverUrl}${pathq}`, { ...init, headers, signal: controller.signal });
     const text = await res.text();
     let body: unknown = null;
     try { body = text ? JSON.parse(text) : null; } catch { /* non-JSON error page */ }
