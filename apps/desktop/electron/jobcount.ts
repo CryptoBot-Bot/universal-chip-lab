@@ -96,13 +96,25 @@ async function api<T>(serverUrl: string, pathq: string, init: RequestInit, timeo
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
       Accept: "application/json, text/plain, */*",
       "Accept-Language": "en-US,en;q=0.9",
+      "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
       ...(init.headers as Record<string, string> | undefined),
     };
-    const res = await fetch(`${serverUrl}${pathq}`, { ...init, headers, signal: controller.signal });
+    const res = await fetch(`${serverUrl}${pathq}`, { ...init, headers, redirect: "follow", signal: controller.signal });
     const text = await res.text();
     let body: unknown = null;
     try { body = text ? JSON.parse(text) : null; } catch { /* non-JSON error page */ }
     if (!res.ok) {
+      // Distinguish a Cloudflare/WAF block from a real app error. If this message
+      // appears, the browser-header build IS running (proof of build), and the
+      // block is at the edge — fix it in Cloudflare (skip Bot Fight Mode for
+      // /phone-pair and /phone-device, or add a WAF allow rule).
+      const cfRay = res.headers.get("cf-ray");
+      const looksCf = !!cfRay || /cloudflare|attention required|cf-ray|__cf_/i.test(text);
+      if (res.status === 403 && looksCf) {
+        throw new Error(`Blocked by Cloudflare bot protection (403)${cfRay ? ` · cf-ray ${cfRay}` : ""}. This build sent browser headers but the edge still blocked it — add a Cloudflare WAF skip for /phone-pair and /phone-device, or turn off Bot Fight Mode.`);
+      }
       const msg = (body as { error?: string })?.error || `HTTP ${res.status}`;
       throw new Error(msg);
     }
@@ -153,8 +165,13 @@ export async function pair(serverRaw: string, code: string, appVersion: string):
 
   const { tokenEnc, tokenPlain } = encToken(resp.deviceToken);
   write({
-    // trust the server's canonical URL if it returned one (handles ngrok/public)
-    serverUrl: normaliseServer(resp.serverUrl || serverUrl),
+    // Keep the address the operator ENTERED (the one that actually reached the
+    // server), NOT the server-advertised canonical URL. This matters when the
+    // canonical domain is behind Cloudflare bot protection that blocks non-
+    // browser clients: pairing against the origin (e.g. *.herokuapp.com) must
+    // keep every later call on that same origin instead of bouncing to the
+    // blocked domain.
+    serverUrl,
     deviceId: resp.deviceId,
     shopId: resp.shop.id,
     shopName: resp.shop.name,
