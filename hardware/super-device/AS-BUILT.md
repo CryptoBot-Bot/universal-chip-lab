@@ -354,6 +354,27 @@ leave plugged for days.
 rare transient *above* the DROK's 90 V ceiling — the wide input already absorbs most
 suppressed load dumps, so this is margin, not mandatory. RTC coin cell for offline timestamps.
 
+### 7.2 Virtual Vehicle bench-loop (simulate a real car, no vehicle needed)
+
+`webui/virtual_vehicle.py` plays a **full 2020 Toyota Corolla** (11 ECUs) on a CAN
+channel via real ISO-TP — real UDS/OBD, real negative responses, live broadcast.
+Run it on **can1** and wire **can1 ↔ can0** so the Chip Lab's whole real pipeline
+(VIN read → module discovery → per-module AI deep-map) runs against it on **can0**
+exactly as against a real car. Controlled from the app's Simulator mode via daemon
+endpoints `/api/sim/start|stop|status`.
+
+**Wiring for the loop (bench):**
+```
+can1 CANH ──────── can0 CANH      (jumper)
+can1 CANL ──────── can0 CANL      (jumper)
+both channels' 120 Ω termination jumpers ON   (2×120 Ω = 60 Ω, a proper 2-node bus)
+```
+The two isolated transceivers ACK each other, so it's a genuine differential CAN bus
+— not a software loopback. `virtual_vehicle.py --selftest` validates the responder
+with no hardware; `--list` shows available cars. Extend `VEHICLES` to add more, or
+(future) export a real deep-mapped profile into this format to replay a car you've
+actually driven. can0↔can1 must be physically jumpered or can0 sees nothing.
+
 ## 8. Software stack (hardware-relevant summary)
 
 - **OS:** Raspberry Pi OS 64-bit (Bookworm). Consider read-only rootfs / overlayfs for
@@ -511,8 +532,11 @@ expensive at the car.** Do not skip ahead — each gate protects the next.
 
 ### Stage 4 — Power-loss ride-through + clean shutdown (the reason the UPS exists)
 > **Shutdown service INSTALLED 2026-07-17:** `superdevice-power.service` runs
-> `/opt/superdevice/powerguard.py` (in `webui/`, pushed by `deploy.py`). Contract:
-> power lost (PLD GPIO6 hi) → **30 s countdown** (visible in the app's Pi Devices tab)
+> `/opt/superdevice/powerguard.py` (in `webui/`, pushed by `deploy.py`).
+> **PLD polarity BENCH-VERIFIED 2026-07-23 (this X1200): GPIO6 HIGH = feed present,
+> LOW = power lost** — opposite of the Geekworm x120x example scripts; pin biased
+> pull-UP so an unstacked Pi floats to "power OK". Contract:
+> power lost (PLD GPIO6 **lo**) → **30 s countdown** (visible in the app's Pi Devices tab)
 > → power returns = countdown cancels, nothing happens → else **clean `shutdown -h`**;
 > battery ≤5 % shortens the grace to 5 s. Self-disarms when the fuel gauge (0x36) is
 > absent, and GPIO6 has a pull-down, so it is safe on an unstacked Pi. Status file:

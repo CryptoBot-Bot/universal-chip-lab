@@ -363,11 +363,12 @@ def battery_info():
         "voltage": round((vcell >> 4) * 1.25 / 1000.0, 2),
         "percent": min(100.0, round(soc / 256.0, 1)),
     }
-    # X1200 PLD on GPIO6: LOW = external 5 V present, HIGH = running on cells.
-    sh("pinctrl set 6 ip")  # make sure the pin is an input before sampling it
+    # X1200 PLD on GPIO6 — polarity bench-verified 2026-07-23 on this unit:
+    # HIGH = external feed present, LOW = running on cells.
+    sh("pinctrl set 6 ip pu")  # input + pull-up: floats safe-high when no UPS
     p = sh("pinctrl get 6").stdout
     if "| lo" in p or "| hi" in p:
-        out["external_power"] = "| lo" in p
+        out["external_power"] = "| hi" in p
     return out
 
 
@@ -515,6 +516,70 @@ def ap_control(action):
     return {"ok": False, "error": "bad action"}
 
 
+# ---- Virtual Vehicle (simulated car on a CAN channel) -----------------------
+# Runs virtual_vehicle.py as a subprocess bound to an iface (default can1). Wire
+# can1 <-> can0 (CANH-CANH, CANL-CANL, both 120Ω ON) and the Chip Lab's real
+# pipeline runs against it on can0 exactly as against a real car.
+
+VV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "virtual_vehicle.py")
+_SIM = {"proc": None, "vehicle": None, "iface": None}
+
+
+def sim_status():
+    p = _SIM["proc"]
+    running = bool(p and p.poll() is None)
+    if not running and _SIM["proc"] is not None:
+        _SIM.update(proc=None, vehicle=None, iface=None)
+    return {
+        "running": running,
+        "vehicle": _SIM["vehicle"] if running else None,
+        "iface": _SIM["iface"] if running else None,
+        "pid": (p.pid if running else None),
+    }
+
+
+def sim_start(iface, vehicle):
+    iface = iface or "can1"
+    vehicle = vehicle or "corolla"
+    if iface not in IFACES:
+        return {"ok": False, "error": "bad iface"}
+    if not os.path.exists(VV_PATH):
+        return {"ok": False, "error": "virtual_vehicle.py not deployed"}
+    sim_stop()
+    sh("modprobe can_isotp")
+    bus = iface_up(iface, 500000, 2000000, False)
+    try:
+        proc = subprocess.Popen(
+            ["python3", VV_PATH, "--iface", iface, "--vehicle", vehicle],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "bus": bus}
+    _SIM.update(proc=proc, vehicle=vehicle, iface=iface)
+    time.sleep(0.6)
+    st = sim_status()
+    st["ok"] = st["running"]
+    st["bus"] = bus
+    if not st["running"]:
+        st["error"] = "virtual vehicle exited immediately (can_isotp missing? iface down?)"
+    return st
+
+
+def sim_stop():
+    p = _SIM["proc"]
+    if p and p.poll() is None:
+        try:
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                p.kill()
+        except Exception:
+            pass
+    _SIM.update(proc=None, vehicle=None, iface=None)
+    return {"ok": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -554,6 +619,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(wifi_scan())
         elif u.path == "/api/wifi/saved":
             self._json(wifi_saved())
+        elif u.path == "/api/sim/status":
+            self._json(sim_status())
         elif u.path == "/api/net":
             self._json(net_status())
         elif u.path == "/api/bus/monitor":
@@ -604,6 +671,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(provision(d.get("ssid"), d.get("password")))
         elif u.path == "/api/ap":
             self._json(ap_control(d.get("action")))
+        elif u.path == "/api/sim/start":
+            self._json(sim_start(d.get("iface", "can1"), d.get("vehicle", "corolla")))
+        elif u.path == "/api/sim/stop":
+            self._json(sim_stop())
         elif u.path == "/api/isotp":
             self._json(isotp_http(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("data"), d.get("timeout", 2.0)))
         elif u.path == "/api/isotp/seq":

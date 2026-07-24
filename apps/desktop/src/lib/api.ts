@@ -238,6 +238,22 @@ export interface ExplorerRun {
   tokensIn: number; tokensOut: number; steps: number; transcript: string;
 }
 
+// ---- AI Vehicle Explorer (whole-car deep map: discover modules → map each) ----
+export interface DiscoveredModule {
+  name: string; requestId: string; responseId: string; firstBytes: string; negative: boolean;
+}
+export interface VehicleExplorerTarget {
+  moduleId: string; displayName: string; brand: string; category: string;
+  protocol: string; requestId: string; responseId: string;
+}
+export type VehicleExplorerEvent =
+  | { type: "discover"; done: number; total: number; found: number }
+  | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
+  | { type: "module-event"; moduleId: string; event: ExplorerEvent }
+  | { type: "module-done"; moduleId: string; result: ExplorerResult }
+  | { type: "status"; text: string }
+  | { type: "error"; text: string };
+
 // ---- SuperDevice (Raspberry Pi 5 CAN interface) ----
 export interface SuperDeviceIface {
   name: string;
@@ -289,6 +305,38 @@ export interface PiDeviceInfo {
 export interface SavedWifiNetwork { name: string; autoconnect: boolean; active: boolean }
 export interface NearbyWifiNetwork { ssid: string; signal: number; secure: boolean }
 export interface ClaimResult { ok: boolean; claim?: DeviceClaim; occupied_by?: string; error?: string }
+
+// ---- JobCount link ----
+export interface JobCountStatus {
+  linked: boolean;
+  serverUrl: string | null;
+  shopId: string | null;
+  shopName: string | null;
+  deviceId: string | null;
+  encryptionAvailable: boolean;
+  storedUnencrypted: boolean;
+}
+export interface PushVehicleInput {
+  vin?: string;
+  year?: number | null;
+  make?: string;
+  model?: string;
+  mileage?: number;
+  customerName?: string;
+  customerPhone?: string;
+  notes?: string;
+}
+export interface PushVehicleResult {
+  ok: boolean;
+  created: boolean;
+  vehicle: { id: string; vin: string; year: number | null; make: string; model: string };
+  error?: string;
+}
+export interface GarageVehicle {
+  id: string; vin: string; year: number | null; make: string; model: string;
+  trim: string; plate: string; mileage: number | null; customerName: string;
+  source: string; status: string; createdAt: string;
+}
 
 async function unwrap<T>(promise: Promise<IpcResponse<T>>): Promise<T> {
   const resp = await promise;
@@ -406,6 +454,16 @@ export const Api = {
     deleteAsset: (input: { moduleId: string; assetId: string }) =>
       unwrap<{ removed: boolean }>(api.benchModules.deleteAsset(input) as never),
   },
+  vehicleExplorer: {
+    discover: (payload: { host?: string; iface: string }) =>
+      unwrap<DiscoveredModule[]>(api.vehicleExplorer.discover(payload) as never),
+    commitDiscovery: (payload: { profile: VehicleProfile; discovered: DiscoveredModule[] }) =>
+      unwrap<VehicleProfile>(api.vehicleExplorer.commitDiscovery(payload) as never),
+    start: (payload: { host?: string; iface: string; profile: VehicleProfile; targets: VehicleExplorerTarget[] }) =>
+      unwrap<VehicleProfile>(api.vehicleExplorer.start(payload) as never),
+    stop: () => unwrap<{ ok: boolean }>(api.vehicleExplorer.stop() as never),
+    onEvent: (cb: (e: VehicleExplorerEvent) => void) => api.vehicleExplorer.onEvent(cb),
+  },
   moduleExplorer: {
     start: (p: ExplorerStartInput) => unwrap<ExplorerResult>(api.moduleExplorer.start(p) as never),
     stop: () => unwrap<{ ok: boolean }>(api.moduleExplorer.stop() as never),
@@ -463,6 +521,14 @@ export const Api = {
       unwrap<ClaimResult>(api.devices.claim(host, force) as never),
     release: (host: string | undefined, force?: boolean) =>
       unwrap<ClaimResult>(api.devices.release(host, force) as never),
+  },
+  jobcount: {
+    status: () => unwrap<JobCountStatus>(api.jobcount.status() as never),
+    pair: (serverUrl: string, code: string) => unwrap<JobCountStatus>(api.jobcount.pair(serverUrl, code) as never),
+    unpair: () => unwrap<JobCountStatus>(api.jobcount.unpair() as never),
+    verify: () => unwrap<{ ok: boolean; shopName?: string; deviceType?: string; error?: string }>(api.jobcount.verify() as never),
+    pushVehicle: (v: PushVehicleInput) => unwrap<PushVehicleResult>(api.jobcount.pushVehicle(v) as never),
+    listGarage: (q?: string) => unwrap<{ ok: boolean; count: number; vehicles: GarageVehicle[] }>(api.jobcount.listGarage(q) as never),
   },
   settings: {
     getKeyStatus: () => unwrap<KeyStatus>(api.settings.getKeyStatus() as never),

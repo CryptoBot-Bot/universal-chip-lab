@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  decodeVin, findProfileForVin, profileId, PIDS, moduleTemplateFor,
+  decodeVin, findProfileForVin, findProfileByYmm, recordVinRead, profileId, PIDS, moduleTemplateFor,
   type VehicleProfile, type VehicleCapability, type BodyType,
 } from "@ecu/vehicle-db";
 
 import { CarScene, type SceneModule } from "../components/CarScene";
 import { DeviceSettings } from "../components/DeviceSettings";
 import { SetupWizard } from "../components/SetupWizard";
+import { VehicleDeepMap } from "../components/VehicleDeepMap";
+import { VirtualVehiclePanel } from "../components/VirtualVehiclePanel";
 import { ModuleInspector } from "../components/ModuleInspector";
 import { Topbar } from "../components/Topbar";
 import { WriteConfirmModal } from "../components/WriteConfirmModal";
@@ -82,6 +84,13 @@ export function CockpitTab() {
   const [pi, setPi] = useState<SuperDeviceStatus | null>(null);
   const [linkErr, setLinkErr] = useState<string | null>(null);
   const [vinReading, setVinReading] = useState(false);
+  const [vinPending, setVinPending] = useState(false);
+  const [decoding, setDecoding] = useState(false);
+  const [vinInsight, setVinInsight] = useState<{
+    inGarage: boolean; garageYmm?: string; shopName?: string;
+    profileKnown: boolean; ymmLabel?: string; exploredModules: number;
+    vinSeenBefore: boolean; lastReadAt?: string;
+  } | null>(null);
   const [showDevice, setShowDevice] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredDevice[] | null>(null);
@@ -92,7 +101,6 @@ export function CockpitTab() {
   const prevRxRef = useRef<Record<string, { rx: number; t: number }>>({});
 
   const simRef = useRef<VehicleSimulator | null>(null);
-  const decode = useMemo(() => decodeVin(vin), [vin]);
   const running = scenario !== "off";
 
   useEffect(() => { void refreshLibrary(); }, []);
@@ -112,7 +120,6 @@ export function CockpitTab() {
     else { setSelected(null); setInLibrary(false); setStubModel(""); }
   }
 
-  function identify() { identifyWith(vin); }
 
   // load saved prefs + auto-connect if we were on REAL and nothing is connected yet
   useEffect(() => {
@@ -120,7 +127,7 @@ export function CockpitTab() {
     setMode(p.mode);
     setPiHost(p.host);
     setBusPref(p.bus);
-    if (p.mode === "real" && p.host && sd.link !== "online" && sd.link !== "connecting") void connectPi(p.host);
+    if ((p.mode === "real" || p.mode === "simulator") && p.host && sd.link !== "online" && sd.link !== "connecting") void connectPi(p.host);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -132,7 +139,7 @@ export function CockpitTab() {
       setPiHost(sd.host);
       setPi(sd.status);
       setLink("online");
-      setMode("real");
+      setMode((m) => (m === "simulator" ? "simulator" : "real"));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sd.link, sd.host]);
@@ -194,7 +201,7 @@ export function CockpitTab() {
 
   // keep device health live + compute per-bus RX rate (frames/s) while online
   useEffect(() => {
-    if (mode !== "real" || link !== "online") return;
+    if ((mode !== "real" && mode !== "simulator") || link !== "online") return;
     const poll = async () => {
       try {
         const st = await Api.superDevice.status(piHost);
@@ -225,23 +232,154 @@ export function CockpitTab() {
     return () => clearInterval(iv);
   }, [mode, link, piHost]);
 
+  // Step ①: read the VIN off the live bus. Doesn't decode/save yet — that's the
+  // explicit "Decode & add to Garage" step so the operator confirms it.
   async function readRealVin() {
     setVinReading(true);
     setMsg(null);
+    setVinPending(false);
+    setVinInsight(null);
     try {
       const r = await Api.superDevice.readVin(piHost);
-      if (r.ok && r.vin) {
-        setVin(r.vin);
-        identifyWith(r.vin);
-        setMsg(`VIN read from the vehicle: ${r.vin}`);
-      } else {
+      if (!(r.ok && r.vin)) {
         setMsg(`No VIN from the vehicle${r.error ? ` — ${r.error}` : ""}. Check the ignition is on and the ECM is responding.`);
+        return;
       }
+      setVin(r.vin);
+      identifyWith(r.vin);
+      setVinPending(true);
+      setMsg(`VIN read from the vehicle: ${r.vin}`);
+      // Immediately tell the operator what we already know about this VIN/YMM:
+      // is it in the shop garage, and have we mapped this Year/Make/Model before?
+      void buildVinInsight(r.vin).then(setVinInsight).catch(() => setVinInsight(null));
     } catch (e) {
       setMsg((e as Error).message);
     } finally {
       setVinReading(false);
     }
+  }
+
+  /** Look up what we already hold for a just-read VIN — shop garage presence and
+   * local Chip Lab knowledge (mapped modules + whether we've read this exact VIN). */
+  async function buildVinInsight(vinStr: string) {
+    const up = vinStr.toUpperCase();
+    const d = decodeVin(vinStr);
+    const profile = findProfileForVin(profiles, vinStr, d.wmi, d.make, d.year);
+    const seen = profile?.knownVins?.find((v) => v.vin === up);
+    const exploredModules = profile ? profile.modules.filter((m) => m.explored).length : 0;
+
+    let inGarage = false; let garageYmm: string | undefined; let shopName: string | undefined;
+    try {
+      const jc = await Api.jobcount.status();
+      if (jc.linked) {
+        shopName = jc.shopName ?? undefined;
+        const g = await Api.jobcount.listGarage(vinStr);
+        const hit = g.vehicles.find((v) => (v.vin || "").toUpperCase() === up);
+        if (hit) { inGarage = true; garageYmm = [hit.year, hit.make, hit.model].filter(Boolean).join(" "); }
+      }
+    } catch { /* shop offline — skip garage check */ }
+
+    return {
+      inGarage, garageYmm, shopName,
+      profileKnown: !!profile,
+      ymmLabel: profile ? `${profile.year ?? ""} ${profile.make} ${profile.model}`.trim() : undefined,
+      exploredModules,
+      vinSeenBefore: !!seen,
+      lastReadAt: seen?.lastReadAt,
+    };
+  }
+
+  // Step ②: decode the VIN, add the vehicle to the linked shop garage, and file
+  // it into the self-growing library. Returns a success line the UI shows.
+  async function decodeAndAddToGarage() {
+    if (!vin) return;
+    setDecoding(true);
+    setMsg(null);
+    const parts: string[] = [];
+    try {
+      let resolved: { year: number | null; make: string; model: string } | null = null;
+      const jc = await Api.jobcount.status();
+      if (jc.linked) {
+        const d = decodeVin(vin);
+        const push = await Api.jobcount.pushVehicle({ vin, year: d.year, make: d.make ?? undefined });
+        if (push.vehicle.make) resolved = { year: push.vehicle.year, make: push.vehicle.make, model: push.vehicle.model };
+        const ymm = [push.vehicle.year, push.vehicle.make, push.vehicle.model].filter(Boolean).join(" ");
+        parts.push(push.created ? `✓ Added to ${jc.shopName} garage — ${ymm}` : `✓ Already in ${jc.shopName} garage — ${ymm}`);
+      } else {
+        parts.push("Not linked to a shop — saved locally only (link one in Settings to sync the garage).");
+      }
+
+      const grew = await growLibraryWithVin(vin, resolved);
+      if (grew) parts.push(grew);
+
+      setVinPending(false);
+      setMsg(parts.join(" · "));
+    } catch (e) {
+      setMsg(`Decode/add failed — ${(e as Error).message}`);
+    } finally {
+      setDecoding(false);
+    }
+  }
+
+  /**
+   * Record a real VIN read into the self-growing library. Finds the matching
+   * Year/Make/Model profile (by VIN/WMI, or by YMM once JobCount resolves the
+   * model) and appends the VIN to its knownVins — the profile is "the decoded
+   * car", the VINs are the individual units. Creates the YMM profile on first
+   * sight when we have a model to name it. Returns a human status, or null when
+   * there's nothing to grow yet (no model known and no existing match).
+   */
+  async function growLibraryWithVin(
+    vinStr: string,
+    resolved: { year: number | null; make: string; model: string } | null,
+  ): Promise<string | null> {
+    const d = decodeVin(vinStr);
+    const now = new Date().toISOString();
+    let match = findProfileForVin(profiles, vinStr, d.wmi, d.make, d.year);
+    if (!match && resolved?.model) match = findProfileByYmm(profiles, resolved.year, resolved.make, resolved.model);
+
+    if (match) {
+      const { profile, vinIsNew } = recordVinRead(match, vinStr, now);
+      const list = await Api.vehicleLib.save(profile);
+      setProfiles(list);
+      const n = profile.knownVins?.length ?? 0;
+      const name = `${profile.year ?? ""} ${profile.make} ${profile.model}`.trim();
+      return vinIsNew
+        ? `filed under "${name}" (${n} VIN${n === 1 ? "" : "s"} on file)`
+        : `already on file under "${name}"`;
+    }
+
+    // No match — only auto-create when we have a real model to name it by
+    // (JobCount's decode). Otherwise leave the manual "Add to library" path.
+    if (resolved?.model) {
+      const year = resolved.year ?? d.year;
+      const make = resolved.make || d.make || "Unknown";
+      const model = resolved.model;
+      const stub: VehicleProfile = {
+        id: profileId(year, make, model),
+        year, make, model, bodyType: (d.bodyTypeHint as BodyType) || "sedan",
+        wmi: d.wmi ? [d.wmi] : [],
+        buses: [{ id: "hs-can", label: "HS-CAN", protocol: "CAN", bitrate: 500000, obdPins: "6/14" }],
+        modules: [
+          { id: "ecm", label: "Engine Control Module", category: "powertrain", bus: "hs-can", location: "engine", addressing: { request: "7E0", response: "7E8" } },
+        ],
+        supportedPids: PIDS.map((p) => p.pid),
+        capabilities: [
+          { id: "live-data", label: "Live engine data", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["01 0C", "01 0D", "01 05"] },
+          { id: "read-dtcs", label: "Read stored DTCs", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["03"] },
+          { id: "read-vin", label: "Read VIN", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["09 02"] },
+        ],
+        notes: "Auto-created from an OBD VIN read — enrich by mapping this bus in the AI Training Room.",
+        provenance: { source: "vin_decoded", confidence: 0.4, createdAt: now, observedOn: vinStr },
+      };
+      const { profile } = recordVinRead(stub, vinStr, now);
+      const list = await Api.vehicleLib.save(profile);
+      setProfiles(list);
+      setSelected(profile);
+      setInLibrary(true);
+      return `new vehicle "${`${year ?? ""} ${make} ${model}`.trim()}" added to your library (1 VIN on file)`;
+    }
+    return null;
   }
 
   // (Re)build the simulator whenever the loaded profile changes.
@@ -328,6 +466,7 @@ export function CockpitTab() {
   const speed = reading(0x0d);
   const otherGauges = gauges.filter((g) => g.pid !== 0x0c && g.pid !== 0x0d);
   const canUp = pi?.ifaces.filter((i) => i.up).length ?? 0;
+  const upIface = pi?.ifaces.find((i) => i.up)?.name ?? "can0";
 
   return (
     <>
@@ -352,26 +491,15 @@ export function CockpitTab() {
         </button>
         <button className={`cp-mode-btn ${mode === "simulator" ? "active sim" : ""}`} onClick={() => chooseMode("simulator")}>
           <span className="cp-mode-ic">🧪</span>
-          <span className="cp-mode-txt"><b>SIMULATOR</b><small>type a VIN — no hardware needed</small></span>
-          {mode === "simulator" && <span className="cp-mode-live sim">SELECTED</span>}
+          <span className="cp-mode-txt"><b>SIMULATOR</b><small>full simulated car on CAN1 → read it on CAN0</small></span>
+          {mode === "simulator" && <span className={`cp-mode-live sim ${link === "online" ? "on" : ""}`}>{link === "online" ? "ONLINE" : "SELECTED"}</span>}
         </button>
       </div>
 
-      {/* SOURCE PANEL */}
-      {mode === "simulator" ? (
-        <div className="cp-vin card">
-          <label className="tiny dim">VIN</label>
-          <input className="cp-vin-input mono" value={vin} maxLength={17}
-            onChange={(e) => setVin(e.target.value.toUpperCase())} placeholder="17-character VIN" />
-          <button className="primary" onClick={identify}>Identify vehicle</button>
-          <div className="cp-decode">
-            <Chip k="Year" v={decode.year ?? "?"} />
-            <Chip k="Make" v={decode.make ?? "?"} />
-            <Chip k="Country" v={decode.country} />
-            <Chip k="Check" v={decode.checkDigitValid ? "valid" : "—"} tone={decode.checkDigitValid ? "ok" : "warn"} />
-          </div>
-        </div>
-      ) : (
+      {/* SOURCE PANEL — simulator drives a virtual car on CAN1, then reads it
+          on CAN0 through the SAME pipeline as a real vehicle. */}
+      {mode === "simulator" && <VirtualVehiclePanel host={piHost} />}
+      {(
         <div className={`cp-link card ${link}`}>
           {link !== "online" && (
             <div className="cp-link-head">
@@ -483,6 +611,46 @@ export function CockpitTab() {
                 {vin && identified && <span className="cp-vin-got mono">VIN {vin}</span>}
               </div>
               <p className="tiny dim">Reads OBD-II mode 09 from the ECM over the live bus, then identifies the vehicle in your library — or offers to map it.</p>
+              {vinInsight && (
+                <div className="cp-insight-card">
+                  <div className="cp-insight-row">
+                    {vinInsight.inGarage
+                      ? <span className="badge ok">✓ VIN already in {vinInsight.shopName || "the shop"} garage{vinInsight.garageYmm ? ` — ${vinInsight.garageYmm}` : ""}</span>
+                      : vinInsight.shopName
+                        ? <span className="badge">new to the {vinInsight.shopName} garage</span>
+                        : <span className="badge dim">shop not linked</span>}
+                  </div>
+                  <div className="cp-insight-row tiny">
+                    {vinInsight.profileKnown ? (
+                      <>
+                        <span>🧠 We already know this YMM: <b>{vinInsight.ymmLabel}</b>{" "}
+                          {vinInsight.exploredModules > 0
+                            ? <span className="cp-known">— {vinInsight.exploredModules} module{vinInsight.exploredModules === 1 ? "" : "s"} mapped, we know how to talk to it.</span>
+                            : <span className="dim">— in your library but not deep-mapped yet.</span>}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="dim">New Year/Make/Model — not in your Chip Lab library yet.</span>
+                    )}
+                  </div>
+                  {vinInsight.vinSeenBefore && vinInsight.lastReadAt && (
+                    <div className="cp-insight-row tiny dim">You last read this exact VIN on {new Date(vinInsight.lastReadAt).toLocaleString()}.</div>
+                  )}
+                </div>
+              )}
+
+              {vinPending && (
+                <div className="cp-decode-card">
+                  <span className="tiny">
+                    {vinInsight?.inGarage
+                      ? <>Already in the garage — re-file it locally and refresh?</>
+                      : <>VIN <b className="mono">{vin}</b> read. Decode it, add it to your shop garage, and save it to the library?</>}
+                  </span>
+                  <button className="primary" onClick={() => void decodeAndAddToGarage()} disabled={decoding}>
+                    {decoding ? "Decoding & adding…" : vinInsight?.inGarage ? "② Re-decode & refresh" : "② Decode VIN & add to Garage"}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -506,10 +674,21 @@ export function CockpitTab() {
 
       {selected && (
         <>
-          {mode === "real" && (
+          {(mode === "real" || mode === "simulator") && (
             <div className="cp-realnote tiny">
-              🛰️ <b>Live vehicle.</b> Structure &amp; modules are loaded from the library for <b>{selected.year} {selected.make} {selected.model}</b>. Gauges below are a simulated preview — live telemetry streaming from the Pi is the next build step.
+              {mode === "simulator"
+                ? <>🧪 <b>Simulated vehicle.</b> Reading the virtual car on CAN0 — the map, discovery and AI deep-map run exactly as on a real vehicle.</>
+                : <>🛰️ <b>Live vehicle.</b> Structure &amp; modules are loaded from the library for <b>{selected.year} {selected.make} {selected.model}</b>. Gauges below are a simulated preview — live telemetry streaming from the Pi is the next build step.</>}
             </div>
+          )}
+
+          {(mode === "real" || mode === "simulator") && link === "online" && (
+            <VehicleDeepMap
+              host={piHost}
+              iface={mode === "simulator" ? "can0" : upIface}
+              profile={selected}
+              onProfileUpdate={(p) => { setSelected(p); setProfiles((list) => list.some((x) => x.id === p.id) ? list.map((x) => (x.id === p.id ? p : x)) : [...list, p]); }}
+            />
           )}
         <div className="cp-grid">
           <div className="card cp-stage">
@@ -619,10 +798,6 @@ export function CockpitTab() {
       </div>
     </>
   );
-}
-
-function Chip({ k, v, tone }: { k: string; v: string | number; tone?: "ok" | "warn" }) {
-  return <span className={`cp-chip ${tone ?? ""}`}><span className="dim">{k}</span> {v}</span>;
 }
 
 function Health({ k, v, tone }: { k: string; v: string | number; tone?: "ok" | "warn" }) {
@@ -795,6 +970,10 @@ const styles = `
 .cp-fd { display: flex; align-items: center; gap: 4px; color: var(--fg-2); cursor: pointer; }
 .cp-bus-add { display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; border: 1px dashed var(--border); border-radius: 10px; color: var(--fg-2); font-size: 12px; padding: 11px; }
 .cp-vinrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cp-decode-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; padding: 10px 12px; background: var(--bg-2); border: 1px solid var(--accent); border-radius: 10px; }
+.cp-insight-card { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding: 10px 12px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; }
+.cp-insight-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cp-known { color: var(--accent); }
 .cp-vin-btn { font-size: 14px; padding: 10px 18px; }
 .cp-vin-got { color: var(--accent); font-size: 13px; }
 .warn { color: var(--warn); }

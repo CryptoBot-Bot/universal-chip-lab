@@ -142,6 +142,29 @@ const api = {
       return () => ipcRenderer.removeListener("moduleExplorer:event", handler);
     },
   },
+  vehicleExplorer: {
+    discover: (payload: { host?: string; iface: string }) => invoke("vehicleExplorer:discover", payload),
+    commitDiscovery: (payload: { profile: unknown; discovered: unknown[] }) =>
+      invoke("vehicleExplorer:commitDiscovery", payload),
+    start: (payload: { host?: string; iface: string; profile: unknown; targets: unknown[] }) =>
+      invoke("vehicleExplorer:start", payload),
+    stop: () => invoke("vehicleExplorer:stop"),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onEvent: (cb: (e: any) => void) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handler = (_e: unknown, ev: any) => cb(ev);
+      ipcRenderer.on("vehicleExplorer:event", handler);
+      return () => ipcRenderer.removeListener("vehicleExplorer:event", handler);
+    },
+  },
+  jobcount: {
+    status: () => invoke("jobcount:status"),
+    pair: (serverUrl: string, code: string) => invoke("jobcount:pair", { serverUrl, code }),
+    unpair: () => invoke("jobcount:unpair"),
+    verify: () => invoke("jobcount:verify"),
+    pushVehicle: (v: unknown) => invoke("jobcount:pushVehicle", v),
+    listGarage: (q?: string) => invoke("jobcount:listGarage", { q }),
+  },
   settings: {
     getKeyStatus: () => invoke("settings:getKeyStatus"),
     setApiKey: (key: string) => invoke("settings:setApiKey", { key }),

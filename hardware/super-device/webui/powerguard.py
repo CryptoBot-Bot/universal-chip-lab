@@ -13,7 +13,8 @@ Behavior (the §13 Stage-4 contract):
 
 Safety when the UPS is NOT mounted: the guard only arms itself when it can see
 the X1200 fuel gauge on I²C (0x36), and PLD GPIO6 is configured with a
-pull-DOWN so a floating pin reads "power OK". No UPS → the guard just idles.
+pull-UP so a floating pin reads "power OK" (this X1200 signals power-present
+as HIGH — bench-verified 2026-07-23). No UPS → the guard just idles.
 
 State is published to /run/superdevice/power.json so the web UI / desktop app
 can show "ON BATTERY — shutdown in N s". Runs as root via systemd
@@ -49,8 +50,9 @@ def gauge_soc():
 
 
 def power_lost():
-    """X1200 PLD on GPIO6: HIGH = external 5 V feed gone (running on cells)."""
-    return "| hi" in sh("pinctrl get 6").stdout
+    """X1200 PLD on GPIO6 — polarity BENCH-VERIFIED 2026-07-23 on this unit:
+    HIGH = external feed present, LOW = feed gone (running on cells)."""
+    return "| lo" in sh("pinctrl get 6").stdout
 
 
 def write_state(obj):
@@ -62,8 +64,9 @@ def write_state(obj):
 
 
 def main():
-    # pull-DOWN: with no UPS stacked the pin floats safe-low ("power OK")
-    sh("pinctrl set 6 ip pd")
+    # pull-UP: with no UPS stacked the pin floats safe-HIGH ("power OK", since
+    # this X1200 signals power-present as high); the X1200 drives it low on loss
+    sh("pinctrl set 6 ip pu")
     deadline = None
     while True:
         soc = gauge_soc()

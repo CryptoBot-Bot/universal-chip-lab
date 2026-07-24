@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { formatClockHz, SAFE_FIRST_CONTACT_HZ } from "@ecu/chip-db";
 
+import { JobCountLink } from "../components/JobCountLink";
 import { Topbar } from "../components/Topbar";
 import { Api, type KeyStatus } from "../lib/api";
 import { usePico } from "../lib/pico-connection";
@@ -136,6 +137,8 @@ export function SettingsTab() {
             <p className="tiny mt-12" style={{ color: msg.ok ? "var(--accent)" : "var(--danger)" }}>{msg.text}</p>
           )}
         </div>
+
+        <JobCountLink />
 
         <div className="card mt-16">
           <h3>SPI clock default</h3>

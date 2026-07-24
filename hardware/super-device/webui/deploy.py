@@ -22,7 +22,7 @@ import paramiko
 
 HERE = Path(__file__).resolve().parent
 REMOTE_DIR = "/opt/superdevice"
-CORE = ["superdevice_ui.py", "powerguard.py"]
+CORE = ["superdevice_ui.py", "powerguard.py", "virtual_vehicle.py"]
 EXTRA = ["ap.sh", "netwatch.sh", "superdevice-netwatch.service", "superdevice-ui.service", "superdevice-power.service"]
 
 
