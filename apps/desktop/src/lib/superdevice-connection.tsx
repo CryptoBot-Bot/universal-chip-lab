@@ -52,22 +52,37 @@ export function SuperDeviceProvider({ children }: { children: ReactNode }) {
   const linkRef = useRef(link); linkRef.current = link;
   const ownerRef = useRef(owner); ownerRef.current = owner;
 
+  // Transient tolerance: one slow/failed poll (Wi-Fi hiccup, device busy on a
+  // long CAN request) must NOT flip the whole app to "lost connection". Only
+  // after MAX_STRIKES consecutive failures do we report the link down; the next
+  // good poll restores it. Polls never overlap.
+  const strikesRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const MAX_STRIKES = 3;
   const refresh = useCallback(async () => {
     const h = hostRef.current;
     if (!h || linkRef.current === "idle" || linkRef.current === "connecting") return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const [i, s] = await Promise.all([
         Api.superDevice.get<PiDeviceInfo>(h, "/api/device"),
         Api.superDevice.status(h),
       ]);
+      strikesRef.current = 0;
       setInfo(i); setStatus(s); setError(null); setLink("online");
       // heartbeat: renew our claim before its TTL runs out
       if (i.claim && i.claim.owner === ownerRef.current && i.claim.expires_in < 90) {
         Api.devices.claim(h).catch(() => { /* renewed next round */ });
       }
     } catch (err) {
-      setLink("error");
-      setError(err instanceof Error ? err.message : String(err));
+      strikesRef.current += 1;
+      if (strikesRef.current >= MAX_STRIKES) {
+        setLink("error");
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      inFlightRef.current = false;
     }
   }, []);
 

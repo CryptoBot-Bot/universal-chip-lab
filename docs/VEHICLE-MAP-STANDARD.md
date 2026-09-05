@@ -113,3 +113,80 @@ touched makes the next one of that platform map faster and truer.
 **Coverage checklist for "gold":** identity ✓ · buses+gateway ✓ · OBD-II baseline ✓ · all
 fingerprinted modules ✓ · per-module DIDs/live/DTCs/coding/actions ✓ · memory read method ✓ ·
 trust level on every field ✓.
+
+
+---
+
+## 6. Vehicle identity — how we decide WHICH car this is (the standard)
+
+A VIN never names a model by itself. The WMI (positions 1-3) is the manufacturer +
+vehicle type — `JTD` covers every Japan-built Toyota passenger car, `1FT` every Ford
+truck. Matching a library profile on WMI (or make + year) alone is how the cockpit
+used to pick the wrong car, and worse, then folded the real car's modules into that
+wrong profile. The rule now: **a profile is bound only when the library is certain**,
+and every bind teaches the library so the next unit is certain sooner.
+
+| Layer | Evidence | Result |
+|---|---|---|
+| 1 | **Exact VIN** already on file (`knownVins`) | bind (confidence 1.0) |
+| 2 | **VIN pattern** — the "squish" of a unit previously CONFIRMED on this YMM: positions 1-8 (WMI + VDS model/body/engine codes) + position 10 (year); check digit and plant/serial wildcarded. Year must agree. | bind (0.95) |
+| 3 | **Confirmed Year/Make/Model** from a trusted source — the operator, the shop garage decoder, or the AI identifier after operator confirmation | bind (0.92) |
+| 4 | Same WMI / same make (+ year) | **hint only** (≤ 0.4) — shown as a candidate, never bound |
+
+Implementation: `packages/vehicle-db/src/vehicleIdentity.ts` — `resolveVehicleIdentity()`
+returns `{ bound, candidates }`; `BIND_THRESHOLD = 0.9`; `learnVin()` records the VIN
+**and** its squish pattern + WMI on the profile (called only on a confirmed bind);
+`findProfileForVin()` is now strict and only returns a layer-1..3 match.
+
+**When nothing binds → the Identify stage** (`components/VehicleIdentify.tsx`):
+1. show the offline decode (maker, model codes, year, plant, check digit) and the hints;
+2. **Scan bus & identify with AI** — discovery probes the standard OEM address sweep
+   (Toyota / Ford FEPS / VAG +0x6A / Honda / Nissan / Mercedes / BMW 0x6xx / GM +0x400,
+   ~50 pairs) and reads every responder's identification DIDs (22 F187 part number,
+   F190 VIN, F18A supplier, F195 software, F191 hardware, F18C serial) — read-only,
+   no AI, ~20 s; then the AI identifier (`electron/resolver/vehicleIdentifier.ts`,
+   Claude Opus 5, structured output) decodes VIN structure + the part numbers (Toyota
+   `-02` = Corolla series, Ford `JL3` = 2018 F-150, VAG `5Q0` = MQB, …) + the address
+   map + the library candidates (with bus-fingerprint similarity) into a proposed
+   identity with **evidence[]**, **warnings[]**, a **matchedProfileId** only when the
+   evidence establishes it, and a name for every responding module. It must answer
+   `model: "unknown"` rather than invent one;
+3. the operator confirms (or corrects, or types it) → the YMM profile is created or
+   bound, the VIN + pattern learned, the **bus fingerprint** (responders + each one's
+   identification) and every discovered module with its real part number saved.
+
+Verified 2026-09-04 against the virtual vehicles on the bench: the Corolla sim
+(`JTDEPRAE6LJ012345`) is NOT bound before learning (hint only), the AI identifies it
+as a 2020 Corolla from the `-02` series code in all 12 part numbers and matches the
+library profile; the F-150 sim is never bound to the Corolla, all 9 Ford modules are
+found, and the AI identifies a 2018 F-150 (`JL3` prefixes, W1E series code). After one
+confirmed bind, the next unit of the same VIN shape resolves at layer 2 with no AI.
+
+## 7. The standard scan → map → operate pipeline (every car, same steps)
+
+| Stage | What happens | What is persisted |
+|---|---|---|
+| ① Read VIN | OBD 09 02 from the ECM on the live bus | — |
+| ①b NHTSA decode | free vPIC `DecodeVinValuesExtended` (`electron/resolver/vinOnline.ts`, cached per VIN in `vehicle-library/vin-decode-cache.json`) → year / make / model / trim / series / body / engine / drive / plant. Its Year/Make/Model is a TRUSTED identity (layer 3): binds an existing profile or files a new one (`profileFromOnlineDecode`) | `profile.decoded`, VIN + pattern learned |
+| ② Identify (fallback) | only when NHTSA cannot name the model: layers 1-4 above; bus scan + AI + operator | profile bound; VIN, VIN pattern, WMI, fingerprint |
+| ③ Discover & census | ~50-pair OEM address sweep + identification DIDs on every responder (no AI, ~20 s), then the **AI census** (`censusModules`, IPC `vehicleId:census`) names every responder in the maker's own terms with role, category, protocol, memory-read estimate and typical services | modules with address, `lastSeenAt`, `identity` (`observedAt` = live-read), `summary`, `protocol`, `memoryRead`, `censusAt` |
+| ④ Deep-map | per-module AI explorer, seeded with the discovered identity + census line, verifies sessions / services / IDs / live data / DTCs / broadcast → canonical 14-op capability board. New `scan_dids` tool sweeps DID ranges (0100-03FF measurement+coding, F180-F1FF identification, F400-F4FF OBD mirror) the way a real tester finds a module's blocks; seed requests (27 01) allowed, keys never | `module.explored` (folds, never regresses) |
+| ⑤ Operate | **READ** (identification, DTCs, live data, broadcast, raw) and **WRITE** (clear DTCs, security seed/key, write DID, routine, ECU reset) live on the bus — every write through the confirm modal; flash/memory write is bench-only | `module.opsLog` (what actually worked on this car) |
+
+**Bench-verified 2026-09-04 (headless, virtual Corolla):** NHTSA → 2020 Toyota Corolla LE
+(ZRE212L, 2ZR-FAE); discovery 12 modules in 21 s; census named all 12 (Skid Control ECU,
+Certification ECU, A/C Amplifier …) in 49 s; ECM deep-map with `scan_dids`: 20 identification
+records, 19 live-data blocks, 3 DTCs, full board, 7 steps / 246 s.
+
+**Per-module simulators (the training bench):** `hardware/super-device/webui/virtual_vehicle.py`
+now models every module TYPE as a real-world template (ecm, tcm, abs, srs, eps, bcm, cluster,
+hvac, gateway, radar, camera, immo, sonar): identification block F180-F19F, measurement DIDs
+0100-01xx with real scalings, coding DIDs 0200-02xx (2E after security), I/O control 2F 03xx,
+routines 31 01, DTC 19 01/02/04/06/0A with snapshots, OBD + F4xx mirror on powertrain. `--describe
+<vehicle>` prints the ground truth so an AI deep-map can be scored against it.
+
+Module trust: `identity.observedAt` set = read off the car; absent = seeded/guessed.
+Capability statuses come from live responses (`supported` / `gated` with NRC /
+`unsupported` / `unknown`). The virtual vehicles (`hardware/super-device/webui/
+virtual_vehicle.py`, Corolla + F-150, stateful sessions/security/writes) exercise all
+five stages on the bench with no car.

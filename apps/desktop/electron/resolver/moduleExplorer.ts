@@ -71,6 +71,11 @@ export interface ExplorerConfig {
   knownDtcs?: { code: string; desc: string }[];
   prior?: PriorKnowledge;
   skeleton?: ExplorerSkeleton;
+  /** What discovery already read off this module (22 F187/F18A/F195/F191/F18C). */
+  discovered?: { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string };
+  /** The census line: what this module is / controls on this vehicle. */
+  summary?: string;
+  vehicle?: string; // "2020 Toyota Corolla LE"
 }
 
 export interface ExplorerResult {
@@ -122,8 +127,22 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "probe",
-    description: "Send one or more diagnostic requests over ONE ISO-TP socket (so a session persists across them). Each request is a hex payload string, e.g. '1081' or '22F190' or '1902FF'. READ-ONLY: only session control (10), tester-present (3E), ReadDataByIdentifier (22), ReadDTCInformation (19), KWP read (21), OBD modes (01/03/07/09/0A), ReadMemoryByAddress (23), ReadScalingData (17). Writes/security/reset are refused.",
+    description: "Send one or more diagnostic requests over ONE ISO-TP socket (so a session persists across them). Each request is a hex payload string, e.g. '1081' or '22F190' or '1902FF'. READ-ONLY: only session control (10), tester-present (3E), ReadDataByIdentifier (22), ReadDTCInformation (19), KWP read (21), OBD modes (01/03/07/09/0A), ReadMemoryByAddress (23), ReadScalingData (17), and SecurityAccess SEED REQUESTS only (27 01 / 27 03 — never a key). Writes/clear/routines/reset/keys are refused.",
     input_schema: { type: "object", properties: { requests: { type: "array", items: { type: "string" } }, purpose: { type: "string" } }, required: ["requests", "purpose"] },
+  },
+  {
+    name: "scan_dids",
+    description: "Sweep a RANGE of ReadDataByIdentifier (22 xxxx) DIDs over one socket and return only the ones that answer (positive = data, or gated = 7F with a security/session NRC). This is how real testers find a module's measurement, coding and identification blocks without an ODX file. Up to 1024 DIDs per call; an optional session opener (e.g. '1003') is sent first in every batch. Use it on 0100-03FF (OEM measurement + coding), F180-F1FF (identification), and F400-F4FF (OBD PID mirror on powertrain modules), then read the interesting ones twice to see what changes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        start: { type: "string", description: "first DID, 4 hex chars, e.g. '0100'" },
+        end: { type: "string", description: "last DID inclusive, 4 hex chars, e.g. '03FF' (max 1024 DIDs per call)" },
+        session: { type: "string", description: "optional session opener payload, e.g. '1003' or '10C0'" },
+        purpose: { type: "string" },
+      },
+      required: ["start", "end", "purpose"],
+    },
   },
   {
     name: "record",
@@ -277,12 +296,15 @@ function systemPrompt(cfg: ExplorerConfig): string {
   return `You are an expert automotive control-module reverse-engineer, exploring a REAL module live on a bench through a diagnostic gateway. Your job: understand this module as completely as possible — what protocol it speaks, what it broadcasts, every diagnostic service and identifier it supports, what data and capabilities it exposes, and its stored faults — then verify and conclude.
 
 The module under test:
-- ${cfg.displayName} (${cfg.brand}, category ${cfg.category})
-- Bus: request id ${cfg.requestId} → response id ${cfg.responseId}, protocol hint: ${cfg.protocol}
+- ${cfg.displayName} (${cfg.brand}, category ${cfg.category})${cfg.vehicle ? ` on a ${cfg.vehicle}` : ""}
+- Bus: request id ${cfg.requestId} → response id ${cfg.responseId}, protocol hint: ${cfg.protocol}${cfg.discovered && (cfg.discovered.partNo || cfg.discovered.supplier) ? `
+- Already read by discovery: part number ${cfg.discovered.partNo || "?"}${cfg.discovered.supplier ? `, supplier ${cfg.discovered.supplier}` : ""}${cfg.discovered.sw ? `, software ${cfg.discovered.sw}` : ""}${cfg.discovered.hw ? `, hardware ${cfg.discovered.hw}` : ""}${cfg.discovered.serial ? `, serial ${cfg.discovered.serial}` : ""} — confirm, don't re-derive.` : ""}${cfg.summary ? `
+- Census says: ${cfg.summary}` : ""}
 ${cfg.knownDtcs?.length ? `- Previously seen DTCs: ${cfg.knownDtcs.map((d) => d.code).join(", ")}` : ""}${skeletonSection(cfg.skeleton)}${priorSection(cfg.prior)}
 
 You have READ-ONLY tools:
 - scan_bus: see what the module broadcasts (ids, bytes, Hz). Use it first, and again later to catch changing signals.
+- scan_dids: sweep a DID range (22 xxxx) and get back only the DIDs that answer or are gated — the fastest way to find a module's measurement, coding and identification blocks. Sweep 0100-03FF and F180-F1FF on every module (in the extended session), F400-F4FF on powertrain modules; then read the hits twice with probe to see which bytes move (live signals) and which are static (coding / identification).
 - probe: send diagnostic requests over one socket. Batch a session opener + reads together, e.g. ["1081","21F0"] or ["1003","22F190"]. Positive responses start with SID+0x40 (50/59/62/61…); negatives are 7F <sid> <nrc>.
 - record: log each confirmed finding (identity, service, capability, dtc, signal, note). RECORD OFTEN — anything you record is salvaged even if you run out of steps.
 - conclude: finish with the full structured understanding. ALWAYS end with conclude.
@@ -300,20 +322,68 @@ Method (be systematic and efficient — you have ~${MAX_STEPS} steps):
 1. scan_bus to see the broadcast map (call it twice to spot changing live bytes).
 2. Enumerate SESSIONS with service 10. Try KWP sub-functions 81, 85, 86, 87, C0 and UDS 03; record which are accepted (50 xx). CRITICAL: KWP modules (Nissan/JATCO, Bosch-KWP) usually expose their richest data ONLY in a NON-STANDARD session — most often 0xC0, sometimes 0x86 — not the default 0x81.
 3. Identification: 21 F0/F1/FA/FB/FC/FD/FE/FF (KWP) and 22 F190/F187/F18C/F191/F195/F18A (UDS). Decode ASCII part numbers.
+3b. DID SWEEP (UDS modules): scan_dids 0100-03FF and F180-F1FF in the extended session (F400-F4FF too on ECM/TCM). Every DID that answers is a deliverable: decode what it holds (ASCII → identification; 1-4 byte values that change between two reads → live measurement, name the physical quantity from its range/behaviour and the module's role; static small values → coding/configuration; F186 = active session; F198/F199 = tester serial / programming date). A DID that is GATED with NRC 0x33 is a security-protected read/write — record it as such.
 4. LIVE DATA — the highest-value target: reads (21 xx) are SESSION-GATED — the SAME id returns different blocks in different sessions, and a 0x7F NRC means "not in THIS session" (try another), NOT "unsupported". For EACH accepted session, re-try data LIDs 21 00, 21 01, 21 02, 21 03, 21 04, 21 10, 21 20. On Nissan/JATCO the live measurement block (temps/pressures/solenoid currents) is typically 21 02 in the rich session 0xC0. Do NOT conclude "no live data" until you have tried the data LIDs in every accepted session — especially 0xC0.
 5. Read DTCs (19 02 FF), decode the P/C/B/U codes and status bytes; also try snapshot/freeze blocks (21 13/16/17/18/19/1A/1B) in the rich session.
 6. Probe which services answer vs return 7F, to map the real capability surface. Interpret NRCs (0x11 service not supported, 0x12 sub-function/LID not supported, 0x7F not in active session → switch sessions, 0x31 out of range).
 7. record findings as you confirm them; verify by re-reading where useful.
 8. conclude with a confident, honest summary — do this BEFORE you run out of steps. In conclude, FILL the structured arrays so the module's cockpit grows: sessions (every accepted 50 xx), identification (each ID record with its request + session + decoded value), liveData (each measurement block + the session it needs), broadcastFrames (each broadcast id + rate + what the bytes carry).
-   ALSO fill the canonical **operations** array — the standard capability board every module shares. For EACH of these operations give a status: read_identification, read_dtcs, read_freeze_frames, read_live_data, read_broadcast, read_memory, read_scaling, clear_dtcs, security_access, coding_adaptation, actuator_test, routine_control, ecu_reset, flash_write. status = supported (answered positively) | gated (SID recognised but refused — e.g. NRC 0x12/0x22/0x33; note the nrc) | unsupported (NRC 0x11 serviceNotSupported) | unknown (you did not test it — do NOT guess a write actually works; leave write ops unknown unless a read-only probe legitimately revealed their state). For supported reads include request + session. Distinguish carefully: NRC 0x11 = unsupported, but 0x12/0x22/0x33/0x7F = gated (the service exists). This is the most important output — it is how the cockpit renders what the module can do.
+   Include in liveData EVERY measurement DID/LID you confirmed (id = the exact request, e.g. "22 0100" or "21 02", label = the physical quantity, note = decode/scaling), and in identification every static record (F1xx and coding DIDs) with its decoded value.
+   ALSO fill the canonical **operations** array — the standard capability board every module shares. For EACH of these operations give a status: read_identification, read_dtcs, read_freeze_frames, read_live_data, read_broadcast, read_memory, read_scaling, clear_dtcs, security_access, coding_adaptation, actuator_test, routine_control, ecu_reset, flash_write. For security_access: a seed reply (67 01 xx…) = supported; 7F 27 7F/22 = gated (needs another session); 7F 27 11 = unsupported. status = supported (answered positively) | gated (SID recognised but refused — e.g. NRC 0x12/0x22/0x33; note the nrc) | unsupported (NRC 0x11 serviceNotSupported) | unknown (you did not test it — do NOT guess a write actually works; leave write ops unknown unless a read-only probe legitimately revealed their state). For supported reads include request + session. Distinguish carefully: NRC 0x11 = unsupported, but 0x12/0x22/0x33/0x7F = gated (the service exists). This is the most important output — it is how the cockpit renders what the module can do.
 
 Rules: NEVER attempt writes, coding, security unlock, or resets — they are refused anyway. Be honest about uncertainty. Think out loud briefly before each action so the operator can follow your reasoning. Do not repeat identical probes needlessly.`;
 }
 
+/** DID sweep: batches of BATCH requests per socket (session opener first), only responders reported. */
+async function execScanDids(input: Record<string, unknown>, deps: ExplorerDeps): Promise<string> {
+  const start = parseInt(String(input.start ?? "").replace(/[^0-9a-fA-F]/g, ""), 16);
+  const end = parseInt(String(input.end ?? "").replace(/[^0-9a-fA-F]/g, ""), 16);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > 0xffff || end < start) return "scan_dids: bad range (need 4-hex start ≤ end)";
+  const count = Math.min(end - start + 1, 1024);
+  const session = String(input.session ?? "").replace(/\s+/g, "");
+  const BATCH = 20;
+  const positives: string[] = [];
+  const gated: string[] = [];
+  let scanned = 0;
+  for (let base = start; base < start + count; base += BATCH) {
+    if (deps.shouldStop()) break;
+    const dids: number[] = [];
+    for (let d = base; d < Math.min(base + BATCH, start + count); d++) dids.push(d);
+    const reqs = dids.map((d) => `22${d.toString(16).toUpperCase().padStart(4, "0")}`);
+    const items = await deps.probe(session ? [session, ...reqs] : reqs);
+    const body = session ? items.slice(1) : items;
+    body.forEach((it, i) => {
+      const did = dids[i].toString(16).toUpperCase().padStart(4, "0");
+      scanned++;
+      if (!it || !it.response) return;
+      if (it.negative) {
+        const nrc = it.nrc ?? 0;
+        if (nrc !== 0x31 && nrc !== 0x11 && nrc !== 0x12) gated.push(`${did} → NRC 0x${nrc.toString(16).toUpperCase().padStart(2, "0")}`);
+        return;
+      }
+      const a = ascii(it.response);
+      const data = fmt(it.response).slice(9);
+      positives.push(`${did} → ${data.slice(0, 60)}${data.length > 60 ? "…" : ""}${a ? `  ascii="${a.slice(0, 40)}"` : ""}`);
+    });
+  }
+  const lines = [`scanned ${scanned} DIDs ${start.toString(16).toUpperCase().padStart(4, "0")}-${(start + count - 1).toString(16).toUpperCase().padStart(4, "0")}${session ? ` in session ${session}` : ""}: ${positives.length} answered, ${gated.length} gated`];
+  if (positives.length) lines.push("ANSWERED:", ...positives);
+  if (gated.length) lines.push("GATED (exists, refused):", ...gated);
+  return lines.join("\n");
+}
+
 async function execProbe(requests: string[], deps: ExplorerDeps): Promise<string> {
   const cleaned = requests.map((r) => r.replace(/\s+/g, "")).filter(Boolean).slice(0, 12);
-  const refused = cleaned.filter((r) => !ALLOWED_SIDS.has(r.slice(0, 2).toLowerCase()));
-  const runnable = cleaned.filter((r) => ALLOWED_SIDS.has(r.slice(0, 2).toLowerCase()));
+  // SecurityAccess is allowed ONLY as a seed request (odd sub-function, e.g. 27 01):
+  // it changes nothing in the module and reveals whether security exists / which
+  // session it needs — a key (27 02) is never sent by the autonomous agent.
+  const isAllowed = (r: string) => {
+    const sid = r.slice(0, 2).toLowerCase();
+    if (sid === "27") { const sub = parseInt(r.slice(2, 4), 16); return Number.isFinite(sub) && sub % 2 === 1 && r.length === 4; }
+    return ALLOWED_SIDS.has(sid);
+  };
+  const refused = cleaned.filter((r) => !isAllowed(r));
+  const runnable = cleaned.filter(isAllowed);
   if (runnable.length === 0) return `All requests refused (read-only agent): ${refused.join(", ")}. Only session/read services are permitted.`;
   const results = await deps.probe(runnable);
   const lines = results.map((r) => {
@@ -428,6 +498,9 @@ export async function exploreModule(cfg: ExplorerConfig, deps: ExplorerDeps): Pr
         } else if (tu.name === "probe") {
           content = await execProbe(Array.isArray(input.requests) ? (input.requests as string[]) : [], deps);
           deps.onEvent({ type: "observation", tool: "probe", summary: String(input.purpose || "probe"), detail: content });
+        } else if (tu.name === "scan_dids") {
+          content = await execScanDids(input, deps);
+          deps.onEvent({ type: "observation", tool: "scan_dids", summary: `${String(input.purpose || "DID sweep")} — ${content.split("\n")[0]}`, detail: content });
         } else if (tu.name === "record") {
           const f = { kind: String(input.kind || "note"), title: String(input.title || ""), detail: String(input.detail || "") };
           recorded.push(f);

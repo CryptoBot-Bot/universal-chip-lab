@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { CAPABILITY_CATALOG, type VehicleProfile, type VehicleModule, type ModuleCapability } from "@ecu/vehicle-db";
+import { CAPABILITY_CATALOG, type VehicleProfile, type VehicleModule, type ModuleCapability, type VehicleSystemCategory } from "@ecu/vehicle-db";
 
 import {
   Api,
@@ -8,6 +8,7 @@ import {
   type VehicleExplorerEvent,
   type VehicleExplorerTarget,
 } from "../lib/api";
+import { LiveModuleOps } from "./LiveModuleOps";
 
 /**
  * Vehicle Deep Map — staged and incremental.
@@ -21,7 +22,12 @@ import {
  *             profile — saved after every module.
  */
 
-type Busy = null | "discover" | "all" | string; // string = a module id being mapped
+type Busy = null | "discover" | "census" | "all" | string; // string = a module id being mapped
+
+const LOCATION_FOR: Record<string, VehicleModule["location"]> = {
+  powertrain: "engine", transmission: "engine", chassis: "underbody", body: "dash", infotainment: "dash",
+  safety: "cabin_front", network: "dash", hvac: "dash", other: "cabin_front",
+};
 
 const CAP_STATUS_TONE: Record<string, string> = { supported: "ok", gated: "warn", unsupported: "", unknown: "" };
 const CAP_STATUS_LABEL: Record<string, string> = { supported: "yes", gated: "gated", unsupported: "no", unknown: "?" };
@@ -48,7 +54,15 @@ export function VehicleDeepMap({ host, iface, profile, onProfileUpdate }: {
   const [activeModule, setActiveModule] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [operating, setOperating] = useState<string | null>(null); // module id with the live READ/WRITE panel open
   const feedEndRef = useRef<HTMLDivElement>(null);
+
+  /** A live operation touched a module (opsLog) — persist it on the profile. */
+  async function updateModule(m: VehicleModule) {
+    const next = { ...profile, modules: profile.modules.map((x) => (x.id === m.id ? m : x)) };
+    onProfileUpdate(next);
+    try { await Api.vehicleLib.save(next); } catch (e) { setErr((e as Error).message); }
+  }
 
   // The module map is now the source of truth on the profile itself: every
   // module we've discovered has an address. Show them sorted by address.
@@ -75,11 +89,42 @@ export function VehicleDeepMap({ host, iface, profile, onProfileUpdate }: {
       if (e.type === "discover") setDiscoverProg({ done: e.done, total: e.total, found: e.found });
     });
     try {
-      const found: DiscoveredModule[] = await Api.vehicleExplorer.discover({ host, iface });
-      // Save discovery as its own stage — persists modules + addresses to the DB.
-      const updated = await Api.vehicleExplorer.commitDiscovery({ profile, discovered: found });
+      const found: DiscoveredModule[] = await Api.vehicleExplorer.discover({ host, iface, ident: true });
+      // Save discovery as its own stage — persists modules + addresses + read identities.
+      let updated = await Api.vehicleExplorer.commitDiscovery({ profile, discovered: found });
       onProfileUpdate(updated);
       setNewThisScan(new Set(found.map((d) => norm(d.responseId)).filter((r) => !before.has(r))));
+      off(); setDiscoverProg(null);
+      // Census: the AI names every responder from its part number → the vehicle's
+      // known-module list with basic parameters, saved before any deep-map.
+      if (found.length) {
+        setBusy("census");
+        try {
+          const census = await Api.vehicleExplorer.census({
+            vehicle: { year: updated.year, make: updated.make, model: updated.model, trim: updated.trim, engine: updated.decoded?.engine },
+            ecus: found.map((f) => ({ responseId: f.responseId.toUpperCase(), requestId: f.requestId, label: f.name, ...(f.ident ?? {}) })),
+            known: updated.modules.filter((m) => m.addressing?.response && !m.id.startsWith("resp-")).map((m) => ({ responseId: norm(m.addressing!.response), label: m.label, category: m.category })),
+          });
+          const byResp = new Map(census.modules.map((c) => [norm(c.responseId), c]));
+          const now = new Date().toISOString();
+          const modules = updated.modules.map((m) => {
+            const c = byResp.get(norm(m.addressing?.response));
+            if (!c) return m;
+            const stub = m.id.startsWith("resp-") || !m.summary;
+            return {
+              ...m,
+              label: stub ? c.label : m.label,
+              category: (stub ? c.category : m.category) as VehicleSystemCategory,
+              location: stub ? (LOCATION_FOR[c.category] ?? m.location) : m.location,
+              summary: c.summary, protocol: c.protocol, memoryRead: c.memoryRead, censusAt: now,
+              identity: m.identity ? { ...m.identity, supplier: m.identity.supplier || c.supplier || "" } : (c.supplier ? { supplier: c.supplier, partNo: "" } : m.identity),
+            };
+          });
+          updated = { ...updated, modules };
+          const list = await Api.vehicleLib.save(updated);
+          onProfileUpdate(list.find((p) => p.id === updated.id) ?? updated);
+        } catch (e) { setErr(`Census failed — ${(e as Error).message} (modules are saved; you can still map them).`); }
+      }
     } catch (e) {
       setErr((e as Error).message);
     } finally { off(); setBusy(null); setDiscoverProg(null); }
@@ -132,13 +177,13 @@ export function VehicleDeepMap({ host, iface, profile, onProfileUpdate }: {
           <h3 style={{ margin: 0 }}>🧠 Deep-map this vehicle</h3>
           <p className="tiny dim" style={{ margin: "4px 0 0" }}>
             {modules.length > 0
-              ? <>{modules.length} module{modules.length === 1 ? "" : "s"} known · {mappedCount} mapped. Saved to <b>{profile.year} {profile.make} {profile.model}</b> — discover to refresh, map one at a time to go deeper.</>
-              : <>Discover every module on the bus (saved to <b>{profile.year} {profile.make} {profile.model}</b>), then map each one live.</>}
+              ? <>{modules.length} module{modules.length === 1 ? "" : "s"} known · {mappedCount} deep-mapped. Saved to <b>{profile.year} {profile.make} {profile.model}</b> — re-discover to refresh the census, then map each module one by one.</>
+              : <>Discover every module on the bus (reads each one's part number) and let the AI census name them — saved to <b>{profile.year} {profile.make} {profile.model}</b>. Then map each one live.</>}
           </p>
         </div>
         <div className="row">
           <button className="primary" onClick={() => void discover()} disabled={anyBusy}>
-            {busy === "discover" ? "Discovering…" : modules.length ? "↻ Re-discover" : "① Discover modules"}
+            {busy === "discover" ? "Discovering…" : busy === "census" ? "AI census…" : modules.length ? "↻ Re-discover & census" : "① Discover & census modules"}
           </button>
           {modules.length > 0 && <button onClick={() => void mapAll()} disabled={anyBusy}>Map all {modules.length} →</button>}
           {anyBusy && busy !== "discover" && <button onClick={() => void stop()}>Stop</button>}
@@ -175,12 +220,23 @@ export function VehicleDeepMap({ host, iface, profile, onProfileUpdate }: {
                       ? <>{counts.supported} can-do{counts.gated ? ` · ${counts.gated} gated` : ""} · run {m.explored.runCount}×</>
                       : m.lastSeenAt ? `answers here · seen ${fmtDate(m.lastSeenAt)}` : "not mapped"}
                   </span>
+                  <button className={`tiny ${operating === m.id ? "primary" : ""}`} disabled={anyBusy} title="Read / write this module live on the bus" onClick={(ev) => { ev.stopPropagation(); setOperating(operating === m.id ? null : m.id); setExpanded(m.id); }}>
+                    {operating === m.id ? "■ Close ops" : "⚡ Operate"}
+                  </button>
                   <button className="tiny primary" disabled={anyBusy} onClick={(ev) => { ev.stopPropagation(); void mapModule(m); }}>
                     {m.explored ? "Re-map" : "Map"}
                   </button>
                 </span>
               </div>
 
+              {(m.summary || m.identity?.partNo) && (
+                <div className="tiny dim vdm-census">
+                  {m.identity?.partNo && <span className="mono">{m.identity.partNo}</span>}{m.identity?.supplier ? ` · ${m.identity.supplier}` : ""}{m.identity?.sw ? ` · sw ${m.identity.sw}` : ""}
+                  {m.summary && <> — {m.summary}</>}
+                  {m.protocol && m.protocol !== "unknown" && <span className="badge" style={{ marginLeft: 6 }}>{m.protocol}</span>}
+                  {m.memoryRead && <span className={`badge ${m.memoryRead === "obd" ? "ok" : m.memoryRead === "obd_partial" ? "warn" : "danger"}`} style={{ marginLeft: 4 }} title="memory read estimate">{m.memoryRead}</span>}
+                </div>
+              )}
               {(open || active) && (
                 <div className="vdm-mod-body">
                   {feed.length > 0 && (
@@ -190,7 +246,10 @@ export function VehicleDeepMap({ host, iface, profile, onProfileUpdate }: {
                     </div>
                   )}
                   {m.explored ? <CapBoard explored={m.explored} /> : (
-                    !active && <p className="tiny dim">Not mapped yet — press Map to have the AI verify what this module can do, live on the bus.</p>
+                    !active && <p className="tiny dim">Not mapped yet — press Map to have the AI verify what this module can do, live on the bus. You can still Operate it with the standard reads.</p>
+                  )}
+                  {operating === m.id && (
+                    <LiveModuleOps host={host} iface={iface} profile={profile} module={m} onModuleUpdate={(nm) => void updateModule(nm)} />
                   )}
                 </div>
               )}
@@ -234,6 +293,7 @@ const styles = `
 .vdm-mod-head { cursor: pointer; align-items: center; }
 .vdm-mod-name { overflow: hidden; text-overflow: ellipsis; }
 .vdm-mod-body { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.vdm-census { margin-top: 4px; line-height: 1.5; }
 .vdm-board { display: flex; flex-direction: column; gap: 6px; }
 .vdm-caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; }
 .vdm-cap { font-size: 11px; padding: 2px 4px; border-radius: 5px; }

@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  decodeVin, findProfileForVin, findProfileByYmm, recordVinRead, profileId, PIDS, moduleTemplateFor,
-  type VehicleProfile, type VehicleCapability, type BodyType,
+  decodeVin, resolveVehicleIdentity, learnVin, ymmProfileId, PIDS, moduleTemplateFor, profileFromOnlineDecode,
+  type VehicleProfile, type VehicleCapability, type BodyType, type OnlineVinDecode,
 } from "@ecu/vehicle-db";
 
 import { CarScene, type SceneModule } from "../components/CarScene";
 import { DeviceSettings } from "../components/DeviceSettings";
 import { SetupWizard } from "../components/SetupWizard";
 import { VehicleDeepMap } from "../components/VehicleDeepMap";
+import { VehicleIdentify } from "../components/VehicleIdentify";
 import { VirtualVehiclePanel } from "../components/VirtualVehiclePanel";
 import { ModuleInspector } from "../components/ModuleInspector";
 import { Topbar } from "../components/Topbar";
@@ -26,9 +27,8 @@ import { VehicleSimulator, type SimScenario, type SimReading } from "../lib/vehi
  * driven by the self-growing vehicle library.
  */
 
-const DEFAULT_VIN = "JTDEPRAE0LJ012345"; // 2020 Toyota (JTD, pos-10 L) — matches the seed
+const DEFAULT_VIN = "JTDEPRAE6LJ012345"; // 2020 Toyota Corolla shape (JTD, pos-10 L), valid check digit — the virtual vehicle
 const DEFAULT_HOST = "superdevice.local:8080";
-const BODY_TYPES: BodyType[] = ["sedan", "suv", "truck", "van", "minivan", "hatchback", "coupe", "wagon"];
 const SCENARIOS: { id: SimScenario; label: string }[] = [
   { id: "off", label: "Ignition off" },
   { id: "idle", label: "Idle" },
@@ -73,8 +73,11 @@ export function CockpitTab() {
   const [gauges, setGauges] = useState<SimReading[]>([]);
   const [capResult, setCapResult] = useState<string | null>(null);
   const [pendingCap, setPendingCap] = useState<VehicleCapability | null>(null);
-  const [stubBody, setStubBody] = useState<BodyType>("sedan");
-  const [stubModel, setStubModel] = useState("");
+  const [identityNote, setIdentityNote] = useState<string | null>(null);
+  const [onlineDecode, setOnlineDecode] = useState<OnlineVinDecode | null>(null);
+  const [simRunning, setSimRunning] = useState<{ running: boolean; vehicle?: string | null } | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [decodingOnline, setDecodingOnline] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   // --- REAL: SuperDevice link (backed by the app-wide shared connection) ---
@@ -109,15 +112,31 @@ export function CockpitTab() {
     try { setProfiles(await Api.vehicleLib.list()); } catch (e) { setMsg((e as Error).message); }
   }
 
-  function identifyWith(v: string) {
-    const d = decodeVin(v);
-    const prof = findProfileForVin(profiles, d.vin, d.wmi, d.make, d.year);
+  /**
+   * Identity resolution — STRICT. A profile is bound only when the library is
+   * certain (exact VIN / learned VIN pattern / confirmed YMM). Otherwise the
+   * VehicleIdentify stage takes over and nothing is bound until confirmed.
+   */
+  function identifyWith(v: string, list: VehicleProfile[] = profiles, confirmed?: { year: number | null; make: string; model: string } | null) {
+    const r = resolveVehicleIdentity(list, v, confirmed);
     setIdentified(true);
     setSelectedModuleId(null);
     setCapResult(null);
     setScenario("off");
-    if (prof) { setSelected(prof); setInLibrary(true); }
-    else { setSelected(null); setInLibrary(false); setStubModel(""); }
+    if (r.bound) {
+      setSelected(r.bound.profile); setInLibrary(true);
+      setIdentityNote(r.bound.kind === "vin" ? "known unit — exact VIN on file" : r.bound.kind === "pattern" ? "recognised by VIN pattern" : "confirmed Year/Make/Model");
+    } else {
+      setSelected(null); setInLibrary(false); setIdentityNote(null);
+    }
+    return r;
+  }
+
+  /** Called by the Identify stage once the operator confirmed a vehicle. */
+  function bindIdentified(p: VehicleProfile, note: string) {
+    setSelected(p); setInLibrary(true); setIdentityNote(note);
+    setMsg(`✓ ${note}`);
+    void buildVinInsight(vin, profiles).then(setVinInsight).catch(() => undefined);
   }
 
 
@@ -202,9 +221,14 @@ export function CockpitTab() {
   // keep device health live + compute per-bus RX rate (frames/s) while online
   useEffect(() => {
     if ((mode !== "real" && mode !== "simulator") || link !== "online") return;
+    let strikes = 0;
+    let inFlight = false;
     const poll = async () => {
+      if (inFlight) return; // never stack polls while the device is slow
+      inFlight = true;
       try {
         const st = await Api.superDevice.status(piHost);
+        strikes = 0;
         setPi(st);
         const now = Date.now();
         const rates: Record<string, number> = {};
@@ -225,7 +249,10 @@ export function CockpitTab() {
           for (const i of st.ifaces) nh[i.name] = (nh[i.name] ?? []).concat(rates[i.name] ?? 0).slice(-24);
           return nh;
         });
-      } catch { setLink("error"); setLinkErr("Lost connection to the SuperDevice."); }
+      } catch {
+        // one slow reply is not a lost link — three in a row is
+        if (++strikes >= 3) { setLink("error"); setLinkErr("Lost connection to the SuperDevice."); }
+      } finally { inFlight = false; }
     };
     void poll();
     const iv = setInterval(poll, 1500);
@@ -246,12 +273,42 @@ export function CockpitTab() {
         return;
       }
       setVin(r.vin);
-      identifyWith(r.vin);
       setVinPending(true);
-      setMsg(`VIN read from the vehicle: ${r.vin}`);
-      // Immediately tell the operator what we already know about this VIN/YMM:
-      // is it in the shop garage, and have we mapped this Year/Make/Model before?
-      void buildVinInsight(r.vin).then(setVinInsight).catch(() => setVinInsight(null));
+      setMsg(`VIN read from the vehicle: ${r.vin} — decoding with NHTSA…`);
+      // Step ①b: the free NHTSA decode names the car (year/make/model/trim/engine).
+      // Its Year/Make/Model is a TRUSTED identity: it either binds an existing
+      // library profile or files a new one. The AI Identify stage is the fallback.
+      setDecodingOnline(true);
+      let online: OnlineVinDecode | null = null;
+      try { online = await Api.vehicleExplorer.decodeOnline(r.vin); } catch { online = null; }
+      setDecodingOnline(false);
+      setOnlineDecode(online);
+      const confirmed = online?.ok ? { year: online.year, make: online.make, model: online.model } : null;
+      let list = profiles;
+      const res = identifyWith(r.vin, list, confirmed);
+      const now = new Date().toISOString();
+      if (res.bound) {
+        // learn the unit (VIN + pattern) on the bound profile
+        const { profile } = learnVin(res.bound.profile, r.vin, now);
+        if (online?.ok && !profile.decoded) profile.decoded = online;
+        try { list = await Api.vehicleLib.save(profile); setProfiles(list); setSelected(list.find((p) => p.id === profile.id) ?? profile); } catch { /* keep in-memory */ }
+        setMsg(`VIN ${r.vin} → ${profile.year ?? ""} ${profile.make} ${profile.model} (${res.bound.kind === "vin" ? "known unit" : res.bound.kind === "pattern" ? "VIN pattern" : "NHTSA decode"}).`);
+      } else if (online?.ok) {
+        // New Year/Make/Model for this library — file it straight from NHTSA.
+        const stub = profileFromOnlineDecode(online, now);
+        const { profile } = learnVin(stub, r.vin, now);
+        try {
+          list = await Api.vehicleLib.save(profile); setProfiles(list);
+          const saved = list.find((p) => p.id === profile.id) ?? profile;
+          setSelected(saved); setInLibrary(true);
+          setIdentityNote(`decoded by NHTSA as ${profile.year ?? ""} ${profile.make} ${profile.model}`);
+          setMsg(`New vehicle filed from NHTSA: ${profile.year ?? ""} ${profile.make} ${profile.model}${online.trim ? ` ${online.trim}` : ""}. Discover & census the bus to map its modules.`);
+        } catch (e) { setMsg(`Could not file the vehicle — ${(e as Error).message}`); }
+      } else {
+        setMsg(`VIN ${r.vin} read. ${online?.errorText ? `NHTSA: ${online.errorText}. ` : "NHTSA could not name the model. "}Identify it below (bus scan + AI).`);
+      }
+      // What we already know about this VIN/YMM: shop garage + local mapping depth.
+      void buildVinInsight(r.vin, list).then(setVinInsight).catch(() => setVinInsight(null));
     } catch (e) {
       setMsg((e as Error).message);
     } finally {
@@ -261,10 +318,9 @@ export function CockpitTab() {
 
   /** Look up what we already hold for a just-read VIN — shop garage presence and
    * local Chip Lab knowledge (mapped modules + whether we've read this exact VIN). */
-  async function buildVinInsight(vinStr: string) {
+  async function buildVinInsight(vinStr: string, list: VehicleProfile[] = profiles) {
     const up = vinStr.toUpperCase();
-    const d = decodeVin(vinStr);
-    const profile = findProfileForVin(profiles, vinStr, d.wmi, d.make, d.year);
+    const profile = resolveVehicleIdentity(list, vinStr).bound?.profile ?? null;
     const seen = profile?.knownVins?.find((v) => v.vin === up);
     const exploredModules = profile ? profile.modules.filter((m) => m.explored).length : 0;
 
@@ -335,13 +391,14 @@ export function CockpitTab() {
   ): Promise<string | null> {
     const d = decodeVin(vinStr);
     const now = new Date().toISOString();
-    let match = findProfileForVin(profiles, vinStr, d.wmi, d.make, d.year);
-    if (!match && resolved?.model) match = findProfileByYmm(profiles, resolved.year, resolved.make, resolved.model);
+    // Strict: exact VIN / learned pattern / the shop's confirmed Year+Make+Model.
+    const match = resolveVehicleIdentity(profiles, vinStr, resolved?.model ? resolved : null).bound?.profile ?? null;
 
     if (match) {
-      const { profile, vinIsNew } = recordVinRead(match, vinStr, now);
+      const { profile, vinIsNew } = learnVin(match, vinStr, now);
       const list = await Api.vehicleLib.save(profile);
       setProfiles(list);
+      if (!selected || selected.id === profile.id) { setSelected(profile); setInLibrary(true); }
       const n = profile.knownVins?.length ?? 0;
       const name = `${profile.year ?? ""} ${profile.make} ${profile.model}`.trim();
       return vinIsNew
@@ -349,15 +406,15 @@ export function CockpitTab() {
         : `already on file under "${name}"`;
     }
 
-    // No match — only auto-create when we have a real model to name it by
-    // (JobCount's decode). Otherwise leave the manual "Add to library" path.
+    // No certain match — only auto-create when a trusted source named the model
+    // (the shop's decoder). Otherwise the Identify stage below handles it.
     if (resolved?.model) {
       const year = resolved.year ?? d.year;
       const make = resolved.make || d.make || "Unknown";
       const model = resolved.model;
       const stub: VehicleProfile = {
-        id: profileId(year, make, model),
-        year, make, model, bodyType: (d.bodyTypeHint as BodyType) || "sedan",
+        id: ymmProfileId(year, make, model),
+        year, make, model, bodyType: (d.bodyTypeHint !== "unknown" ? d.bodyTypeHint : "sedan") as BodyType,
         wmi: d.wmi ? [d.wmi] : [],
         buses: [{ id: "hs-can", label: "HS-CAN", protocol: "CAN", bitrate: 500000, obdPins: "6/14" }],
         modules: [
@@ -369,14 +426,15 @@ export function CockpitTab() {
           { id: "read-dtcs", label: "Read stored DTCs", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["03"] },
           { id: "read-vin", label: "Read VIN", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["09 02"] },
         ],
-        notes: "Auto-created from an OBD VIN read — enrich by mapping this bus in the AI Training Room.",
-        provenance: { source: "vin_decoded", confidence: 0.4, createdAt: now, observedOn: vinStr },
+        notes: "Auto-created from a shop-decoded VIN read — discover + deep-map it to enrich.",
+        provenance: { source: "vin_decoded", confidence: 0.5, createdAt: now, observedOn: vinStr },
       };
-      const { profile } = recordVinRead(stub, vinStr, now);
+      const { profile } = learnVin(stub, vinStr, now);
       const list = await Api.vehicleLib.save(profile);
       setProfiles(list);
       setSelected(profile);
       setInLibrary(true);
+      setIdentityNote(`decoded by the shop as ${year ?? ""} ${make} ${model}`);
       return `new vehicle "${`${year ?? ""} ${make} ${model}`.trim()}" added to your library (1 VIN on file)`;
     }
     return null;
@@ -433,40 +491,43 @@ export function CockpitTab() {
       }
     : null;
 
-  async function saveStub() {
-    const d = decodeVin(vin);
-    const model = stubModel.trim() || "Unknown";
-    const stub: VehicleProfile = {
-      id: profileId(d.year, d.make ?? "Unknown", model),
-      year: d.year, make: d.make ?? "Unknown", model, bodyType: stubBody,
-      wmi: d.wmi ? [d.wmi] : [],
-      buses: [{ id: "hs-can", label: "HS-CAN", protocol: "CAN", bitrate: 500000, obdPins: "6/14" }],
-      modules: [
-        { id: "ecm", label: "Engine Control Module", category: "powertrain", bus: "hs-can", location: "engine", addressing: { request: "7E0", response: "7E8" } },
-      ],
-      supportedPids: PIDS.map((p) => p.pid),
-      capabilities: [
-        { id: "live-data", label: "Live engine data", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["01 0C", "01 0D", "01 05"] },
-        { id: "read-dtcs", label: "Read stored DTCs", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["03"] },
-        { id: "read-vin", label: "Read VIN", category: "diagnostic", risk: "read", bus: "hs-can", module: "ecm", sequence: ["09 02"] },
-      ],
-      notes: "Created from VIN decode — enrich by mapping this bus with AI in the AI Training Room.",
-      provenance: { source: "vin_decoded", confidence: 0.4, createdAt: new Date().toISOString() },
-    };
-    try {
-      const list = await Api.vehicleLib.save(stub);
-      setProfiles(list);
-      setSelected(stub);
-      setInLibrary(true);
-      setMsg(`Saved "${d.year ?? ""} ${d.make ?? ""} ${model}" to your library — it now grows the DB.`);
-    } catch (e) { setMsg((e as Error).message); }
-  }
-
   const rpm = reading(0x0c);
   const speed = reading(0x0d);
   const otherGauges = gauges.filter((g) => g.pid !== 0x0c && g.pid !== 0x0d);
   const canUp = pi?.ifaces.filter((i) => i.up).length ?? 0;
-  const upIface = pi?.ifaces.find((i) => i.up)?.name ?? "can0";
+  // The bus we talk to: the UP interface that actually carries traffic (a real car
+  // chatters on HS-CAN); ties fall back to the first one up, then can0.
+  const upIface = (() => {
+    const ups = (pi?.ifaces ?? []).filter((i) => i.up);
+    if (!ups.length) return "can0";
+    return [...ups].sort((a, b) => (rxRate[b.name] ?? 0) - (rxRate[a.name] ?? 0))[0]?.name ?? ups[0].name;
+  })();
+
+  // Real mode: a virtual vehicle still running on the Pi means the bench loop is
+  // live — warn before someone plugs into a real car with the sim chattering.
+  useEffect(() => {
+    if (link !== "online") { setSimRunning(null); return; }
+    let alive = true;
+    const check = () => Api.superDevice.get<{ running: boolean; vehicle?: string | null }>(piHost, "/api/sim/status")
+      .then((s) => { if (alive) setSimRunning(s); }).catch(() => undefined);
+    void check();
+    const iv = setInterval(check, 10000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [link, piHost]);
+
+  async function stopSimFromReal() {
+    try { await Api.superDevice.post(piHost, "/api/sim/stop", {}); setSimRunning({ running: false }); setMsg("Virtual vehicle stopped — the buses are free for the real car."); }
+    catch (e) { setMsg((e as Error).message); }
+  }
+
+  async function exportCapture() {
+    setCapturing(true); setMsg("Capturing diagnostics (device, VIN attempts, full discovery, OBD baseline)… ~30 s");
+    try {
+      const r = await Api.vehicleExplorer.capture({ host: piHost, iface: upIface, vin: vin || undefined, profile: selected ?? undefined, note: `${mode} mode` });
+      setMsg(`Diagnostic capture saved: ${r.path} (${Math.round(r.bytes / 1024)} KB) — ${r.summary}. Send this file for remote troubleshooting.`);
+    } catch (e) { setMsg(`Capture failed — ${(e as Error).message}`); }
+    finally { setCapturing(false); }
+  }
 
   return (
     <>
@@ -603,14 +664,39 @@ export function CockpitTab() {
                 <div className="cp-bus-add">+ K-Line, MS-CAN &amp; more<br /><span className="tiny dim">pods land here</span></div>
               </div>
 
+              {mode === "real" && simRunning?.running && (
+                <div className="cp-simwarn tiny">
+                  ⚠ The <b>virtual vehicle</b> ({simRunning.vehicle ?? "sim"}) is still running on the Pi's CAN1. Before plugging into a real car: power it off and remove the CAN1↔CAN0 jumper.
+                  <button className="tiny" style={{ marginLeft: 8 }} onClick={() => void stopSimFromReal()}>Power off virtual vehicle</button>
+                </div>
+              )}
               <div className="cp-vinrow">
                 <button className="primary cp-vin-btn" onClick={() => void readRealVin()} disabled={vinReading || canUp === 0}>
                   {vinReading ? "Reading VIN…" : "① Read VIN from vehicle"}
                 </button>
                 {canUp === 0 && <span className="tiny warn">Bring a bus UP first (in the SuperDevice panel / web UI).</span>}
                 {vin && identified && <span className="cp-vin-got mono">VIN {vin}</span>}
+                <button className="tiny" style={{ marginLeft: "auto" }} disabled={capturing || canUp === 0} onClick={() => void exportCapture()} title="Save a JSON with device health, VIN attempts, full discovery + identification, OBD baseline and the profile — for remote troubleshooting">
+                  {capturing ? "Capturing…" : "🧾 Export diagnostic capture"}
+                </button>
               </div>
-              <p className="tiny dim">Reads OBD-II mode 09 from the ECM over the live bus, then identifies the vehicle in your library — or offers to map it.</p>
+              <p className="tiny dim">Reads OBD-II mode 09 from the ECM over the live bus, decodes it with the free NHTSA database, then binds or files the vehicle in your library — the AI identifier is the fallback.</p>
+              {decodingOnline && <div className="tiny dim">Decoding VIN with NHTSA vPIC…</div>}
+              {onlineDecode && (
+                <div className={`cp-nhtsa tiny ${onlineDecode.ok ? "ok" : "warn"}`}>
+                  <b>NHTSA:</b>{" "}
+                  {onlineDecode.ok
+                    ? <>
+                        <b>{onlineDecode.year ?? "?"} {onlineDecode.make} {onlineDecode.model}</b>
+                        {onlineDecode.trim ? ` · ${onlineDecode.trim}` : ""}{onlineDecode.series ? ` (${onlineDecode.series})` : ""}
+                        {onlineDecode.bodyClass ? ` · ${onlineDecode.bodyClass}` : ""}{onlineDecode.driveType ? ` · ${onlineDecode.driveType}` : ""}
+                        {onlineDecode.engine ? ` · ${onlineDecode.engine}` : ""}{onlineDecode.fuel ? ` · ${onlineDecode.fuel}` : ""}{onlineDecode.transmission ? ` · ${onlineDecode.transmission}` : ""}
+                        {onlineDecode.plantCity || onlineDecode.plantCountry ? ` · built ${[onlineDecode.plantCity, onlineDecode.plantCountry].filter(Boolean).join(", ")}` : ""}
+                        {onlineDecode.errorText && onlineDecode.errorCode !== "0" ? <span className="dim"> · note: {onlineDecode.errorText}</span> : null}
+                      </>
+                    : <>could not name this VIN{onlineDecode.errorText ? ` — ${onlineDecode.errorText}` : ""}</>}
+                </div>
+              )}
               {vinInsight && (
                 <div className="cp-insight-card">
                   <div className="cp-insight-row">
@@ -658,18 +744,18 @@ export function CockpitTab() {
 
       {msg && <div className="cp-msg">{msg}</div>}
 
-      {identified && inLibrary === false && (
-        <div className="card cp-miss">
-          <strong>Not in your library yet.</strong>
-          <p className="tiny dim">This is a new vehicle — save it so the library grows. You can enrich the map later with AI in the AI Training Room.</p>
-          <div className="cp-miss-row">
-            <input className="cp-model" placeholder="Model (e.g. Camry)" value={stubModel} onChange={(e) => setStubModel(e.target.value)} />
-            <select className="cp-select" value={stubBody} onChange={(e) => setStubBody(e.target.value as BodyType)}>
-              {BODY_TYPES.map((b) => <option key={b} value={b}>{b}</option>)}
-            </select>
-            <button className="primary" onClick={() => void saveStub()}>Save to library</button>
-          </div>
-        </div>
+      {identified && inLibrary === false && vin && (
+        link === "online"
+          ? <VehicleIdentify
+              host={piHost}
+              iface={mode === "simulator" ? "can0" : upIface}
+              vin={vin}
+              profiles={profiles}
+              online={onlineDecode}
+              onProfiles={setProfiles}
+              onBound={bindIdentified}
+            />
+          : <div className="card cp-miss"><strong>Not certain which vehicle this is.</strong><p className="tiny dim">Connect the SuperDevice to scan the bus and identify it.</p></div>
       )}
 
       {selected && (
@@ -695,6 +781,7 @@ export function CockpitTab() {
             <div className="cp-stage-head">
               <div>
                 <span className="cp-badge ok">{mode === "real" ? "LIVE · MAP LOADED" : "IN LIBRARY · MAP LOADED"}</span>
+                {identityNote && <span className="tiny dim" style={{ marginLeft: 8 }}>· {identityNote}</span>}
                 <h3>{selected.year} {selected.make} {selected.model} <span className="tiny dim">· {selected.bodyType}</span></h3>
               </div>
               <div className="seg tiny">
@@ -777,7 +864,7 @@ export function CockpitTab() {
 
       {!selected && !identified && mode === "simulator" && (
         <div className="card cp-empty">
-          <p className="dim">Enter a VIN and hit <strong>Identify vehicle</strong>. Try the seeded flagship — the default VIN is a 2020 Toyota Corolla.</p>
+          <p className="dim">Power on the virtual vehicle on CAN1, bring CAN0 up, and <strong>Read VIN</strong> — the simulator runs the exact same identify → discover → deep-map pipeline as a real car.</p>
         </div>
       )}
 
@@ -866,6 +953,10 @@ function Big({ label, value, max, unit }: { label: string; value: number; max: n
 }
 
 const styles = `
+.cp-simwarn { margin: 8px 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--warn); background: var(--bg-2); color: var(--warn); }
+.cp-nhtsa { margin-top: 6px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-2); }
+.cp-nhtsa.ok { border-color: var(--accent); }
+.cp-nhtsa.warn { border-color: var(--warn); }
 .cp { display: flex; flex-direction: column; gap: 12px; }
 .cp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .cp-head h2 { margin: 0; }

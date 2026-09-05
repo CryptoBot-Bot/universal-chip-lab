@@ -37,7 +37,7 @@ export interface AddressCandidate { name: string; req: string; resp: string }
  * only the ones that actually respond, so probing extras is harmless.
  */
 export const ADDRESS_CANDIDATES: AddressCandidate[] = [
-  // Legislated powertrain block (req = resp − 8)
+  // Legislated powertrain block (ISO 15765-4, req = resp − 8) — every OBD car
   { name: "ECM / powertrain", req: "7E0", resp: "7E8" },
   { name: "TCM / powertrain 2", req: "7E1", resp: "7E9" },
   { name: "Powertrain 3", req: "7E2", resp: "7EA" },
@@ -46,25 +46,68 @@ export const ADDRESS_CANDIDATES: AddressCandidate[] = [
   { name: "Powertrain 6", req: "7E5", resp: "7ED" },
   { name: "Powertrain 7", req: "7E6", resp: "7EE" },
   { name: "Powertrain 8", req: "7E7", resp: "7EF" },
-  // Common OEM physical addresses (req/resp offset varies by maker)
-  { name: "ABS / brakes", req: "760", resp: "768" },
-  { name: "ABS / skid (alt)", req: "7B0", resp: "7B8" },
+  // Toyota / Lexus layout
+  { name: "ABS / skid control (Toyota)", req: "7B0", resp: "7B8" },
   { name: "SRS / airbag", req: "780", resp: "788" },
-  { name: "Body control (BCM)", req: "720", resp: "728" },
-  { name: "Body / SmartKey (alt)", req: "740", resp: "748" },
-  { name: "Central gateway", req: "710", resp: "718" },
-  { name: "Gateway (alt)", req: "750", resp: "758" },
-  { name: "Electric power steering", req: "730", resp: "738" },
+  { name: "Body ECU (Toyota BCM) / cluster (Ford IPC)", req: "720", resp: "728" },
+  { name: "Gateway (Toyota CGW)", req: "750", resp: "758" },
+  { name: "Smart key / cert (Toyota)", req: "751", resp: "759" },
   { name: "EPS (Toyota)", req: "7A6", resp: "7AE" },
   { name: "HVAC / climate", req: "7C0", resp: "7C8" },
-  { name: "Instrument cluster", req: "7C4", resp: "7CC" },
-  { name: "Forward radar / ADAS", req: "7D0", resp: "7D8" },
-  { name: "Camera / ADAS 2", req: "7A0", resp: "7A8" },
+  { name: "Instrument cluster (Toyota)", req: "7C4", resp: "7CC" },
   { name: "Immobiliser", req: "7C6", resp: "7CE" },
-  { name: "Smart key / cert (Toyota)", req: "751", resp: "759" },
+  { name: "Forward radar / ADAS", req: "7D0", resp: "7D8" },
   { name: "Parking assist / sonar", req: "7B6", resp: "7BE" },
+  { name: "Camera / ADAS 2", req: "7A0", resp: "7A8" },
   { name: "Occupant / seat", req: "770", resp: "778" },
+  // Ford FEPS layout (+8)
+  { name: "Camera / lane-keep (Ford CMR)", req: "706", resp: "70E" },
+  { name: "Gateway (Ford GWM)", req: "716", resp: "71E" },
+  { name: "Body control (Ford BCM)", req: "726", resp: "72E" },
+  { name: "Power steering (Ford PSCM / Nissan SRS)", req: "730", resp: "738" },
+  { name: "Restraints (Ford RCM)", req: "737", resp: "73F" },
+  { name: "ABS (Ford / Honda / Nissan)", req: "760", resp: "768" },
+  { name: "Audio / infotainment (Ford ACM)", req: "727", resp: "72F" },
+  { name: "Trailer / 4x4 (Ford TCCM)", req: "761", resp: "769" },
+  { name: "Parking aid (Ford PAM)", req: "736", resp: "73E" },
+  // Honda / Nissan / Mercedes shared ranges (+8)
+  { name: "Body / SmartKey (alt)", req: "740", resp: "748" },
+  { name: "EPS (Nissan)", req: "742", resp: "74A" },
+  { name: "Meter / ESP (alt)", req: "7A2", resp: "7AA" },
+  // VAG (Audi / VW / Skoda / Seat) — response = request + 0x6A
+  { name: "Gateway J533 (VAG)", req: "710", resp: "77A" },
+  { name: "Gateway (alt +8)", req: "710", resp: "718" },
+  { name: "Power steering J500 (VAG)", req: "712", resp: "77C" },
+  { name: "ABS/ESC J104 (VAG)", req: "713", resp: "77D" },
+  { name: "Instrument cluster J285 (VAG)", req: "714", resp: "77E" },
+  { name: "Airbag J234 (VAG)", req: "715", resp: "77F" },
+  { name: "Climate J255 (VAG)", req: "746", resp: "7B0" },
+  { name: "Central electrics J519 (VAG)", req: "70E", resp: "778" },
+  { name: "ACC radar J428 (VAG)", req: "767", resp: "7D1" },
+  // BMW 0x6xx block (+8)
+  { name: "DSC (BMW)", req: "6A0", resp: "6A8" },
+  { name: "EPS (BMW)", req: "6B0", resp: "6B8" },
+  { name: "ACSM airbag (BMW)", req: "6C0", resp: "6C8" },
+  { name: "KOMBI (BMW)", req: "620", resp: "628" },
+  { name: "ZGW gateway (BMW)", req: "660", resp: "668" },
+  { name: "KAFAS camera (BMW)", req: "670", resp: "678" },
+  // 29-bit ISO 15765-4 physical addressing (Honda/Acura 2016+, some others): 18DA<ta>F1 → 18DAF1<ta>
+  { name: "ECM (29-bit)", req: "18DA10F1", resp: "18DAF110" },
+  { name: "TCM (29-bit)", req: "18DA18F1", resp: "18DAF118" },
+  { name: "ABS/VSA (29-bit)", req: "18DA28F1", resp: "18DAF128" },
+  { name: "SRS (29-bit)", req: "18DA53F1", resp: "18DAF153" },
+  { name: "EPS (29-bit)", req: "18DA30F1", resp: "18DAF130" },
+  { name: "Body / gauge (29-bit)", req: "18DA60F1", resp: "18DAF160" },
+  { name: "Gateway (29-bit)", req: "18DA0EF1", resp: "18DAF10E" },
+  // GM 11-bit (response = request + 0x400)
+  { name: "BCM (GM)", req: "241", resp: "641" },
+  { name: "EBCM (GM)", req: "243", resp: "643" },
+  { name: "SDM airbag (GM)", req: "247", resp: "647" },
+  { name: "IPC (GM)", req: "24C", resp: "64C" },
 ];
+
+/** Identification strings read off a responder during discovery (UDS 22 Fxxx). */
+export interface DiscoveredIdent { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string; vin?: string }
 
 export interface DiscoveredModule {
   name: string;         // candidate label (a guess; the AI refines it)
@@ -72,13 +115,55 @@ export interface DiscoveredModule {
   responseId: string;
   firstBytes: string;   // the response we got (positive or negative)
   negative: boolean;    // true if it answered 0x7F (still present)
+  ident?: DiscoveredIdent; // what it says it is — the bus fingerprint the identity resolver keys on
 }
 
 export interface DiscoverDeps {
   /** One diagnostic request to a specific tx/rx pair. Returns the raw response hex, or null on no answer. */
   isotp: (tx: string, rx: string, data: string) => Promise<{ response?: string; negative?: boolean } | null>;
+  /** Optional: a sequence over one socket — enables the identification pass (22 F187/F190/F18A/F195/F191/F18C). */
+  probe?: (tx: string, rx: string, requests: string[]) => Promise<SeqItem[]>;
   onProgress?: (done: number, total: number, found: number) => void;
   shouldStop: () => boolean;
+}
+
+/** The standard identification DIDs every discovery reads — cheap, read-only,
+ * and the strongest "which module / which car is this" evidence there is. */
+export const IDENT_DIDS: { did: string; key: keyof DiscoveredIdent }[] = [
+  { did: "F187", key: "partNo" },   // manufacturer spare part number
+  { did: "F190", key: "vin" },      // VIN as this module knows it
+  { did: "F18A", key: "supplier" }, // system supplier
+  { did: "F195", key: "sw" },       // software version
+  { did: "F191", key: "hw" },       // hardware number
+  { did: "F18C", key: "serial" },   // ECU serial
+];
+
+/** Decode a 62 Fxxx positive response to printable ASCII (or a short hex if not text). */
+export function identText(hexResp?: string): string | undefined {
+  const clean = (hexResp || "").replace(/\s+/g, "");
+  if (clean.length < 6 || !clean.toLowerCase().startsWith("62")) return undefined;
+  const bytes = clean.slice(6).match(/../g) ?? [];
+  if (!bytes.length) return undefined;
+  const txt = bytes.map((b) => { const n = parseInt(b, 16); return n >= 32 && n < 127 ? String.fromCharCode(n) : n === 0 ? "" : "·"; }).join("").trim();
+  const printable = txt.replace(/·/g, "");
+  if (printable.length >= 3 && printable.length >= txt.length * 0.6) return printable;
+  return bytes.join("").toUpperCase().slice(0, 32);
+}
+
+/** Read the standard identification DIDs from one responder. Never throws. */
+export async function readIdent(probe: NonNullable<DiscoverDeps["probe"]>, tx: string, rx: string): Promise<DiscoveredIdent | undefined> {
+  try {
+    const items = await probe(tx, rx, IDENT_DIDS.map((d) => `22${d.did}`));
+    const out: DiscoveredIdent = {};
+    let any = false;
+    items.forEach((it, i) => {
+      const spec = IDENT_DIDS[i];
+      if (!spec || !it || it.negative || !it.response) return;
+      const v = identText(it.response);
+      if (v) { out[spec.key] = v; any = true; }
+    });
+    return any ? out : undefined;
+  } catch { return undefined; }
 }
 
 /** Probe every candidate address; keep the responders. Tester-present (3E00) is
@@ -92,7 +177,8 @@ export async function discoverModules(deps: DiscoverDeps, candidates = ADDRESS_C
     try {
       const r = await deps.isotp(c.req, c.resp, "3E00");
       if (r && r.response) {
-        found.push({ name: c.name, requestId: c.req, responseId: c.resp, firstBytes: r.response, negative: !!r.negative });
+        const ident = deps.probe ? await readIdent(deps.probe, c.req, c.resp) : undefined;
+        found.push({ name: c.name, requestId: c.req, responseId: c.resp, firstBytes: r.response, negative: !!r.negative, ident });
       }
     } catch { /* no answer on this address */ }
     deps.onProgress?.(i + 1, candidates.length, found.length);
@@ -112,6 +198,9 @@ export interface MapTarget {
   requestId: string;
   responseId: string;
   prior?: VehicleModuleExploration;   // stored capability memory for this module on this YMM
+  identity?: { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string }; // read by discovery
+  summary?: string;                   // census line
+  vehicle?: string;                   // "2020 Toyota Corolla LE"
 }
 
 export type VehicleExplorerEvent =
@@ -148,10 +237,14 @@ export function priorFromExploration(x?: VehicleModuleExploration): PriorKnowled
 }
 
 /** Turn a stored exploration into the explorer's ExplorerSkeleton (the record to verify + fill). */
-export function skeletonFromExploration(x?: VehicleModuleExploration): ExplorerSkeleton | undefined {
-  if (!x) return undefined;
+export function skeletonFromExploration(x?: VehicleModuleExploration, identity?: MapTarget["identity"]): ExplorerSkeleton | undefined {
+  const parts = [identity?.partNo, x?.identity].filter((p): p is string => !!p);
+  if (!x) {
+    if (!parts.length) return undefined;
+    return { partNumbers: parts, applications: [], sessions: [], services: [], identification: [], liveData: [], broadcastFrames: [], operations: [], dtcs: [] };
+  }
   return {
-    partNumbers: x.identity ? [x.identity] : [],
+    partNumbers: parts,
     applications: [],
     sessions: x.sessions ?? [],
     services: x.services ?? [],
@@ -183,7 +276,8 @@ export async function deepMapVehicle(
           displayName: t.displayName, brand: t.brand, category: t.category,
           protocol: t.protocol, requestId: t.requestId, responseId: t.responseId, iface: deps.iface,
           prior: priorFromExploration(t.prior),
-          skeleton: skeletonFromExploration(t.prior),
+          skeleton: skeletonFromExploration(t.prior, t.identity),
+          discovered: t.identity, summary: t.summary, vehicle: t.vehicle,
         },
         {
           probe: (requests) => deps.probe(t.requestId, t.responseId, requests),

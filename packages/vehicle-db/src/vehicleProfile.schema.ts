@@ -46,6 +46,32 @@ export interface ModuleIdentity {
   sw?: string;        // software version → F195
   hw?: string;        // hardware number → F191
   serial?: string;    // serial → F18C
+  observedAt?: string; // ISO — set when this identity was READ off a live bus (not seeded/guessed)
+}
+
+/** One diagnostic operation actually executed against a module on a live bus —
+ * the "what worked here" memory (read + write), capped per module. */
+export interface ModuleOpLog {
+  at: string;            // ISO
+  kind: "read" | "write";
+  label: string;         // "Clear DTCs", "Read identification", …
+  request: string;       // hex sent (last request of the sequence)
+  response?: string;     // hex received
+  ok: boolean;
+  nrc?: string;          // negative response code if refused
+  vin?: string;          // unit it ran on
+}
+
+/** What a live bus looked like when this vehicle was identified — the set of
+ * diagnostic responders plus each one's identification strings. A second unit
+ * of the same YMM should fingerprint the same; a different model will not. */
+export interface VehicleFingerprint {
+  takenAt: string;
+  iface?: string;
+  responders: string[];                     // response ids that answered ("7E8", "7B8", …)
+  ecus: { responseId: string; requestId?: string; partNo?: string; supplier?: string; sw?: string; serial?: string; vin?: string }[];
+  calId?: string;                           // OBD 09 04 calibration id (ECM)
+  cvn?: string;                             // OBD 09 06
 }
 
 /**
@@ -87,10 +113,16 @@ export interface VehicleModule {
   busKnowledgeId?: string;    // links to a BusModuleKnowledge entry (AI/bench detail)
   explored?: VehicleModuleExploration; // permanent live-verified capability memory
   lastSeenAt?: string;        // ISO — last time this module answered on a discovery scan
+  opsLog?: ModuleOpLog[];     // recent real-bus operations run against this module (capped)
+  summary?: string;           // census: what this module is / controls on THIS vehicle (AI, from part numbers)
+  protocol?: "uds" | "kwp2000" | "obd2" | "unknown"; // census: how to talk to it
+  memoryRead?: "obd" | "obd_partial" | "bench";       // census estimate until bench-verified
+  censusAt?: string;          // ISO — when the census last named it
 }
 
 /** One responder from a live discovery scan (mirrors the electron DiscoveredModule). */
-export interface DiscoveredModuleInput { name: string; requestId: string; responseId: string; negative?: boolean }
+export interface DiscoveredIdent { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string; vin?: string }
+export interface DiscoveredModuleInput { name: string; requestId: string; responseId: string; negative?: boolean; ident?: DiscoveredIdent }
 
 /** Canonical identity for a module at a response id (from the seed) so a live
  * responder adopts the right name/category instead of a generic stub. */
@@ -113,6 +145,24 @@ function _mergeModules(a: VehicleModule, b: VehicleModule): VehicleModule {
     addressing: base.addressing?.response ? base.addressing : other.addressing,
     busKnowledgeId: base.busKnowledgeId ?? other.busKnowledgeId,
   };
+}
+
+/** A live-read identification beats a seeded/guessed one; an empty read keeps
+ * whatever we had. Pure. */
+export function identityFromDiscovery(d: DiscoveredIdent | undefined, now: string, prev?: ModuleIdentity): ModuleIdentity | undefined {
+  if (!d || !(d.partNo || d.supplier || d.sw || d.hw || d.serial)) return prev;
+  return {
+    supplier: d.supplier || prev?.supplier || "",
+    partNo: d.partNo || prev?.partNo || "",
+    sw: d.sw ?? prev?.sw, hw: d.hw ?? prev?.hw, serial: d.serial ?? prev?.serial,
+    observedAt: now,
+  };
+}
+
+/** Append a real-bus operation to a module's log (newest last, capped). Pure. */
+export function appendOpLog(mod: VehicleModule, entry: ModuleOpLog, cap = 40): VehicleModule {
+  const log = [...(mod.opsLog ?? []), entry].slice(-cap);
+  return { ...mod, opsLog: log };
 }
 
 /**
@@ -156,12 +206,15 @@ export function foldDiscoveredModules(
         response: existing.addressing?.response || d.responseId,
       };
       existing.lastSeenAt = now;
+      const ident = identityFromDiscovery(d.ident, now, existing.identity);
+      if (ident) existing.identity = ident;
     } else {
       byResp.set(r, {
         id: c?.id ?? `resp-${d.responseId.toLowerCase()}`,
         label: c?.label ?? d.name, category: c?.category ?? "other",
         bus: c?.bus ?? defaultBus, location: c?.location ?? "cabin_front",
         addressing: { request: d.requestId, response: d.responseId }, lastSeenAt: now,
+        identity: identityFromDiscovery(d.ident, now),
       });
     }
   }
@@ -242,6 +295,41 @@ export interface VehicleCapability {
   note?: string;
 }
 
+/**
+ * What the free NHTSA vPIC decoder said about a VIN — the trusted first step of
+ * identification (year/make/model/trim/body/engine/plant). Cached per VIN in
+ * the electron main; stored on the profile it filed so it travels with publishes.
+ */
+export interface OnlineVinDecode {
+  source: "nhtsa";
+  vin: string;
+  ok: boolean;                 // make + model resolved
+  errorCode?: string;
+  errorText?: string;
+  year: number | null;
+  make: string;
+  model: string;
+  trim?: string;
+  series?: string;
+  bodyClass?: string;
+  bodyType: BodyType | null;   // mapped from bodyClass
+  vehicleType?: string;
+  driveType?: string;
+  engine?: string;             // "3.5L V6 EcoBoost" style summary
+  engineModel?: string;
+  displacementL?: string;
+  cylinders?: string;
+  horsepower?: string;
+  fuel?: string;
+  transmission?: string;
+  doors?: string;
+  plantCountry?: string;
+  plantCity?: string;
+  manufacturer?: string;
+  gvwr?: string;
+  fetchedAt: string;
+}
+
 export interface VehicleProvenance {
   source: VehicleProfileSource;
   confidence: number;         // 0..1
@@ -275,8 +363,11 @@ export interface VehicleProfile {
   trim?: string;
   bodyType: BodyType;
   market?: string;            // "US" | "EU" | ...
-  wmi?: string[];             // WMIs that map here (VIN → profile fast path)
-  vinPattern?: string;        // optional regex over full VIN for finer matches
+  wmi?: string[];             // WMIs seen on this YMM — a HINT only (a WMI spans many models)
+  vinPattern?: string;        // legacy single regex over the full VIN
+  vinPatterns?: string[];     // learned "squish" patterns (pos 1-8 + pos 10) — one per unit shape read
+  fingerprint?: VehicleFingerprint; // what the bus looked like on the last identify
+  decoded?: OnlineVinDecode;  // the NHTSA decode this YMM was filed from
   knownVins?: VinObservation[]; // real units of this YMM read with our OBD tool
   buses: VehicleBus[];
   modules: VehicleModule[];

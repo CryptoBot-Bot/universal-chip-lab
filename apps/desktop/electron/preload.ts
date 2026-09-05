@@ -143,12 +143,16 @@ const api = {
     },
   },
   vehicleExplorer: {
-    discover: (payload: { host?: string; iface: string }) => invoke("vehicleExplorer:discover", payload),
+    discover: (payload: { host?: string; iface: string; ident?: boolean }) => invoke("vehicleExplorer:discover", payload),
     commitDiscovery: (payload: { profile: unknown; discovered: unknown[] }) =>
       invoke("vehicleExplorer:commitDiscovery", payload),
     start: (payload: { host?: string; iface: string; profile: unknown; targets: unknown[] }) =>
       invoke("vehicleExplorer:start", payload),
     stop: () => invoke("vehicleExplorer:stop"),
+    identify: (payload: unknown) => invoke("vehicleId:resolve", payload),
+    decodeOnline: (vin: string) => invoke("vehicleId:decodeOnline", { vin }),
+    census: (payload: unknown) => invoke("vehicleId:census", payload),
+    capture: (payload: unknown) => invoke("vehicleLib:capture", payload),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onEvent: (cb: (e: any) => void) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

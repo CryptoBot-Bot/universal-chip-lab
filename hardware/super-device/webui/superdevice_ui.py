@@ -122,8 +122,27 @@ def _isotp_socket(iface, tx_id, rx_id, timeout):
     except OSError:
         pass  # padding unsupported on this kernel — fall back to unpadded
     sock.settimeout(timeout)
+    # 29-bit ("extended") diagnostic ids need the EFF flag on both sides.
+    CAN_EFF_FLAG = 0x80000000
+    if rx_id > 0x7FF:
+        rx_id |= CAN_EFF_FLAG
+    if tx_id > 0x7FF:
+        tx_id |= CAN_EFF_FLAG
     sock.bind((iface, rx_id, tx_id))   # (interface, rx_id, tx_id)
     return sock
+
+
+def _recv_final(sock, timeout):
+    """Receive one diagnostic response, skipping 7F xx 78 (requestCorrectlyReceived-
+    ResponsePending): real ECUs send that while they work on slow requests (DTC reads,
+    routines, security) and the final answer follows — up to P2* (5 s)."""
+    import time as _t
+    deadline = _t.time() + max(timeout, 0.2) + 5.0
+    data = sock.recv(4095)
+    while len(data) >= 3 and data[0] == 0x7F and data[2] == 0x78 and _t.time() < deadline:
+        sock.settimeout(max(0.5, min(5.0, deadline - _t.time())))
+        data = sock.recv(4095)
+    return data
 
 
 def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0):
@@ -131,7 +150,7 @@ def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0):
     sock = _isotp_socket(iface, tx_id, rx_id, timeout)
     try:
         sock.send(bytes(payload))
-        return sock.recv(4095)
+        return _recv_final(sock, timeout)
     finally:
         sock.close()
 
@@ -176,21 +195,46 @@ def bus_monitor(iface, ms=700):
     return {"ok": True, "window_ms": int(dur * 1000), "count": len(out), "frames": out}
 
 
+VIN_ATTEMPTS = [
+    # (tx, rx, payload, label) — in the order real cars answer most often
+    (0x7E0, 0x7E8, [0x09, 0x02], "OBD 09 02 physical 7E0"),
+    (0x7DF, 0x7E8, [0x09, 0x02], "OBD 09 02 functional 7DF"),
+    (0x7E0, 0x7E8, [0x22, 0xF1, 0x90], "UDS 22 F190 on 7E0"),
+    (0x18DA10F1, 0x18DAF110, [0x09, 0x02], "OBD 09 02 29-bit physical (Honda & co)"),
+    (0x18DB33F1, 0x18DAF110, [0x09, 0x02], "OBD 09 02 29-bit functional"),
+]
+
+
+def _vin_from(data):
+    if not data:
+        return ""
+    if len(data) >= 4 and data[0] == 0x49 and data[1] == 0x02:
+        body = data[3:]
+    elif len(data) >= 4 and data[0] == 0x62 and data[1] == 0xF1 and data[2] == 0x90:
+        body = data[3:]
+    else:
+        return ""
+    vin = "".join(chr(b) for b in body if 0x20 < b < 0x7F).strip()
+    return vin if len(vin) >= 11 else ""
+
+
 def read_vin(iface="can0"):
-    """Real OBD-II VIN read: mode 09 PID 02 to the ECM (7E0), response from 7E8."""
+    """Real OBD-II VIN read with fallbacks (physical, functional, UDS DID, 29-bit)."""
     if iface not in IFACES:
         return {"ok": False, "error": "bad iface"}
-    try:
-        data = isotp_request(iface, 0x7E0, 0x7E8, [0x09, 0x02], timeout=2.5)
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    raw = data.hex() if data else ""
-    # positive response: 49 02 <count> <17 ASCII VIN bytes>
-    if len(data) >= 4 and data[0] == 0x49 and data[1] == 0x02:
-        vin = data[3:].decode("ascii", "ignore").replace("\x00", "").strip()
-        if len(vin) >= 11:
-            return {"ok": True, "vin": vin, "raw": raw}
-    return {"ok": False, "error": "no VIN in response (ignition on? ECM present?)", "raw": raw}
+    tried = []
+    for tx, rx, payload, label in VIN_ATTEMPTS:
+        try:
+            data = isotp_request(iface, tx, rx, payload, timeout=1.5)
+        except Exception as e:
+            tried.append(f"{label}: {type(e).__name__}")
+            continue
+        raw = data.hex() if data else ""
+        vin = _vin_from(data)
+        if vin:
+            return {"ok": True, "vin": vin, "raw": raw, "via": label}
+        tried.append(f"{label}: {raw or 'no data'}")
+    return {"ok": False, "error": "no VIN from the ECM (ignition on? bus speed 500k? cable on pins 6/14?)", "tried": tried}
 
 
 def isotp_http(iface, tx_hex, rx_hex, data_hex, timeout=2.0):
@@ -264,7 +308,7 @@ def isotp_seq(iface, tx_hex, rx_hex, requests, timeout=2.0):
                 out.append({"request": "", "ok": False, "error": "empty"}); continue
             try:
                 sock.send(payload)
-                data = sock.recv(4095)
+                data = _recv_final(sock, t)
             except Exception as e:
                 out.append({"request": payload.hex(), "ok": False, "error": f"{type(e).__name__}: {e}", "response": ""}); continue
             resp = data.hex() if data else ""
@@ -383,9 +427,44 @@ def power_guard_state():
         return None
 
 
+_SSID_CACHE = {"t": 0.0, "ssid": ""}
+
+
+def _current_ssid():
+    """SSID of the active client connection WITHOUT triggering a Wi-Fi scan.
+    (`nmcli dev wifi` may rescan when its cache is stale — a scan stalls the radio
+    for seconds and made the app's 5 s health poll time out → "lost connection".)
+    Cached 30 s; the health poll calls this every 5 s."""
+    now = time.time()
+    if now - _SSID_CACHE["t"] < 30 and _SSID_CACHE["ssid"]:
+        return _SSID_CACHE["ssid"]
+    ssid = sh("nmcli -t -f active,ssid dev wifi list --rescan no 2>/dev/null | grep '^yes' | cut -d: -f2").stdout.strip()
+    if not ssid:
+        ssid = sh("nmcli -t -f GENERAL.CONNECTION dev show wlan0 2>/dev/null | cut -d: -f2").stdout.strip()
+    _SSID_CACHE.update(t=now, ssid=ssid)
+    return ssid
+
+
+def ensure_wifi_powersave_off():
+    """Wi-Fi power save on the Pi's onboard radio causes multi-second stalls (the
+    app saw periodic 'lost connection → restored'). Disable it persistently via
+    NetworkManager; takes effect on the next (re)connect. Idempotent, root only."""
+    conf = "/etc/NetworkManager/conf.d/superdevice-wifi-powersave.conf"
+    try:
+        if not os.path.exists(conf):
+            with open(conf, "w") as f:
+                f.write("[connection]\nwifi.powersave = 2\n")
+            sh("nmcli general reload")
+        con = sh("nmcli -t -f NAME,DEVICE con show --active | grep ':wlan0' | cut -d: -f1").stdout.strip()
+        if con and "disable" not in sh(f"nmcli -t -f 802-11-wireless.powersave con show '{con}'").stdout:
+            sh(f"nmcli connection modify '{con}' 802-11-wireless.powersave 2")
+    except Exception as e:
+        print(f"[sd] wifi powersave: {e}", flush=True)
+
+
 def device_info():
     ip = sh("hostname -I").stdout.strip().split()
-    ssid = sh("nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes' | cut -d: -f2").stdout.strip()
+    ssid = _current_ssid()
     model = ""
     try:
         model = open("/proc/device-tree/model").read().strip("\x00")
@@ -839,6 +918,7 @@ refresh(); setInterval(refresh,2500);
 
 
 if __name__ == "__main__":
+    ensure_wifi_powersave_off()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"SuperDevice UI on http://0.0.0.0:{PORT}")
     srv.serve_forever()

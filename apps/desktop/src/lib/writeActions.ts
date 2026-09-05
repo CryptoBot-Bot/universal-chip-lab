@@ -190,6 +190,37 @@ export function explainWrite(p: PendingWrite): WriteExplain {
           "Stable supply for the whole transfer.",
         ],
       };
+    case "routine":
+      return {
+        severity: "high",
+        summary: "Start an on-board routine in the module (RoutineControl 0x31).",
+        whatHappens: [
+          `Sends ${p.request} — the module runs the routine for real (self-test, reset of adaptations, calibration, erase…).`,
+          "Some routines change stored values or move actuators; the result is reported by the module.",
+        ],
+        risks: [
+          "A routine can clear learned adaptations or run actuators — know what this routine id does on this module.",
+          "Do not run erase/program-prep routines outside the Cloning Ceremony.",
+        ],
+        preconditions: [
+          "Correct session (usually extended) and, for protected routines, security access.",
+          "Vehicle in the state the routine expects (ignition on, engine off, park…).",
+        ],
+      };
+    case "reset":
+      return {
+        severity: "moderate",
+        summary: "Reboot the module (ECUReset 0x11).",
+        whatHappens: [
+          `Sends ${p.request} — the module restarts and drops off the bus for a moment.`,
+          "The current diagnostic session and any security unlock are lost.",
+        ],
+        risks: [
+          "Live systems (engine running, steering, brakes) must not be reset while the vehicle is moving.",
+          "Some modules re-learn on boot; expect a short warning-light cycle.",
+        ],
+        preconditions: ["Vehicle stationary, ignition on, engine off."],
+      };
     default: // generic write / reflash — the clone path
       return {
         severity: "critical",

@@ -8,7 +8,8 @@
 
 import communityCatalog from "./vehicleProfileCommunity.json";
 import { SEED_VEHICLE_PROFILES } from "./vehicleProfileSeed.js";
-import { validateVehicleProfile, profileMatchesVin, profileMatchesYmm } from "./vehicleProfile.schema.js";
+import { validateVehicleProfile, profileMatchesYmm } from "./vehicleProfile.schema.js";
+import { resolveVehicleIdentity } from "./vehicleIdentity.js";
 import type { VehicleProfile } from "./vehicleProfile.schema.js";
 
 const COMMUNITY_VEHICLE_PROFILES: VehicleProfile[] = (communityCatalog as VehicleProfile[]).filter(
@@ -23,21 +24,21 @@ export function mergeVehicleProfiles(learned: VehicleProfile[]): VehicleProfile[
   return [...byId.values()].sort((a, b) => `${a.make} ${a.model}`.localeCompare(`${b.make} ${b.model}`));
 }
 
-/** Find the best library match for a decoded VIN (WMI/pattern first, then make+year). */
+/**
+ * STRICT library match for a VIN — returns a profile only when it is certain
+ * (exact VIN, learned VIN pattern, or a confirmed Year/Make/Model). WMI / make
+ * alone are NOT a match: a WMI spans many models. Use `resolveVehicleIdentity`
+ * when you also want the ranked hints for the operator / AI.
+ */
 export function findProfileForVin(
   profiles: VehicleProfile[],
   vin: string,
-  wmi: string,
-  make: string | null,
-  year: number | null,
+  _wmi?: string,
+  _make?: string | null,
+  _year?: number | null,
+  confirmed?: { year: number | null; make: string; model: string } | null,
 ): VehicleProfile | null {
-  const byVin = profiles.find((p) => profileMatchesVin(p, vin, wmi));
-  if (byVin) return byVin;
-  if (make) {
-    const byMakeYear = profiles.find((p) => p.make.toLowerCase() === make.toLowerCase() && (year == null || p.year === year));
-    if (byMakeYear) return byMakeYear;
-  }
-  return null;
+  return resolveVehicleIdentity(profiles, vin, confirmed).bound?.profile ?? null;
 }
 
 export function findProfileByYmm(

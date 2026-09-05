@@ -356,12 +356,25 @@ suppressed load dumps, so this is margin, not mandatory. RTC coin cell for offli
 
 ### 7.2 Virtual Vehicle bench-loop (simulate a real car, no vehicle needed)
 
-`webui/virtual_vehicle.py` plays a **full 2020 Toyota Corolla** (11 ECUs) on a CAN
-channel via real ISO-TP — real UDS/OBD, real negative responses, live broadcast.
+`webui/virtual_vehicle.py` plays a full car on a CAN channel via real ISO-TP — real
+UDS/OBD, real negative responses, live broadcast. Every module TYPE is a real-world
+TEMPLATE (13: ecm/tcm/abs/srs/eps/bcm/cluster/hvac/gateway/radar/camera/immo/sonar)
+with an identification block (22 F180-F19F), measurement DIDs (22 0100+), coding DIDs
+(2E 0200+, security), I/O control (2F 0300+), routines (31 01), DTC snapshots/extended
+data (19 04/06) and an OBD PID mirror (22 F4xx) on powertrain modules; `--describe
+<vehicle>` prints the ground truth per module. Two cars ship (`--vehicle`):
+**corolla** = 2020 Toyota Corolla (12 ECUs, Toyota address layout, VIN
+`JTDEPRAE6LJ012345`) and **f150** = 2018 Ford F-150 (9 ECUs, Ford FEPS addresses,
+VIN `1FTEW1EP6JFA12345`). Every ECU is **stateful** (2026-09-04): session control
+with S3 timeout, security access 27 01/02 (test key = bitwise NOT of the seed, 3 bad
+keys → 0x36), clear DTCs 14 / OBD 04 (active faults re-set ~4 s later), coding
+writes 2E on writable DIDs (need security), routines 31 01 (some need security),
+ECU reset 11 01, I/O control 2F; memory read 23 and flash 34 stay gated (bench path).
 Run it on **can1** and wire **can1 ↔ can0** so the Chip Lab's whole real pipeline
-(VIN read → module discovery → per-module AI deep-map) runs against it on **can0**
-exactly as against a real car. Controlled from the app's Simulator mode via daemon
-endpoints `/api/sim/start|stop|status`.
+(VIN read → identify → module discovery + identification → per-module AI deep-map →
+live READ/WRITE operations) runs against it on **can0** exactly as against a real
+car. Controlled from the app's Simulator mode via daemon endpoints
+`/api/sim/start|stop|status` (`{"vehicle":"corolla"|"f150"}`).
 
 **Wiring for the loop (bench):**
 ```
@@ -374,6 +387,36 @@ The two isolated transceivers ACK each other, so it's a genuine differential CAN
 with no hardware; `--list` shows available cars. Extend `VEHICLES` to add more, or
 (future) export a real deep-mapped profile into this format to replay a car you've
 actually driven. can0↔can1 must be physically jumpered or can0 sees nothing.
+
+### 7.2b Daemon real-car hardening (2026-09-04)
+
+- **VIN read fallbacks** (`read_vin`): physical 7E0 → functional 7DF → UDS 22 F190 →
+  29-bit physical 18DA10F1 → 29-bit functional 18DB33F1; the reply says `via`, a failure
+  lists every attempt.
+- **29-bit addressing**: any id > 0x7FF gets `CAN_EFF_FLAG` in `_isotp_socket`, so
+  `/api/isotp` and `/api/isotp/seq` accept `18DAxxF1`/`18DAF1xx` pairs (Honda/Acura 2016+);
+  discovery probes seven 29-bit candidates.
+- **Response pending**: `_recv_final` keeps receiving while the ECU answers `7F xx 78`
+  (up to P2* 5 s) so slow DTC reads / routines / security on real ECUs return the final
+  answer instead of the "pending" frame.
+- **Diagnostic capture** (`vehicleLib:capture` IPC, "🧾 Export diagnostic capture" in the
+  cockpit): device status + both buses + sim status + raw VIN attempts + 1 s bus snapshot +
+  full discovery with identification strings + OBD baseline + the profile → one JSON under
+  `<workspace>/reports/`. This is the remote-troubleshooting artefact
+  (`docs/SHOP-DAY-CHECKLIST.md` §4).
+
+### 7.3 Wi-Fi power save (the "lost connection → restored" flicker) — FIXED 2026-09-04
+
+The onboard BCM4345/6 radio had power save enabled (`brcmfmac: power save enabled` in
+dmesg), which stalls the link for seconds at a time; the app's health poll then timed
+out and flipped to "Lost connection", recovering on the next poll. Fix on both sides:
+the daemon writes `/etc/NetworkManager/conf.d/superdevice-wifi-powersave.conf`
+(`wifi.powersave = 2`) and sets the active connection's `802-11-wireless.powersave`
+to disable at every start (`ensure_wifi_powersave_off`, takes effect on reconnect);
+`/api/device` no longer runs `nmcli dev wifi` (a scan) but `--rescan no` with a 30 s
+SSID cache; and the app's two poll loops need 3 consecutive failures before reporting
+the link down and never overlap. Measured: first-request latency after idle 4.2 s →
+0.05 s.
 
 ## 8. Software stack (hardware-relevant summary)
 

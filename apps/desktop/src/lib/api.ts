@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { BenchModuleProfile, BusModuleKnowledge, ModuleProfile, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, ModuleProfile, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -40,6 +40,16 @@ export interface AdapterSummary {
   description: string;
 }
 
+export interface CensusInput {
+  vehicle: { year: number | null; make: string; model: string; trim?: string; platform?: string; engine?: string };
+  ecus: IdentifyEcuEvidence[];
+  known?: { responseId: string; label: string; category: string }[];
+}
+export interface CensusModule {
+  responseId: string; label: string; shortName: string; category: string; supplier?: string; summary: string;
+  protocol: "uds" | "kwp2000" | "obd2" | "unknown"; memoryRead: "obd" | "obd_partial" | "bench"; likelyServices: string[]; notes?: string;
+}
+export interface CensusResult { modules: CensusModule[]; tokensIn: number; tokensOut: number }
 export interface IdentifyResult {
   signature: ChipSignature;
   matches: ChipMatch[];
@@ -239,8 +249,34 @@ export interface ExplorerRun {
 }
 
 // ---- AI Vehicle Explorer (whole-car deep map: discover modules → map each) ----
+export interface DiscoveredIdent { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string; vin?: string }
 export interface DiscoveredModule {
-  name: string; requestId: string; responseId: string; firstBytes: string; negative: boolean;
+  name: string; requestId: string; responseId: string; firstBytes: string; negative: boolean; ident?: DiscoveredIdent;
+}
+export interface IdentifyEcuEvidence {
+  responseId: string; requestId?: string; label?: string;
+  partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string; vin?: string;
+}
+export interface IdentifyCandidate {
+  id: string; year: number | null; make: string; model: string; trim?: string; bodyType?: string;
+  wmi?: string[]; responders: string[]; similarity: number; explored: number; hintKind?: string;
+}
+export interface IdentifyInput {
+  vin: string;
+  decode: { valid: boolean; wmi: string; vds: string; make: string | null; year: number | null; country: string; region: string; bodyTypeHint: string; checkDigitValid: boolean };
+  bus: { iface?: string; responders: string[]; ecus: IdentifyEcuEvidence[]; calId?: string; cvn?: string };
+  candidates: IdentifyCandidate[];
+  operatorNote?: string;
+}
+export interface IdentifyResult {
+  year: number | null; make: string; model: string; trim?: string;
+  bodyType: "sedan" | "suv" | "truck" | "van" | "minivan" | "hatchback" | "coupe" | "wagon";
+  platform?: string; engine?: string; market?: string;
+  confidence: "high" | "medium" | "low";
+  matchedProfileId: string | null;
+  rationale: string; evidence: string[]; warnings: string[];
+  modules: { responseId: string; label: string; category: string; supplier?: string }[];
+  tokensIn: number; tokensOut: number;
 }
 export interface VehicleExplorerTarget {
   moduleId: string; displayName: string; brand: string; category: string;
@@ -455,13 +491,18 @@ export const Api = {
       unwrap<{ removed: boolean }>(api.benchModules.deleteAsset(input) as never),
   },
   vehicleExplorer: {
-    discover: (payload: { host?: string; iface: string }) =>
+    discover: (payload: { host?: string; iface: string; ident?: boolean }) =>
       unwrap<DiscoveredModule[]>(api.vehicleExplorer.discover(payload) as never),
     commitDiscovery: (payload: { profile: VehicleProfile; discovered: DiscoveredModule[] }) =>
       unwrap<VehicleProfile>(api.vehicleExplorer.commitDiscovery(payload) as never),
     start: (payload: { host?: string; iface: string; profile: VehicleProfile; targets: VehicleExplorerTarget[] }) =>
       unwrap<VehicleProfile>(api.vehicleExplorer.start(payload) as never),
     stop: () => unwrap<{ ok: boolean }>(api.vehicleExplorer.stop() as never),
+    identify: (payload: IdentifyInput) => unwrap<IdentifyResult>(api.vehicleExplorer.identify(payload) as never),
+    decodeOnline: (vin: string) => unwrap<OnlineVinDecode>(api.vehicleExplorer.decodeOnline(vin) as never),
+    census: (payload: CensusInput) => unwrap<CensusResult>(api.vehicleExplorer.census(payload) as never),
+    capture: (payload: { host?: string; iface: string; vin?: string; profile?: VehicleProfile; note?: string; extra?: unknown }) =>
+      unwrap<{ path: string; bytes: number; summary: string }>(api.vehicleExplorer.capture(payload) as never),
     onEvent: (cb: (e: VehicleExplorerEvent) => void) => api.vehicleExplorer.onEvent(cb),
   },
   moduleExplorer: {

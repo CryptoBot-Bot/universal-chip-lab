@@ -12,5 +12,6 @@ export * from "./vehicleProfile.schema.js";
 export * from "./vehicleProfileRegistry.js";
 export { SEED_VEHICLE_PROFILES } from "./vehicleProfileSeed.js";
 export * from "./vinDecode.js";
+export * from "./vehicleIdentity.js";
 export * from "./obdPids.js";
 export * from "./moduleCatalog.js";

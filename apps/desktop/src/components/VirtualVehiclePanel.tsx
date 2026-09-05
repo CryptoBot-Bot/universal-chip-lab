@@ -11,10 +11,18 @@ import { Api } from "../lib/api";
 
 interface SimStatus { running: boolean; vehicle: string | null; iface: string | null; pid: number | null }
 
+/** Cars the Pi's virtual_vehicle.py can play (keep in sync with its VEHICLES map). */
+const VEHICLES: { key: string; label: string; ecus: number; note: string }[] = [
+  { key: "corolla", label: "2020 Toyota Corolla", ecus: 12, note: "Toyota address layout · DENSO/AISIN/ADVICS parts" },
+  { key: "f150", label: "2018 Ford F-150", ecus: 9, note: "Ford FEPS addresses · Continental/Visteon/Nexteer parts" },
+];
+const vehicleLabel = (k?: string | null) => VEHICLES.find((v) => v.key === k)?.label ?? k ?? "virtual vehicle";
+
 export function VirtualVehiclePanel({ host, onChange }: { host: string; onChange?: (running: boolean) => void }) {
   const [status, setStatus] = useState<SimStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [pick, setPick] = useState<string>(() => { try { return localStorage.getItem("vv.vehicle") || "corolla"; } catch { return "corolla"; } });
 
   const refresh = useCallback(async () => {
     try {
@@ -33,9 +41,11 @@ export function VirtualVehiclePanel({ host, onChange }: { host: string; onChange
   async function powerOn() {
     setBusy("start"); setMsg(null);
     try {
-      const r = await Api.superDevice.post<SimStatus & { ok: boolean; error?: string; bus?: string }>(host, "/api/sim/start", { iface: "can1", vehicle: "corolla" });
+      try { localStorage.setItem("vv.vehicle", pick); } catch { /* ignore */ }
+      const r = await Api.superDevice.post<SimStatus & { ok: boolean; error?: string; bus?: string }>(host, "/api/sim/start", { iface: "can1", vehicle: pick });
+      const v = VEHICLES.find((x) => x.key === pick);
       if (!r.ok) { setMsg(r.error || "Could not start the virtual vehicle."); }
-      else setMsg("Simulated 2020 Toyota Corolla is live on CAN1 (11 ECUs).");
+      else setMsg(`Simulated ${v?.label ?? pick} is live on CAN1 (${v?.ecus ?? "?"} ECUs).`);
       await refresh();
     } catch (e) { setMsg((e as Error).message); }
     finally { setBusy(null); }
@@ -63,15 +73,20 @@ export function VirtualVehiclePanel({ host, onChange }: { host: string; onChange
             <b>Virtual Vehicle</b>
             <div className="tiny dim">
               {running
-                ? <>🚗 <b>2020 Toyota Corolla</b> live on <span className="mono">{status?.iface || "can1"}</span> · 11 ECUs answering</>
-                : "A full simulated car on CAN1 — real ISO-TP, real UDS/OBD, for testing the whole pipeline."}
+                ? <>🚗 <b>{vehicleLabel(status?.vehicle)}</b> live on <span className="mono">{status?.iface || "can1"}</span> · {VEHICLES.find((v) => v.key === status?.vehicle)?.ecus ?? "?"} ECUs answering</>
+                : "A full simulated car on CAN1 — real ISO-TP, real UDS/OBD incl. sessions, security, DTC clear, coding writes, routines — for testing the whole pipeline."}
             </div>
           </div>
         </div>
         <div className="row">
           {running
             ? <button onClick={() => void powerOff()} disabled={!!busy}>{busy === "stop" ? "Stopping…" : "Power off"}</button>
-            : <button className="primary" onClick={() => void powerOn()} disabled={!!busy}>{busy === "start" ? "Powering on…" : "⚡ Power on simulated vehicle (CAN1)"}</button>}
+            : <>
+                <select className="vvp-sel" value={pick} onChange={(e) => setPick(e.target.value)} disabled={!!busy} title={VEHICLES.find((v) => v.key === pick)?.note}>
+                  {VEHICLES.map((v) => <option key={v.key} value={v.key}>{v.label} · {v.ecus} ECUs</option>)}
+                </select>
+                <button className="primary" onClick={() => void powerOn()} disabled={!!busy}>{busy === "start" ? "Powering on…" : "⚡ Power on (CAN1)"}</button>
+              </>}
         </div>
       </div>
 
@@ -92,5 +107,6 @@ const styles = `
 .vvp-title { display: flex; align-items: center; gap: 10px; }
 .vvp-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border-strong, #444); flex: none; }
 .vvp-dot.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.vvp-sel { background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; color: var(--fg-0); padding: 6px 9px; font-size: 12.5px; margin-right: 6px; }
 .vvp-wire { margin-top: 10px; padding: 8px 10px; background: var(--bg-2); border: 1px dashed var(--border); border-radius: 8px; color: var(--fg-2); }
 `;
