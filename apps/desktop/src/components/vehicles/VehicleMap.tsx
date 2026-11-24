@@ -4,6 +4,7 @@ import { CAPABILITY_CATALOG, readMethodFor } from "@ecu/vehicle-db";
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 
 import { CATEGORY_LABEL } from "../../lib/diag";
+import { Completeness } from "./Completeness";
 import { VIcon } from "./icons";
 import type { DeepMap } from "./useDeepMap";
 import { TAG_TEXT, fmtDate, knowledgeOf, plural, splitLabel } from "./vehicleFacts";
@@ -109,6 +110,8 @@ export function SystemDetail({ profile, m, deep, blocked, onClose }: {
           {m.lastSeenAt && <><dt>Last answered</dt><dd>{fmtDate(m.lastSeenAt)}</dd></>}
         </dl>
       )}
+
+      {!k.guard && <Completeness profile={profile} m={m} />}
 
       {x ? (
         <div className="vdb-learned-cols">

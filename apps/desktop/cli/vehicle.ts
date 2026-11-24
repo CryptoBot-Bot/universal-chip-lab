@@ -29,6 +29,8 @@ import {
 import type { DiscoveredModule, VehicleExplorerEvent } from "../electron/resolver/vehicleExplorer";
 import { identifyAndSave } from "../electron/pipeline/identityPipeline";
 import { sweepAndSave } from "../electron/pipeline/sweepPipeline";
+import { benchModules, runBench, summarise, type TruthVehicle } from "../electron/pipeline/calibration";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { getApiKey } from "./settings";
 
 const HELP = `vehicle — run the vehicle pipeline against a Super Device, no Electron.
@@ -60,6 +62,11 @@ Commands
                               --condition says what the car was doing ("engine off", "idling"); --wide adds 0400-0FFF
   coverage [<module>]         what the AI map knows of what each module answers (needs a sweep): coverage %,
                               moving values the map does not list as live data, identifiers it never mentions
+  bench [--vehicle corolla] [--modules ecm,tcm,abs] [--models M1,M2] [--runs N] [--port 8771]
+                              calibration: run the AI deep map on a virtual car whose every identifier is known
+                              (desk simulator, started if needed) and score it — data IDs found, labels right,
+                              invented, sessions, fault codes, refused requests, cost. Nothing is saved to the
+                              vehicle library; the scorecard goes to <workspace>/calibration/. Costs API tokens.
   audit <recording id|path>   prove a recorded session was read-only: every request sent is checked against the
                               read-only policy (airbag / immobiliser addresses with the stricter rule). No device
                               needed — works on fetched recordings. Exit code 1 if anything was not a read.
@@ -460,6 +467,59 @@ async function cmdCoverage(ctx: Ctx) {
   return { ok: true, profile: profile.id, modules: rows };
 }
 
+/** Calibration bench on a virtual car (desk simulator). */
+async function cmdBench(ctx: Ctx) {
+  needKey("The bench");
+  const vehicle = typeof ctx.args.flags.vehicle === "string" ? ctx.args.flags.vehicle : "corolla";
+  const port = typeof ctx.args.flags.port === "string" ? Number(ctx.args.flags.port) : 8771;
+  const models = (typeof ctx.args.flags.models === "string" ? ctx.args.flags.models : "claude-opus-4-8").split(",").map((x) => x.trim()).filter(Boolean);
+  const runs = Math.max(1, Math.min(5, typeof ctx.args.flags.runs === "string" ? Number(ctx.args.flags.runs) : 1));
+  const only = typeof ctx.args.flags.modules === "string" ? ctx.args.flags.modules.split(",").map((x) => x.trim()) : undefined;
+  const webui = path.join(ctx.root, "hardware", "super-device", "webui");
+  const py = process.platform === "win32" ? "python" : "python3";
+
+  const key = spawnSync(py, [path.join(webui, "virtual_vehicle.py"), "--describe-json", vehicle], { encoding: "utf8" });
+  if (key.status !== 0) throw new Error(`Could not read the answer key for "${vehicle}": ${key.stderr || key.stdout}`);
+  const truth = JSON.parse(key.stdout) as TruthVehicle;
+  const modules = benchModules(truth, only);
+  if (!modules.length) throw new UsageError(`No bench modules match ${only?.join(",")} (airbag / immobiliser are never mapped). Templates: ${truth.modules.map((m) => m.template).join(", ")}`);
+
+  // the virtual car: a desk simulator on its own port (started here if not running)
+  const host = `127.0.0.1:${port}`;
+  let child: ChildProcess | null = null;
+  const up = async () => { try { await piGet(host, "/api/status", 2000); return true; } catch { return false; } };
+  if (!(await up())) {
+    child = spawn(py, [path.join(webui, "desk_sim.py"), "--vehicle", vehicle, "--port", String(port)], { stdio: "ignore" });
+    for (let i = 0; i < 30 && !(await up()); i++) await new Promise((r) => setTimeout(r, 300));
+    if (!(await up())) { child.kill(); throw new Error(`The desk simulator did not start on ${host}.`); }
+  }
+  const sim = (await piGet(host, "/api/sim/status").catch(() => null)) as { name?: string; replay?: string[] | null } | null;
+  if (sim?.replay?.length) throw new Error(`${host} is playing a recording, not the virtual ${vehicle} — use another --port.`);
+
+  const est = modules.length * runs * models.length;
+  say(`Calibration bench · ${truth.name} (virtual, ${host}) · ${modules.length} module(s) × ${runs} run(s) × ${models.length} model(s) = ${est} deep map(s)`);
+  say(`Modules: ${modules.map((m) => m.template).join(", ")} · models: ${models.join(", ")} · airbag / immobiliser left out`);
+  let scores: Awaited<ReturnType<typeof runBench>> = [];
+  try {
+    scores = await runBench({
+      host, iface: "can0", truth, modules, models, runs,
+      onProgress: (t) => say(`\n  ▶ ${t}`),
+      onScore: (x) => say(`    ${x.outcome}${x.error ? ` (${oneLine(x.error, 60)})` : ""} · data ${x.data.found}/${x.data.total} (labels right ${x.data.labelOk}) · ident ${x.identification.found}/${x.identification.total} · sessions ${x.sessions.found}/${x.sessions.total} · codes ${x.dtcs.found}/${x.dtcs.total} · invented ${x.invented.length} · refused ${x.refused} · ${x.steps} steps · $${x.costUsd.toFixed(2)} · ${x.seconds} s`),
+    });
+  } finally { if (child) child.kill(); }
+
+  const sum = summarise(scores);
+  const pct = (n: number) => `${Math.round(n * 100)}%`;
+  say(`\n  ${pad("model", 20)} ${pad("data found", 11)} ${pad("labels", 7)} ${pad("ident", 6)} ${pad("sessions", 9)} ${pad("codes", 6)} ${pad("invented", 9)} ${pad("refused", 8)} ${pad("steps", 6)} cost`);
+  for (const m of sum) say(`  ${pad(m.model, 20)} ${pad(pct(m.dataRecall), 11)} ${pad(pct(m.labelAccuracy), 7)} ${pad(pct(m.identRecall), 6)} ${pad(pct(m.sessionRecall), 9)} ${pad(pct(m.dtcRecall), 6)} ${pad(String(m.invented), 9)} ${pad(String(m.refused), 8)} ${pad(m.avgSteps.toFixed(1), 6)} $${m.costUsd.toFixed(2)}${m.failed ? ` · ${m.failed} failed` : ""}`);
+  const dir = path.join(ctx.ws, "calibration");
+  await mkdir(dir, { recursive: true });
+  const file = path.join(dir, `bench-${vehicle}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  await writeFile(file, JSON.stringify({ vehicle, truth: truth.name, models, runs, modules: modules.map((m) => m.template), at: new Date().toISOString(), summary: sum, scores }, null, 2), "utf8");
+  say(`\nScorecard: ${file}`);
+  return { ok: scores.every((x) => x.outcome !== "failed"), file, summary: sum };
+}
+
 async function cmdCensus(ctx: Ctx) {
   const profile = await currentProfile(ctx);
   const discovered = discoveredFromProfile(profile);
@@ -755,7 +815,7 @@ async function main(): Promise<number> {
 
   const root = findProjectRoot();
   loadEnvFile(root);
-  if (cmd === "audit" || cmd === "coverage") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
+  if (cmd === "audit" || cmd === "coverage" || cmd === "bench") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
   const hostRaw = (typeof args.flags.host === "string" ? args.flags.host : process.env.SD_HOST ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!hostRaw) { process.stderr.write("Which device? Pass --host <address[:port]> (or set SD_HOST). Example: --host 100.91.185.100\n"); return 2; }
   const host = /:\d+$/.test(hostRaw) ? hostRaw : `${hostRaw}:8080`;
@@ -770,7 +830,7 @@ async function main(): Promise<number> {
 
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
-    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
+    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
   };
   const fn = commands[cmd];
   if (!fn) { process.stderr.write(`Unknown command "${cmd}".\n\n${HELP}\n`); return 2; }

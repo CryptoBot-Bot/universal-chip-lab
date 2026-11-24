@@ -1119,6 +1119,32 @@ def describe(vehicle_key):
         print(f"   DTCs: {dt} · 19 01/02/04/06/0A")
 
 
+IDENT_DIDS = [0xF180, 0xF181, 0xF182, 0xF186, 0xF187, 0xF188, 0xF189, 0xF18A, 0xF18B, 0xF18C, 0xF190,
+              0xF191, 0xF192, 0xF193, 0xF194, 0xF195, 0xF197, 0xF198, 0xF199, 0xF19D]
+
+
+def describe_json(vehicle_key):
+    """The same answer key as describe(), as one JSON object — what the calibration bench
+    scores the AI mapper against (pnpm vehicle bench)."""
+    v = VEHICLES[vehicle_key]()
+    mods = []
+    for e in v["ecus"]:
+        T = TEMPLATES[e["tpl"]]
+        mods.append({
+            "req": f"{e['req']:03X}", "resp": f"{e['resp']:03X}", "name": e["name"], "category": e["category"], "template": e["tpl"],
+            "part": e["part"], "supplier": e["supplier"], "sw": e["sw"], "hw": e["hw"], "serial": e["serial"], "system": T["system"],
+            "sessions": sorted(f"{s:02X}" for s in T["sessions"]), "security": bool(T["security"]), "obd": bool(T["obd"]),
+            "identification": [f"{d:04X}" for d in IDENT_DIDS],
+            "data": [{"did": f"{did:04X}", "label": label, "decode": dec} for did, (label, _, dec) in T["data"].items()],
+            "coding": [{"did": f"{did:04X}", "label": label} for did, (label, _d, _dec) in T["coding"].items()],
+            "io": [{"did": f"{did:04X}", "label": label} for did, label in T["io"].items()],
+            "routines": [{"rid": f"{rid:04X}", "label": label, "security": bool(sec)} for rid, (label, sec) in T["routines"].items()],
+            "obd_pids": [f"{p:02X}" for p in e.get("obd_pids", [])] if T["obd"] else [],
+            "dtcs": [d["code"] for d in e["state"]["dtcs"]],
+        })
+    return {"vehicle": vehicle_key, "name": v["name"], "vin": v["vin"], "modules": mods}
+
+
 # ---- self-test (no CAN needed) ----------------------------------------------
 
 def selftest():
@@ -1245,6 +1271,7 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--describe", metavar="VEHICLE", choices=list(VEHICLES))
+    ap.add_argument("--describe-json", metavar="VEHICLE", choices=list(VEHICLES), help="the answer key as JSON (calibration bench)")
     ap.add_argument("--replay", metavar="FILE", help="serve what a recorded car answered (a daemon recording, .jsonl)")
     ap.add_argument("--replay-info", metavar="FILE", help="print what a recording holds and exit (no CAN needed)")
     args = ap.parse_args()
@@ -1259,6 +1286,9 @@ def main():
         return 0
     if args.describe:
         describe(args.describe)
+        return 0
+    if args.describe_json:
+        print(json.dumps(describe_json(args.describe_json)))
         return 0
     if args.selftest:
         return selftest()

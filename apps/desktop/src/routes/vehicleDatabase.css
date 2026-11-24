@@ -230,3 +230,14 @@
 
 .ual .vdb-capchips { display: flex; flex-wrap: wrap; gap: 6px; }
 .ual .vdb-notes { margin: 0; color: var(--ual-text); font-size: 13.5px; }
+
+/* completeness of a system's map (sweep vs AI map) */
+.ual .vdb-cov { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 14px; background: var(--ual-soft); font-size: 13.5px; }
+.ual .vdb-cov-head { display: flex; align-items: baseline; gap: 10px; }
+.ual .vdb-cov-pct { margin-left: auto; font-family: var(--ual-display); font-size: 22px; }
+.ual .vdb-cov-bar { height: 8px; border-radius: 4px; background: var(--ual-line); overflow: hidden; }
+.ual .vdb-cov-bar > i { display: block; height: 100%; background: var(--ual-blue); }
+.ual .vdb-cov-ids { margin: 6px 0 0; font-size: 12px; line-height: 1.7; word-break: break-word; }
+.ual .vdb-cov-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+.ual .vdb-cov-cond { margin: 0; }
+.ual .vdb-cov-cond select { width: auto; }

@@ -21,7 +21,12 @@ import { getApiKey } from "../settings";
  * of what the model asks — an autonomous agent never mutates a real module.
  */
 
-const MODEL = "claude-opus-4-8";
+/** The deep-map model. Override with ECL_EXPLORER_MODEL (the calibration bench compares
+ *  models this way); keep the default on whatever the bench last proved best. */
+const DEFAULT_MODEL = "claude-opus-4-8";
+export function explorerModel(): string {
+  return (process.env.ECL_EXPLORER_MODEL || "").trim() || DEFAULT_MODEL;
+}
 const MAX_STEPS = 30;
 // Read-only diagnostic SIDs. Incl. OBD mode 02 (freeze-frame data) and 06 (on-board
 // monitor test results) — both pure reads; 18 = KWP2000 readDTCsByStatus (Mercedes
@@ -427,8 +432,13 @@ export async function exploreModule(cfg: ExplorerConfig, deps: ExplorerDeps): Pr
       return partial;
     }
 
+    // 5.5-generation models always think and count it in max_tokens, and hide the thinking
+    // text unless asked: give them room and ask for summaries (they feed the live feed).
+    const model = explorerModel();
+    const gen55 = /-5-5$/.test(model);
     const resp = await client.messages.create({
-      model: MODEL, max_tokens: 8000, thinking: { type: "adaptive" },
+      model, max_tokens: gen55 ? 16000 : 8000,
+      thinking: gen55 ? { type: "adaptive", display: "summarized" } : { type: "adaptive" },
       system: systemPrompt(cfg), tools: TOOLS, messages,
     });
     tokensIn += resp.usage?.input_tokens ?? 0;
