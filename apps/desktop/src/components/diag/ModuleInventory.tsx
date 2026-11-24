@@ -11,6 +11,11 @@ import { Icon } from "./icons";
  * the VIN it holds (a module whose VIN is not this car's came from another car).
  * Click a row for every record read, with the request that read it.
  */
+/** One value cell: kept on one line, cut with "…" when long — the full value is in the tooltip and the row's details. */
+function Cell({ v }: { v?: string }) {
+  return <td className="ual-mono inv-v" title={v}>{v ?? "—"}</td>;
+}
+
 export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onRead }: {
   inventory: CarInventory | null;
   changes: InventoryChange[];
@@ -77,11 +82,11 @@ export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onR
                         <b>{short}</b>{m.protectedKind && <span className="dg-tile-lock" style={{ marginLeft: 6 }}><Icon name="shield" size={12} />protected</span>}
                         <div className="ual-muted" style={{ fontSize: 12 }}>{name} · <span className="ual-mono">{m.responseId}</span></div>
                       </td>
-                      <td className="ual-mono">{s.partNo ?? "—"}</td>
-                      <td className="ual-mono">{s.serial ?? "—"}</td>
-                      <td className="ual-mono">{s.swPartNo ?? s.swVersion ?? "—"}</td>
-                      <td className="ual-mono">{s.hwVersion ?? (s.hwPartNo && s.hwPartNo !== s.partNo ? s.hwPartNo : "—")}</td>
-                      <td>{s.supplier ?? "—"}</td>
+                      <Cell v={s.partNo} />
+                      <Cell v={s.serial} />
+                      <Cell v={s.swPartNo ?? s.swVersion} />
+                      <Cell v={s.hwVersion ?? (s.hwPartNo && s.hwPartNo !== s.partNo ? s.hwPartNo : undefined)} />
+                      <Cell v={s.supplier} />
                       <td>{s.mfgDate ?? "—"}</td>
                       <td>{vinState === "same" ? <span className="ual-chip clean">this car</span> : vinState === "other" ? <span className="ual-chip fault">{s.vin}</span> : s.vin ? <span className="ual-mono">{s.vin}</span> : "—"}</td>
                       <td><button className="tiny ghost" aria-expanded={isOpen} aria-label={`${isOpen ? "Hide" : "Show"} every record of ${short}`} onClick={(e) => { e.stopPropagation(); setOpen(isOpen ? null : m.moduleId); }}>{isOpen ? "Hide" : `${m.records.length}`}</button></td>

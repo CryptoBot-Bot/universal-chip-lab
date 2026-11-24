@@ -47,7 +47,7 @@ export function CarsOnFile({ bucket, link, syncing, syncMsg, onSync, onSettings 
         <div className="vdb-table vdb-units" role="table" aria-label="Cars of this model">
           <div className="vdb-tr head" role="row">
             <span role="columnheader">VIN</span><span role="columnheader">Reads here</span><span role="columnheader">First read</span>
-            <span role="columnheader">Last read</span><span role="columnheader">Last scan</span><span role="columnheader">Shop garage</span>
+            <span role="columnheader">Last read</span><span role="columnheader">Last scan</span><span role="columnheader">Modules read</span><span role="columnheader">Shop garage</span>
           </div>
           {units.map((u, i) => {
             const last = u.scans?.length ? u.scans[u.scans.length - 1] : null;
@@ -68,6 +68,16 @@ export function CarsOnFile({ bucket, link, syncing, syncMsg, onSync, onSettings 
                     </>
                   ) : <span className="ual-muted">never scanned</span>}
                   {isVirtualUnit(u) && <span className="vdb-sr"> (only a virtual vehicle answered for this VIN)</span>}
+                </span>
+                <span role="cell" data-label="Modules read">
+                  {u.inventory ? (
+                    <>
+                      {u.inventory.modules.filter((m) => m.status === "ok").length}/{u.inventory.modules.length}
+                      <span className="ual-muted"> · {plural(u.inventory.modules.filter((m) => m.summary.serial).length, "serial")} · {fmtDate(u.inventory.at)}</span>
+                      {u.inventory.sim && <span className="ual-chip info vdb-inline-chip" title={`Read from the simulator (${u.inventory.sim})`}>sim</span>}
+                      {(u.inventoryChanges?.length ?? 0) > 0 && <span className="ual-chip warn vdb-inline-chip" title={u.inventoryChanges!.slice(-5).map((c) => `${c.label}: ${c.key} ${c.from} → ${c.to}`).join("\n")}>{plural(u.inventoryChanges!.length, "change")}</span>}
+                    </>
+                  ) : <span className="ual-muted">not read</span>}
                 </span>
                 <span role="cell" data-label="Shop garage">
                   {u.inGarage

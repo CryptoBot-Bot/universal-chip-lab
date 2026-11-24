@@ -1,5 +1,51 @@
 # Shop-day checklist — first real vehicle with the SuperDevice
 
+## Start here — the next car with Universal Auto Lab (2026-11-24)
+
+The app is now **Universal Auto Lab** (three tabs: Auto Diagnostic · Vehicles Database ·
+Pi Devices). Real cars are **read-only**: nothing in the app or the command line sends a
+write, and the Pi refuses one anyway (§5). §1–§2 below describe the older screens; the
+safety notes and troubleshooting still apply.
+
+**Before you go (at home)**
+1. `pnpm test` — the read-only policy, the identity decoders and the identity reader
+   against a fake car must all pass.
+2. The Pi is on the latest daemon: `python hardware/super-device/webui/deploy.py --status`;
+   if `superdevice_ui.py` shows CHANGED, `python hardware/super-device/webui/deploy.py`
+   (on-Pi health check + automatic rollback). Without it everything still works — only
+   the live address-search grid shows no progress until the sweep is done.
+3. Rehearse on the desk: start the app (START-CHIP-LAB.bat starts the desk simulator with
+   the golden 2015 Sprinter) → connection pill → Desk simulator → Auto Diagnostic →
+   Vehicle history → the Sprinter → Service → **Full re-map**. Watch the live map.
+
+**At the car**
+1. Ignition ON. OBD harness in (can0 = pins 6/14). Pi on outlet or battery power.
+2. Connection pill (top right) → the Pi. Check the READ-ONLY badge is there.
+3. Auto Diagnostic → **AUTO VIN** (reads the VIN, decodes it, opens or files the model).
+4. **Auto Scan**. On a model seen for the first time it searches every diagnostic address
+   (about a minute, tester-present only) — then identifies every module (part numbers,
+   software/hardware versions, **serial numbers**, supplier, build date, the VIN each
+   module holds), then reads every fault memory. The **live map** shows it happening.
+5. **Modules & serials** tab: the car's module inventory. A module whose VIN is not this
+   car's, or whose serial changed since the last visit, is flagged.
+6. Deeper, per module (AI, read-only): Vehicles Database → **Dig deeper**. Airbag and
+   immobiliser modules are never offered.
+7. Command-line equivalent (same code): `pnpm vehicle --host <pi> run --label "<car>"`
+   — VIN → discover → census → identify → capture, recorded on the Pi as one session.
+
+**After**
+- Prove the session was read-only: `pnpm vehicle rec fetch <id>` then
+  `pnpm vehicle audit <id>` — every request checked against the policy; airbag /
+  immobiliser addresses with the stricter rule. It must say READ-ONLY.
+
+**For the 2015 Sprinter's next visit:** deep-map the seven systems that only have a part
+number (KLA, Radio, VG, ZUH, PSM, PTS, SAM-R). EZS (immobiliser) and SRS (airbag) stay
+identity + fault memory only. Note: the Nov 23 recording shows the first, partial AI map
+of the EZS used session changes and local-data reads on it (no writes) — that is why the
+protected rule now exists; `audit 20261123-auto` shows it.
+
+---
+
 What to do, in order, so the first real car "just works" — and what to do when it
 doesn't. Written 2026-09-04 after the bench loop (virtual Corolla / F-150 on CAN1→CAN0)
 was verified end to end; the real-car path is the same pipeline on a real bus.
@@ -53,8 +99,8 @@ was verified end to end; the real-car path is the same pipeline on a real bus.
    with its part number, supplier and a name/role. This alone is worth saving.
 2. **Map** modules one at a time (≈ 3-5 min each, one Opus session per module). Start with
    the ECM, then the module you care about. "Map all" works but costs 12× that.
-3. **⚡ Operate** any module: reads are free; every write confirms first. Clear DTCs is the
-   safe first write to try on a real car; security seed/key needs the OEM algorithm.
+3. **⚡ Operate** any module: reads are free. *(Superseded 2026-11-23: real cars are
+   read-only for now — no clears or any other write; see §5.)*
 4. **🧾 Export diagnostic capture** before you unplug — ALWAYS. It saves one JSON
    (`<workspace>/reports/capture-<VIN>-<time>.json`: device health, both buses, raw VIN
    attempts, full discovery with identification strings, OBD baseline, the saved profile).

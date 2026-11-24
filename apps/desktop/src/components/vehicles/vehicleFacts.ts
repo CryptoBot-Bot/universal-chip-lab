@@ -4,7 +4,7 @@
  * B1 page shows. No React, no device access.
  */
 import { protectedModule } from "@ecu/vehicle-db";
-import type { ProtectedVerdict, VehicleModule, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
+import type { CarInventory, InventoryChange, ProtectedVerdict, VehicleModule, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
 
 import type { GarageVehicle } from "../../lib/api";
 import { addressedSystems } from "../../lib/diag";
@@ -16,6 +16,9 @@ export interface UnitRow {
   firstReadAt?: string;
   lastReadAt?: string;
   scans?: VehicleScanRecord[];
+  /** This car's module inventory (part numbers, serial numbers…) from its last identity read. */
+  inventory?: CarInventory;
+  inventoryChanges?: InventoryChange[];
   inGarage: boolean;
   garage?: GarageVehicle;
 }
@@ -53,7 +56,7 @@ export function buildBuckets(profiles: VehicleProfile[], garage: GarageVehicle[]
     const b = bucket(p.make || "Unknown", p.year, p.model || "Unknown");
     b.profile = p;
     for (const v of p.knownVins ?? []) {
-      b.units.push({ vin: v.vin, localReads: v.reads, firstReadAt: v.firstReadAt, lastReadAt: v.lastReadAt, scans: v.scans, inGarage: false });
+      b.units.push({ vin: v.vin, localReads: v.reads, firstReadAt: v.firstReadAt, lastReadAt: v.lastReadAt, scans: v.scans, inventory: v.inventory, inventoryChanges: v.inventoryChanges, inGarage: false });
     }
   }
   for (const g of garage) {

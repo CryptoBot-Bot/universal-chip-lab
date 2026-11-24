@@ -148,10 +148,12 @@ export const diagStyles = `
 @keyframes lm-rot { to { transform: rotate(360deg); } }
 
 /* ---- module inventory ---- */
-.inv-tbl { width: 100%; min-width: 980px; border-collapse: collapse; font-size: 13px; }
-.inv-tbl th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ual-muted); font-weight: 600; padding: 12px 10px; }
-.inv-tbl td { padding: 10px; border-top: 1px solid #eeefea; vertical-align: top; }
-.inv-tbl td.ual-mono { font-size: 12.5px; word-break: break-all; }
+.inv-tbl { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13px; }
+.inv-tbl th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ual-muted); font-weight: 600; padding: 12px 8px; white-space: nowrap; }
+.inv-tbl td { padding: 10px 8px; border-top: 1px solid #eeefea; vertical-align: top; }
+.inv-tbl td.ual-mono { font-size: 12.5px; }
+.inv-tbl td.inv-v { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.inv-tbl td:first-child { min-width: 170px; max-width: 230px; }
 .inv-tbl tbody tr { cursor: pointer; }
 .inv-tbl tbody tr:hover td { background: #fafaf7; }
 .inv-tbl tr.open td { background: #fafaf7; }
