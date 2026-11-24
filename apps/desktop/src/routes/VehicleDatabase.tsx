@@ -109,6 +109,9 @@ export function VehicleDatabase() {
     } finally { setSyncing(false); }
   }
 
+  // a switch to or from a simulator re-reads the library at once
+  useEffect(() => { void reload(); }, [wb.library, reload]);
+
   useEffect(() => {
     void reload();
     const iv = window.setInterval(() => void reload(), 8000);

@@ -104,5 +104,6 @@ test("a proven session is used, also on a chassis module", async () => {
 test("another module may try the standard KWP sessions when the default gives nothing", async () => {
   const sent = fakeKwp("92");
   await run(mod("body", "Body module", "body", "72E", "4EE", "kwp2000") as VehicleModule);
-  assert.ok(sent.includes("1089") && sent.includes("1092"));
+  assert.ok(sent.includes("1092"));
+  for (const q of sent) assert.ok(checkRequest(q).ok, q);      // never standby (89) or development (86)
 });

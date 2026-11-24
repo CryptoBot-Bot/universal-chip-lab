@@ -518,7 +518,7 @@ export const Api = {
     /** `known`: the profile's own addresses (always re-probed); `deep`: run the device's address sweep first. */
     discover: (payload: { host?: string; iface: string; ident?: boolean; known?: { name: string; req: string; resp: string }[]; deep?: boolean }) =>
       unwrap<DiscoveredModule[]>(api.vehicleExplorer.discover(payload) as never),
-    commitDiscovery: (payload: { profile: VehicleProfile; discovered: DiscoveredModule[] }) =>
+    commitDiscovery: (payload: { host?: string; iface?: string; profile: VehicleProfile; discovered: DiscoveredModule[] }) =>
       unwrap<VehicleProfile>(api.vehicleExplorer.commitDiscovery(payload) as never),
     start: (payload: { host?: string; iface: string; profile: VehicleProfile; targets: VehicleExplorerTarget[] }) =>
       unwrap<VehicleProfile>(api.vehicleExplorer.start(payload) as never),

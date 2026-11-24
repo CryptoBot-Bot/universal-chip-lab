@@ -811,6 +811,7 @@ async function cmdRun(ctx: Ctx) {
 async function useSandbox(ctx: Ctx): Promise<void> {
   await ensureSimLibrary(realLibraryDir(ctx.ws), simLibraryDir(ctx.ws));
   ctx.vehicleLibDir = simLibraryDir(ctx.ws);
+  ctx.reportsDir = path.join(ctx.ws, "reports-sim");     // a simulator capture must not look like a real car's
 }
 
 async function main(): Promise<number> {

@@ -35,7 +35,7 @@ const CHUNK = 20;
 /** Seconds per request: modules answer a read (or refuse it) within ~50 ms. */
 const TIMEOUT = 0.4;
 /** KWP diagnostic sessions tried, in order, when the default session refuses every local-ID read. */
-const KWP_SESSIONS = ["89", "92", "86", "81"];
+const KWP_SESSIONS = ["92", "81"];
 
 function clean(s?: string | null): string { return (s ?? "").toUpperCase().replace(/[^0-9A-F]/g, ""); }
 function nrcOf(it?: SeqItem): number | null {

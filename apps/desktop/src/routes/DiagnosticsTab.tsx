@@ -76,7 +76,7 @@ export function DiagnosticsTab() {
     void load();
     const iv = window.setInterval(() => void load(), 4000);
     return () => window.clearInterval(iv);
-  }, []);
+  }, [wb.library]);   // a switch to or from a simulator re-reads at once: nothing open carries across
 
   // a step that points at something no longer there falls back to a sane place
   useEffect(() => {

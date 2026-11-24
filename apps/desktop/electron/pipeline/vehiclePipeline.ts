@@ -82,9 +82,10 @@ export class RefusedRequest extends Error {}
 
 /**
  * One request to one module — through the read-only policy first. Every automatic
- * request the pipeline sends (discovery, identity, deep map) goes through readOne /
- * readSeq; a write never leaves this PC from here. (The Pi's write gate is a second,
- * independent wall behind this one.)
+ * request the pipeline composes (discovery, identity, sweep, deep map) goes through readOne /
+ * readSeq; a write never leaves this PC from here. Not covered: the fixed list in
+ * captureDiagnostics, and what the device's daemon sends itself (VIN read, address sweep).
+ * (The Pi's write gate is a second, independent wall behind this one.)
  */
 export async function readOne(host: string | undefined, iface: string, tx: string, rx: string, data: string,
   opts: { protectedKind?: ProtectedKind | null; timeout?: number } = {}): Promise<{ response?: string; negative?: boolean; nrc?: number } | null> {

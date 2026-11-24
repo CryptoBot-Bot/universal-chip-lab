@@ -130,7 +130,7 @@ export function VehicleHub(p: Props) {
           }
         } finally { off(); }
         if (stop.current) return;
-        cur = await Api.vehicleExplorer.commitDiscovery({ profile: cur, discovered: found });
+        cur = await Api.vehicleExplorer.commitDiscovery({ host, iface, profile: cur, discovered: found });
         p.adoptProfile(cur);
         responders = new Set(found.map((f) => clean(f.responseId)));
         const unnamed = addressedSystems(cur).filter((m) => responders!.has(clean(m.addressing?.response)) && !m.censusAt);

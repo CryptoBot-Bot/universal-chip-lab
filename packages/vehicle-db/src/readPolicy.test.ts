@@ -13,7 +13,9 @@ test("plain reads pass on an ordinary module", () => {
 });
 
 test("harmless sessions pass, programming and safety-system sessions never", () => {
-  for (const q of ["1001", "1003", "1081", "1086", "1087", "1089", "1092", "10C0"]) assert.ok(ok(q), q);
+  for (const q of ["1001", "1003", "1081", "1092", "10C0"]) assert.ok(ok(q), q);
+  // development, adjustment, standby, passive and maker-specific sessions: not on the list, refused
+  for (const q of ["1086", "1087", "1089", "1090", "1083", "1040", "1060"]) assert.ok(!ok(q), q);
   for (const q of ["1002", "1082", "1085", "1004", "1084", "100300", "10"]) assert.ok(!ok(q), q);
 });
 

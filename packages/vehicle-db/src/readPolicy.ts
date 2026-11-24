@@ -69,6 +69,11 @@ export const WRITE_SERVICES: Record<string, string> = {
  * safety-system session (the airbag scrapping / deployment path). */
 export const FORBIDDEN_SESSIONS = new Set([0x02, 0x82, 0x85, 0x04, 0x84]);
 
+/** The only sessions an automatic read may open: default (01, KWP 81), extended diagnostic
+ * (03, KWP 92) and Nissan's diagnostic session (C0). Everything else is refused, not just the
+ * programming ones: KWP 86 is a development session, 87 adjustment, 89 standby, 90 passive. */
+export const ALLOWED_SESSIONS = new Set([0x01, 0x03, 0x81, 0x92, 0xc0]);
+
 function hex(raw: string): string | null {
   const r = (raw || "").replace(/\s+/g, "").toLowerCase();
   return /^[0-9a-f]{2,}$/.test(r) && r.length % 2 === 0 ? r : null;
@@ -93,6 +98,7 @@ export function checkRequest(raw: string, opts: { protectedKind?: ProtectedKind 
     const sub = parseInt(r.slice(2, 4), 16);
     if (r.length !== 4 || !Number.isFinite(sub)) return { ok: false, reason: "session change must be exactly 10 xx" };
     if (FORBIDDEN_SESSIONS.has(sub)) return { ok: false, reason: `session 0x${r.slice(2, 4)} refused: programming and safety-system sessions are never entered` };
+    if (!ALLOWED_SESSIONS.has(sub)) return { ok: false, reason: `session 0x${r.slice(2, 4)} refused: only default and extended diagnostic sessions are opened` };
     return { ok: true, service: "diagnostic session" };
   }
   if (sid === "27") {

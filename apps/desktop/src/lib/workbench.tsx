@@ -33,6 +33,8 @@ interface WorkbenchCtx {
   demo: boolean;
   /** Short human name of the car the simulator plays, if any ("2015 Sprinter 3500 diesel"). */
   simCar: string | null;
+  /** Which library the app works on: real cars, or the simulator's sandbox copy. Changes only once the switch is done. */
+  library: "real" | "sim";
 }
 
 const IFACE_KEY = "diag.iface";
@@ -55,6 +57,10 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [iface, setIfaceState] = useState(() => localStorage.getItem(IFACE_KEY) || "can0");
   const [gate, setGate] = useState<string | null>(null);
   const [sim, setSim] = useState<SimStatus | null>(null);
+  // A virtual vehicle on the device, as last reported. Kept through a lost poll or a dropped
+  // connection — "cannot ask" is not "no simulator" — and forgotten only for another device.
+  const [virtualCar, setVirtualCar] = useState(false);
+  const [library, setLibrary] = useState<"real" | "sim">("real");
 
   const setIface = (v: string) => { setIfaceState(v); try { localStorage.setItem(IFACE_KEY, v); } catch { /* private mode */ } };
 
@@ -64,7 +70,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     let stop = false;
     const poll = () => {
       void Api.superDevice.get<SimStatus>(sd.host, "/api/sim/status")
-        .then((s) => { if (!stop) setSim(s); }).catch(() => { if (!stop) setSim(null); });
+        .then((s) => { if (!stop) { setSim(s); setVirtualCar(!!s?.running); } }).catch(() => { if (!stop) setSim(null); });
       void Api.superDevice.get<{ mode?: string }>(sd.host, "/api/write-gate")
         .then((g) => { if (!stop) setGate(g?.mode ?? null); }).catch(() => { if (!stop) setGate(null); });
     };
@@ -78,11 +84,18 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   // Real data only in the real library: whenever a simulator answers — the desk simulator,
   // the virtual bus vcan0, a virtual vehicle running on the device — the main process works
   // on a sandbox copy of the library, so nothing a simulator does can reach a real car's record.
-  const simulated = online && (demo || iface === "vcan0" || !!sim?.running);
-  useEffect(() => { void Api.vehicleLib.setSimulation({ on: simulated }).catch(() => { /* old main process: nothing to switch */ }); }, [simulated]);
+  useEffect(() => { setVirtualCar(false); }, [sd.host]);
+  const simulated = sd.host === DESK_SIM || iface === "vcan0" || virtualCar;
+  useEffect(() => {
+    let stop = false;
+    void Api.vehicleLib.setSimulation({ on: simulated })
+      .then(() => { if (!stop) setLibrary(simulated ? "sim" : "real"); })
+      .catch(() => { /* old main process: nothing to switch */ });
+    return () => { stop = true; };
+  }, [simulated]);
 
   return (
-    <Ctx.Provider value={{ iface, setIface, gate, sim, demo, simCar: simCarName(sim) }}>
+    <Ctx.Provider value={{ iface, setIface, gate, sim, demo, simCar: simCarName(sim), library }}>
       {children}
     </Ctx.Provider>
   );

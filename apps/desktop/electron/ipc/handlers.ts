@@ -51,7 +51,7 @@ import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSk
 import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicleExplorer";
 import { identifyAndSave } from "../pipeline/identityPipeline";
 import { sweepAndSave } from "../pipeline/sweepPipeline";
-import { ensureSimLibrary, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
+import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
 import {
   captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
 } from "../pipeline/vehiclePipeline";
@@ -129,6 +129,13 @@ export async function registerIpcHandlers(
   const realLibDir = realLibraryDir(layout.root);
   const simLibDir = simLibraryDir(layout.root);
   const libDir = () => (simulationMode ? simLibDir : realLibDir);
+  /** For work on a device: the device decides. A simulator by address or bus is always the sandbox,
+   *  whatever the renderer last reported (it may be offline, late or just reloaded). */
+  const libFor = async (host?: string, iface?: string) => {
+    if (!simulationMode && !isSimulatorTarget(host, iface)) return realLibDir;
+    await ensureSimLibrary(realLibDir, simLibDir);
+    return simLibDir;
+  };
   const benchModuleDir = path.join(layout.root, "bench-modules");
   const benchModuleAssetsDir = path.join(layout.root, "bench-module-assets");
 
@@ -283,7 +290,7 @@ export async function registerIpcHandlers(
   // map is measured against. Read-only, no AI; airbag / immobiliser never swept.
   register("vehicleExplorer:sweep", async (event, p: { host?: string; iface: string; profile: VehicleProfile; moduleIds?: string[]; condition: string; wide?: boolean; sim?: string | null }) => {
     vehicleExplorerStop = false;
-    return sweepAndSave(libDir(), {
+    return sweepAndSave(await libFor(p.host, p.iface), {
       host: p.host, iface: p.iface, profile: p.profile, moduleIds: p.moduleIds, condition: p.condition || "ignition on", wide: p.wide, sim: p.sim,
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
@@ -294,7 +301,7 @@ export async function registerIpcHandlers(
   // build date — plain identification reads only, streamed live, filed per car (VIN).
   register("vehicleExplorer:identify", async (event, p: { host?: string; iface: string; profile: VehicleProfile; vin?: string; moduleIds?: string[]; sim?: string | null; extended?: boolean }) => {
     vehicleExplorerStop = false;
-    return identifyAndSave(libDir(), {
+    return identifyAndSave(await libFor(p.host, p.iface), {
       host: p.host, iface: p.iface, profile: p.profile, vin: p.vin, moduleIds: p.moduleIds, sim: p.sim, extended: p.extended,
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
@@ -303,8 +310,8 @@ export async function registerIpcHandlers(
 
   // Discovery as its own saving stage: persist the responders (address + lastSeen)
   // into the YMM profile, healing any pre-existing duplicate module entries.
-  register("vehicleExplorer:commitDiscovery", (_e, p: { profile: VehicleProfile; discovered: DiscoveredModuleInput[] }) =>
-    commitDiscovery(libDir(), p.profile, p.discovered ?? []));
+  register("vehicleExplorer:commitDiscovery", async (_e, p: { host?: string; iface?: string; profile: VehicleProfile; discovered: DiscoveredModuleInput[] }) =>
+    commitDiscovery(await libFor(p.host, p.iface), p.profile, p.discovered ?? []));
 
   register("vehicleExplorer:start", async (event, p: {
     host?: string; iface: string; profile: VehicleProfile;
@@ -312,7 +319,7 @@ export async function registerIpcHandlers(
   }) => {
     vehicleExplorerStop = false;
     return deepMapAndSave({
-      host: p.host, iface: p.iface, profile: p.profile, targets: p.targets, vehicleLibDir: libDir(),
+      host: p.host, iface: p.iface, profile: p.profile, targets: p.targets, vehicleLibDir: await libFor(p.host, p.iface),
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
@@ -326,7 +333,7 @@ export async function registerIpcHandlers(
   // raw VIN attempts, a full discovery with identification strings, a bus snapshot,
   // and the vehicle profile as saved. Written under <workspace>/reports/.
   register("vehicleLib:capture", (_e, p: { host?: string; iface: string; vin?: string; profile?: VehicleProfile; note?: string; extra?: unknown }) =>
-    captureDiagnostics({ ...p, reportsDir: path.join(layout.root, "reports"), appVersion: opts.appVersion }));
+    captureDiagnostics({ ...p, reportsDir: path.join(layout.root, simulationMode || isSimulatorTarget(p.host, p.iface) ? "reports-sim" : "reports"), appVersion: opts.appVersion }));
 
   // Module census: name every discovered module from its part number (AI).
   register("vehicleId:census", (_e, input: CensusInput) => censusModules(input));
