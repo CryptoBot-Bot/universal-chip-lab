@@ -14,6 +14,13 @@ import { setupAutoUpdater } from "./updater";
 const DEV_SERVER_URL = process.env.ECL_DEV_SERVER_URL ?? "http://localhost:5173";
 const isDev = !app.isPackaged;
 
+// Opt-in, dev builds only: ECL_REMOTE_DEBUG_PORT=9333 lets a local tool (a Claude Code
+// session on this PC) drive the window over the DevTools protocol — e.g. run Auto Scan
+// while the operator watches. Bound to 127.0.0.1 by Chromium; never set in a release.
+if (isDev && process.env.ECL_REMOTE_DEBUG_PORT && /^\d{4,5}$/.test(process.env.ECL_REMOTE_DEBUG_PORT)) {
+  app.commandLine.appendSwitch("remote-debugging-port", process.env.ECL_REMOTE_DEBUG_PORT);
+}
+
 let mainWindow: BrowserWindow | null = null;
 
 /**
