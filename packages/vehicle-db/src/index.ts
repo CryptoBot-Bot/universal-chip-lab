@@ -17,5 +17,6 @@ export * from "./vehicleCensus.js";
 export * from "./protectedModules.js";
 export * from "./readPolicy.js";
 export * from "./moduleIdentity.js";
+export * from "./moduleSweep.js";
 export * from "./obdPids.js";
 export * from "./moduleCatalog.js";

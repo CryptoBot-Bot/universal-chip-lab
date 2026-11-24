@@ -12,6 +12,7 @@
  */
 
 import type { CarInventory, InventoryChange } from "./moduleIdentity.js";
+import type { ModuleSweep } from "./moduleSweep.js";
 import type { RiskLevel } from "./busKnowledge.schema.js";
 import type { ModuleCapability } from "./benchModule.schema.js";
 
@@ -113,6 +114,8 @@ export interface VehicleModule {
   online?: boolean;           // runtime flag (not persisted in seed)
   busKnowledgeId?: string;    // links to a BusModuleKnowledge entry (AI/bench detail)
   explored?: VehicleModuleExploration; // permanent live-verified capability memory
+  /** Completeness sweeps: every identifier the module answers, per condition (moduleSweep.ts). */
+  sweeps?: ModuleSweep[];
   lastSeenAt?: string;        // ISO — last time this module answered on a discovery scan
   opsLog?: ModuleOpLog[];     // recent real-bus operations run against this module (capped)
   summary?: string;           // census: what this module is / controls on THIS vehicle (AI, from part numbers)

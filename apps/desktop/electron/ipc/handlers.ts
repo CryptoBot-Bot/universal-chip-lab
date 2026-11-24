@@ -50,6 +50,7 @@ import { deleteExplorerRun, listExplorerRuns, saveExplorerRun, type StoredExplor
 import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSkeleton, type SeqItem, type BusFrame } from "../resolver/moduleExplorer";
 import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicleExplorer";
 import { identifyAndSave } from "../pipeline/identityPipeline";
+import { sweepAndSave } from "../pipeline/sweepPipeline";
 import {
   captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
 } from "../pipeline/vehiclePipeline";
@@ -267,6 +268,17 @@ export async function registerIpcHandlers(
       onSweepProgress: (progress) => { try { event.sender.send("vehicleExplorer:event", { type: "sweep-progress", progress }); } catch { /* window gone */ } },
       onProgress: (done, total, found) => { try { event.sender.send("vehicleExplorer:event", { type: "discover", done, total, found }); } catch { /* window gone */ } },
       onFound: (m) => { try { event.sender.send("vehicleExplorer:event", { type: "discover-hit", requestId: m.requestId, responseId: m.responseId, name: m.name, ident: m.ident }); } catch { /* window gone */ } },
+      shouldStop: () => vehicleExplorerStop,
+    });
+  });
+
+  // Completeness sweep: every identifier of each module, twice — the yardstick the AI
+  // map is measured against. Read-only, no AI; airbag / immobiliser never swept.
+  register("vehicleExplorer:sweep", async (event, p: { host?: string; iface: string; profile: VehicleProfile; moduleIds?: string[]; condition: string; wide?: boolean; sim?: string | null }) => {
+    vehicleExplorerStop = false;
+    return sweepAndSave(vehicleLibDir, {
+      host: p.host, iface: p.iface, profile: p.profile, moduleIds: p.moduleIds, condition: p.condition || "ignition on", wide: p.wide, sim: p.sim,
+      onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
   });

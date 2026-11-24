@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { checkRequest, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { checkRequest, coverageOf, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
 import type { ProtectedKind } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
@@ -28,6 +28,7 @@ import {
 } from "../electron/pipeline/vehiclePipeline";
 import type { DiscoveredModule, VehicleExplorerEvent } from "../electron/resolver/vehicleExplorer";
 import { identifyAndSave } from "../electron/pipeline/identityPipeline";
+import { sweepAndSave } from "../electron/pipeline/sweepPipeline";
 import { getApiKey } from "./settings";
 
 const HELP = `vehicle — run the vehicle pipeline against a Super Device, no Electron.
@@ -52,6 +53,13 @@ Commands
   run [--map <module>] [--label TEXT] [--no-census] [--deep [--ext] | --no-deep]
                               vin → discover → census → identify → (map) → capture, recorded as one session
                               on the device and fetched here at the end
+  sweep [<module>] [--condition TEXT] [--wide]
+                              completeness sweep: read EVERY identifier in the standard ranges of each module
+                              (UDS 22 0100-03FF, F100-F1FF, F400-F4FF on engine/gearbox; KWP 21 00-FF, 1A 80-9F),
+                              twice, and save what answers. No AI. Never on airbag / immobiliser modules.
+                              --condition says what the car was doing ("engine off", "idling"); --wide adds 0400-0FFF
+  coverage [<module>]         what the AI map knows of what each module answers (needs a sweep): coverage %,
+                              moving values the map does not list as live data, identifiers it never mentions
   audit <recording id|path>   prove a recorded session was read-only: every request sent is checked against the
                               read-only policy (airbag / immobiliser addresses with the stricter rule). No device
                               needed — works on fetched recordings. Exit code 1 if anything was not a read.
@@ -75,7 +83,7 @@ AI steps (census, map) need ANTHROPIC_API_KEY in the environment or in <repo>/.e
 // ---- small plumbing -------------------------------------------------------------
 
 interface Args { _: string[]; flags: Record<string, string | boolean> }
-const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all"]);
+const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide"]);
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {} };
@@ -398,6 +406,60 @@ async function cmdAudit(ctx: Ctx) {
   return { ok: violations.length === 0, file, requests: n, protectedRequests: prot, services: Object.fromEntries(bySid), violations };
 }
 
+/** Completeness sweep of one or every (non-protected) module. */
+async function cmdSweep(ctx: Ctx) {
+  const profile = await currentProfile(ctx);
+  const q = ctx.args._[1];
+  const ids = q ? [findModule(profile, q).id] : undefined;
+  const condition = typeof ctx.args.flags.condition === "string" ? ctx.args.flags.condition : "ignition on";
+  const simStatus = (await piGet(ctx.host, "/api/sim/status").catch(() => null)) as { running?: boolean; vehicle?: string; name?: string } | null;
+  const sim = simStatus?.running && (ctx.iface === "vcan0" || /127\.0\.0\.1:8765$/.test(ctx.host)) ? (simStatus.name || simStatus.vehicle || "simulator") : null;
+  say(`Completeness sweep on ${ctx.iface} for ${ymm(profile)} · condition "${condition}"${sim ? ` · SIMULATOR (${sim})` : ""}`);
+  let last = "";
+  const { profile: saved, sweeps, skipped } = await sweepAndSave(ctx.vehicleLibDir, {
+    host: ctx.host, iface: ctx.iface, profile, moduleIds: ids, condition, wide: !!ctx.args.flags.wide, sim,
+    onEvent: (e) => {
+      if (e.type !== "sweep-module") return;
+      if (e.phase === "start") say(`\n  [${e.index + 1}/${e.total}] ${oneLine(e.label, 70)} — ${e.of} identifiers`);
+      else if (e.phase === "progress") {
+        const pct = Math.floor((e.asked / e.of) * 10);
+        const line = `      ${e.asked}/${e.of} asked · ${e.answered} answered`;
+        if (String(pct) !== last) { last = String(pct); say(line); }
+      } else if (e.sweep) {
+        const c = e.sweep.counts;
+        say(`      → ${c.answered} answered · ${c.moving} moving · ${c.gated} security-gated · session ${e.sweep.ranges[0]?.split("@")[1] ?? "?"} · ${Math.round(c.ms / 1000)} s`);
+      }
+    },
+  });
+  if (skipped.length) say(`\nNot swept (airbag / immobiliser — identity and fault memory only): ${skipped.map((l) => oneLine(l, 40)).join("; ")}`);
+  say(`\nSaved to ${saved.id}. Coverage of the AI map against it: "coverage".`);
+  return { ok: true, profile: saved.id, sweeps: Object.fromEntries(Object.entries(sweeps).map(([k, v]) => [k, v.counts])) };
+}
+
+/** What the AI map knows of what each module answers. */
+async function cmdCoverage(ctx: Ctx) {
+  const profile = await currentProfile(ctx);
+  const q = ctx.args._[1];
+  const mods = (q ? [findModule(profile, q)] : profile.modules.filter((m) => m.addressing?.response))
+    .filter((m) => !protectedModule({ category: m.category, label: m.label }));
+  say(`Coverage of the AI map — ${ymm(profile)}`);
+  say(`  ${pad("module", 8)} ${pad("swept", 7)} ${pad("answer", 7)} ${pad("AI knows", 9)} ${pad("cover", 6)} ${pad("moving", 7)} ${pad("live in map", 12)} name`);
+  const rows = [];
+  for (const m of mods) {
+    const c = coverageOf(m);
+    const swept = m.sweeps?.length ?? 0;
+    rows.push({ id: m.id, response: m.addressing?.response, ...c });
+    say(`  ${pad(m.addressing?.response ?? "?", 8)} ${pad(String(swept), 7)} ${pad(swept ? String(c.answered) : "—", 7)} ${pad(swept ? String(c.known) : "—", 9)} ${pad(c.ratio === null ? "—" : `${Math.round(c.ratio * 100)}%`, 6)} ${pad(swept ? String(c.moving) : "—", 7)} ${pad(swept ? `${c.movingKnown}/${c.moving}` : "—", 12)} ${oneLine(m.label, 46)}`);
+  }
+  if (q && rows[0]) {
+    const c = rows[0];
+    if (c.missedLive.length) say(`\n  Moving, not in the map as live data: ${c.missedLive.join(", ")}`);
+    if (c.missed.length) say(`  Answering, never mentioned by the map: ${c.missed.join(", ")}`);
+    if (c.unseen.length) say(`  In the map, not seen answering in any sweep: ${c.unseen.join(", ")}`);
+  }
+  return { ok: true, profile: profile.id, modules: rows };
+}
+
 async function cmdCensus(ctx: Ctx) {
   const profile = await currentProfile(ctx);
   const discovered = discoveredFromProfile(profile);
@@ -693,7 +755,7 @@ async function main(): Promise<number> {
 
   const root = findProjectRoot();
   loadEnvFile(root);
-  if (cmd === "audit") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
+  if (cmd === "audit" || cmd === "coverage") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
   const hostRaw = (typeof args.flags.host === "string" ? args.flags.host : process.env.SD_HOST ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!hostRaw) { process.stderr.write("Which device? Pass --host <address[:port]> (or set SD_HOST). Example: --host 100.91.185.100\n"); return 2; }
   const host = /:\d+$/.test(hostRaw) ? hostRaw : `${hostRaw}:8080`;
@@ -708,14 +770,14 @@ async function main(): Promise<number> {
 
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
-    census: cmdCensus, identify: cmdIdentify, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
+    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
   };
   const fn = commands[cmd];
   if (!fn) { process.stderr.write(`Unknown command "${cmd}".\n\n${HELP}\n`); return 2; }
   try {
     // At a real car this must never go unnoticed: with the can1↔can0 jumper still in,
     // a running virtual vehicle answers on can0 as if it were the car.
-    if (["vin", "discover", "census", "identify", "map", "capture", "run"].includes(cmd) && ctx.iface !== "vcan0") {
+    if (["vin", "discover", "census", "identify", "sweep", "map", "capture", "run"].includes(cmd) && ctx.iface !== "vcan0") {
       const sim = (await piGet(ctx.host, "/api/sim/status").catch(() => null)) as { running?: boolean; vehicle?: string; iface?: string } | null;
       if (sim?.running) say(`NOTE: a virtual vehicle (${sim.vehicle}) is running on ${sim.iface}. If the can1↔can0 jumper is in, what answers on ${ctx.iface} is the SIMULATOR, not a car. At a car: "sim stop" and pull the jumper.\n`);
     }
