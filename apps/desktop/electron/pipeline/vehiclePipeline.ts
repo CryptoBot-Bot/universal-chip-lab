@@ -12,9 +12,10 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  applyCensus, bindVinIdentity, censusInputFor, foldDiscoveredModules, foldExploration, mergeVehicleProfiles,
+  applyCensus, bindVinIdentity, censusInputFor, firstRefusal, foldDiscoveredModules, foldExploration, mergeVehicleProfiles,
   SEED_VEHICLE_PROFILES,
 } from "@ecu/vehicle-db";
+import type { ProtectedKind } from "@ecu/vehicle-db";
 import type {
   CanonicalModule, DiscoveredModuleInput, OnlineVinDecode, VehicleModule, VehicleProfile, VehicleSystemCategory, VinBinding,
 } from "@ecu/vehicle-db";
@@ -23,7 +24,7 @@ import { loadStoredVehicleProfiles, saveStoredVehicleProfile } from "@ecu/vehicl
 import type { BusFrame, SeqItem } from "../resolver/moduleExplorer";
 import {
   ADDRESS_CANDIDATES, deepMapVehicle, discoverModules, resultToExplorationInput,
-  type AddressCandidate, type DeepMapDeps, type DiscoveredModule, type MapTarget, type VehicleExplorerEvent,
+  type AddressCandidate, type DeepMapDeps, type DiscoveredModule, type MapTarget, type SweepProgress, type VehicleExplorerEvent,
 } from "../resolver/vehicleExplorer";
 import { censusModules, type CensusResult } from "../resolver/vehicleIdentifier";
 import { decodeVinOnline } from "../resolver/vinOnline";
@@ -72,6 +73,34 @@ export async function piPost(host: string | undefined, pathq: string, body: unkn
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---- the read-only transport -------------------------------------------------------
+
+/** Thrown when a request is stopped on this PC before it reaches the device. */
+export class RefusedRequest extends Error {}
+
+/**
+ * One request to one module — through the read-only policy first. Every automatic
+ * request the pipeline sends (discovery, identity, deep map) goes through readOne /
+ * readSeq; a write never leaves this PC from here. (The Pi's write gate is a second,
+ * independent wall behind this one.)
+ */
+export async function readOne(host: string | undefined, iface: string, tx: string, rx: string, data: string,
+  opts: { protectedKind?: ProtectedKind | null; timeout?: number } = {}): Promise<{ response?: string; negative?: boolean; nrc?: number } | null> {
+  const bad = firstRefusal([data], { protectedKind: opts.protectedKind ?? null });
+  if (bad) throw new RefusedRequest(`Refused before sending — ${bad}`);
+  const r = (await piPost(host, "/api/isotp", { iface, tx, rx, data, timeout: opts.timeout ?? 0.45 })) as { response?: string; negative?: boolean; nrc?: number };
+  return r && r.response ? r : null;
+}
+
+/** A sequence over one socket (a session opener stays in force) — every request checked first. */
+export async function readSeq(host: string | undefined, iface: string, tx: string, rx: string, requests: string[],
+  opts: { protectedKind?: ProtectedKind | null; timeout?: number; httpTimeoutMs?: number } = {}): Promise<SeqItem[]> {
+  const bad = firstRefusal(requests, { protectedKind: opts.protectedKind ?? null });
+  if (bad) throw new RefusedRequest(`Refused before sending — ${bad}`);
+  const r = (await piPost(host, "/api/isotp/seq", { iface, tx, rx, requests, timeout: opts.timeout ?? 1.0 }, opts.httpTimeoutMs ?? 45000)) as { results?: SeqItem[] };
+  return r.results ?? [];
 }
 
 // ---- VIN → identity -------------------------------------------------------------
@@ -127,6 +156,10 @@ export interface DiscoverOptions {
   deep?: boolean | { ext?: boolean };
   onProgress?: (done: number, total: number, found: number) => void;
   onSweep?: (r: SweepResult) => void;
+  /** Live sweep state, about twice a second while the sweep runs (live address map). */
+  onSweepProgress?: (p: SweepProgress) => void;
+  /** Each responder as soon as it is confirmed. */
+  onFound?: (m: DiscoveredModule) => void;
   shouldStop?: () => boolean;
 }
 
@@ -138,8 +171,28 @@ export interface SweepResult {
 
 /** The device's safe address sweep (superdevice_ui.address_sweep): tester-present only,
  * never on an ID the bus uses, every hit confirmed. About a minute for 0x600-0x7FF. */
-export async function sweepOnBus(host: string | undefined, iface: string, opts: { ext?: boolean; lo?: number; hi?: number } = {}): Promise<SweepResult> {
-  return (await piPost(host, "/api/scan/sweep", { iface, ext: !!opts.ext, lo: opts.lo ?? 0x600, hi: opts.hi ?? 0x7ff }, 240000)) as SweepResult;
+export async function sweepOnBus(host: string | undefined, iface: string,
+  opts: { ext?: boolean; lo?: number; hi?: number; onProgress?: (p: SweepProgress) => void } = {}): Promise<SweepResult> {
+  const run = piPost(host, "/api/scan/sweep", { iface, ext: !!opts.ext, lo: opts.lo ?? 0x600, hi: opts.hi ?? 0x7ff }, 240000) as Promise<SweepResult>;
+  if (!opts.onProgress) return run;
+  // The POST blocks until the sweep is done; meanwhile poll its status for the live map.
+  // An older daemon has no status endpoint — then there is simply no live progress.
+  let done = false;
+  const poll = (async () => {
+    let misses = 0;
+    while (!done && misses < 3) {
+      await new Promise((r) => setTimeout(r, 450));
+      if (done) break;
+      try { opts.onProgress!((await piGet(host, "/api/scan/sweep/status", 3000)) as SweepProgress); misses = 0; }
+      catch { misses += 1; }
+    }
+  })();
+  try { return await run; }
+  finally {
+    done = true;
+    await poll;
+    try { opts.onProgress((await piGet(host, "/api/scan/sweep/status", 3000)) as SweepProgress); } catch { /* old daemon */ }
+  }
 }
 
 /** The addresses a profile already knows, as discovery candidates. */
@@ -164,23 +217,21 @@ export function candidateList(...extra: (AddressCandidate[] | undefined)[]): Add
 export async function discoverOnBus(o: DiscoverOptions): Promise<DiscoveredModule[]> {
   let swept: AddressCandidate[] = [];
   if (o.deep) {
-    const r = await sweepOnBus(o.host, o.iface, typeof o.deep === "object" ? o.deep : {});
+    const r = await sweepOnBus(o.host, o.iface, { ...(typeof o.deep === "object" ? o.deep : {}), onProgress: o.onSweepProgress });
     o.onSweep?.(r);
     if (!r.ok) throw new Error(`Address sweep failed: ${r.error ?? "no answer from the device"}`);
     swept = (r.responders ?? []).map((h) => ({ name: `Found by sweep at ${h.req} (${h.kind})`, req: h.req, resp: h.resp }));
   }
   return discoverModules({
     isotp: async (tx, rx, data) => {
-      const r = (await piPost(o.host, "/api/isotp", { iface: o.iface, tx, rx, data, timeout: 0.45 })) as { response?: string; negative?: boolean };
+      const r = await readOne(o.host, o.iface, tx, rx, data);
       return r && r.response ? { response: r.response, negative: !!r.negative } : null;
     },
     // Identification pass (22 F187/F190/F18A/F195/F191/F18C) on every responder — on
     // by default: it is what lets the library recognise the car and its modules.
-    probe: o.ident === false ? undefined : async (tx, rx, requests) => {
-      const r = (await piPost(o.host, "/api/isotp/seq", { iface: o.iface, tx, rx, requests, timeout: 1.0 })) as { results?: SeqItem[] };
-      return r.results ?? [];
-    },
+    probe: o.ident === false ? undefined : (tx, rx, requests) => readSeq(o.host, o.iface, tx, rx, requests),
     onProgress: o.onProgress,
+    onFound: o.onFound,
     shouldStop: o.shouldStop ?? (() => false),
   }, candidateList(o.known, swept));
 }
@@ -291,7 +342,7 @@ export async function deepMapAndSave(o: DeepMapOptions): Promise<VehicleProfile>
   const deps: DeepMapDeps = {
     iface: o.iface,
     probe: async (tx, rx, requests) => {
-      const r = (await piPost(o.host, "/api/isotp/seq", { iface: o.iface, tx, rx, requests, timeout: 2.0 }, 45000)) as { results?: SeqItem[] };
+      const r = { results: await readSeq(o.host, o.iface, tx, rx, requests, { timeout: 2.0, httpTimeoutMs: 45000 }) };
       return r.results ?? [];
     },
     scanBus: async (ms) => {

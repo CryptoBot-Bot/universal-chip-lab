@@ -14,7 +14,8 @@
     "vehicle": "pnpm --filter @ecu/desktop vehicle",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "clean": "pnpm -r clean"
+    "clean": "pnpm -r clean",
+    "test": "pnpm --filter @ecu/desktop test"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

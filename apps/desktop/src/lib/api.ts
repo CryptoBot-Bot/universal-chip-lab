@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { BenchModuleProfile, BusModuleKnowledge, ModuleProfile, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, CarInventory, IdentRecord, ModuleInventoryEntry, ModuleProfile, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -282,9 +282,28 @@ export interface VehicleExplorerTarget {
   moduleId: string; displayName: string; brand: string; category: string;
   protocol: string; requestId: string; responseId: string;
 }
+/** GET /api/scan/sweep/status while the device's address sweep runs. */
+export interface SweepProgress {
+  running: boolean;
+  phase?: "listen" | "probe" | "confirm" | "done" | "error";
+  iface?: string; lo?: string; hi?: string;
+  probed?: number; total?: number; current?: string | null;
+  hits?: { req: string; resp: string }[];
+  skipped?: string[];
+  broadcast?: number;
+  elapsed?: number;
+  error?: string;
+}
+
 export type VehicleExplorerEvent =
   | { type: "discover"; done: number; total: number; found: number }
   | { type: "sweep"; ok: boolean; found: number; seconds?: number }
+  | { type: "sweep-progress"; progress: SweepProgress }
+  | { type: "discover-hit"; requestId: string; responseId: string; name: string; ident?: { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string; vin?: string } }
+  | { type: "ident-start"; total: number; modules: { moduleId: string; label: string; requestId: string; responseId: string; protectedKind?: string }[] }
+  | { type: "ident-module"; moduleId: string; label: string; index: number; total: number; phase: "start" | "done"; protectedKind?: string; entry?: ModuleInventoryEntry }
+  | { type: "ident-record"; moduleId: string; record: IdentRecord }
+  | { type: "ident-done"; inventory: CarInventory }
   | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
   | { type: "module-event"; moduleId: string; event: ExplorerEvent }
   | { type: "module-done"; moduleId: string; result: ExplorerResult }
@@ -500,6 +519,9 @@ export const Api = {
     start: (payload: { host?: string; iface: string; profile: VehicleProfile; targets: VehicleExplorerTarget[] }) =>
       unwrap<VehicleProfile>(api.vehicleExplorer.start(payload) as never),
     stop: () => unwrap<{ ok: boolean }>(api.vehicleExplorer.stop() as never),
+    /** Read every module's identity (part numbers, versions, serial…) and file it under the car's VIN. Read-only. */
+    identifyModules: (payload: { host?: string; iface: string; profile: VehicleProfile; vin?: string; moduleIds?: string[]; sim?: string | null; extended?: boolean }) =>
+      unwrap<{ profile: VehicleProfile; inventory: CarInventory }>(api.vehicleExplorer.identifyModules(payload) as never),
     identify: (payload: IdentifyInput) => unwrap<IdentifyResult>(api.vehicleExplorer.identify(payload) as never),
     decodeOnline: (vin: string) => unwrap<OnlineVinDecode>(api.vehicleExplorer.decodeOnline(vin) as never),
     census: (payload: CensusInput) => unwrap<CensusResult>(api.vehicleExplorer.census(payload) as never),

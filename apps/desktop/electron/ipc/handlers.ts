@@ -49,6 +49,7 @@ import { mapBus, type BusMapInput } from "../resolver/busMapper";
 import { deleteExplorerRun, listExplorerRuns, saveExplorerRun, type StoredExplorerRun } from "../explorerRuns";
 import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSkeleton, type SeqItem, type BusFrame } from "../resolver/moduleExplorer";
 import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicleExplorer";
+import { identifyAndSave } from "../pipeline/identityPipeline";
 import {
   captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
 } from "../pipeline/vehiclePipeline";
@@ -263,7 +264,20 @@ export async function registerIpcHandlers(
     return discoverOnBus({
       host: p.host, iface: p.iface, ident: p.ident, known: p.known, deep: p.deep,
       onSweep: (r) => { try { event.sender.send("vehicleExplorer:event", { type: "sweep", ok: r.ok, found: r.responders?.length ?? 0, seconds: r.seconds }); } catch { /* window gone */ } },
+      onSweepProgress: (progress) => { try { event.sender.send("vehicleExplorer:event", { type: "sweep-progress", progress }); } catch { /* window gone */ } },
       onProgress: (done, total, found) => { try { event.sender.send("vehicleExplorer:event", { type: "discover", done, total, found }); } catch { /* window gone */ } },
+      onFound: (m) => { try { event.sender.send("vehicleExplorer:event", { type: "discover-hit", requestId: m.requestId, responseId: m.responseId, name: m.name, ident: m.ident }); } catch { /* window gone */ } },
+      shouldStop: () => vehicleExplorerStop,
+    });
+  });
+
+  // Identity read: every module's part numbers, versions, serial number, supplier,
+  // build date — plain identification reads only, streamed live, filed per car (VIN).
+  register("vehicleExplorer:identify", async (event, p: { host?: string; iface: string; profile: VehicleProfile; vin?: string; moduleIds?: string[]; sim?: string | null; extended?: boolean }) => {
+    vehicleExplorerStop = false;
+    return identifyAndSave(vehicleLibDir, {
+      host: p.host, iface: p.iface, profile: p.profile, vin: p.vin, moduleIds: p.moduleIds, sim: p.sim, extended: p.extended,
+      onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
   });

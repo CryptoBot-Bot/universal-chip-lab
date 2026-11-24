@@ -58,7 +58,7 @@ def version_info():
         "python": platform.python_version(),
         "port": PORT,
         "files": {n: _sha256(os.path.join(HERE, n)) for n in ("superdevice_ui.py", "virtual_vehicle.py", "powerguard.py")},
-        "features": ["version", "recorder", "replay", "vcan", "sweep", "bus-health", "write-gate"],
+        "features": ["version", "recorder", "replay", "vcan", "sweep", "sweep-status", "bus-health", "write-gate"],
     }
 
 
@@ -685,6 +685,15 @@ def bus_monitor(iface, ms=700):
 
 
 SWEEP_LOCK = threading.Lock()
+# Live view of the running sweep for GET /api/scan/sweep/status (the POST blocks until done).
+SWEEP_PROGRESS = {"running": False}
+
+
+def sweep_status():
+    p = dict(SWEEP_PROGRESS)
+    if p.get("started"):
+        p["elapsed"] = round(time.time() - p["started"], 1)
+    return p
 
 
 def address_sweep(iface="can0", lo=0x600, hi=0x7FF, ext=False, listen_s=3.0, wait_ms=50):
@@ -740,6 +749,10 @@ def address_sweep(iface="can0", lo=0x600, hi=0x7FF, ext=False, listen_s=3.0, wai
         def is_tp_answer(d):
             return len(d) >= 3 and d[0] in (0x02, 0x03) and (d[1] == 0x7E or (d[1] == 0x7F and d[2] == 0x3E))
 
+        SWEEP_PROGRESS.clear()
+        SWEEP_PROGRESS.update({"running": True, "phase": "listen", "iface": iface, "lo": f"{lo:03X}", "hi": f"{hi:03X}",
+                               "ext": bool(ext), "started": t0, "probed": 0, "total": 0, "current": None,
+                               "hits": [], "skipped": [], "broadcast": 0})
         send(0x7DF, [0x02, 0x01, 0x00])          # wake: standard OBD "PIDs supported"
         frames_for(listen_s)
         broadcast = {f"{k & 0x1FFFFFFF:X}": n for k, n in sorted(seen.items())}
@@ -761,16 +774,24 @@ def address_sweep(iface="can0", lo=0x600, hi=0x7FF, ext=False, listen_s=3.0, wai
             return None
 
         hits, skipped, probed = [], [], 0
+        SWEEP_PROGRESS.update({"phase": "probe", "broadcast": len(broadcast),
+                               "total": sum(1 for c, _ in targets if not ((c & 0x7FF) in own and not (c & EFF)))})
         for req, want in targets:
             if (req & 0x7FF) in own and not (req & EFF):
                 continue
+            SWEEP_PROGRESS["current"] = f"{req & 0x1FFFFFFF:X}"
             if seen.get(req):
                 skipped.append(f"{req & 0x1FFFFFFF:X}")
+                SWEEP_PROGRESS["skipped"] = list(skipped)
+                SWEEP_PROGRESS["probed"] = probed + len(skipped)
                 continue
             probed += 1
             got = probe(req, want)
             if got:
                 hits.append({"req": f"{req & 0x1FFFFFFF:X}", "resp": f"{got[0] & 0x1FFFFFFF:X}", "probe": got[1], "data": got[2]})
+                SWEEP_PROGRESS["hits"] = [{"req": h["req"], "resp": h["resp"]} for h in hits]
+            SWEEP_PROGRESS["probed"] = probed + len(skipped)
+        SWEEP_PROGRESS.update({"phase": "confirm", "current": None})
         confirmed = []
         for h in hits:   # second, targeted ask: the same answer on the same ID, or it does not count
             req = int(h["req"], 16) | (EFF if len(h["req"]) > 3 else 0)
@@ -785,10 +806,13 @@ def address_sweep(iface="can0", lo=0x600, hi=0x7FF, ext=False, listen_s=3.0, wai
                "seconds": round(time.time() - t0, 1), "broadcast": broadcast, "skipped": skipped,
                "responders": confirmed, "unconfirmed": [h for h in hits if not h["confirmed"]]}
         REC.log({"type": "sweep", **out})
+        SWEEP_PROGRESS.update({"phase": "done", "confirmed": [{"req": h["req"], "resp": h["resp"], "kind": h["kind"]} for h in confirmed]})
         return out
     except Exception as e:
+        SWEEP_PROGRESS.update({"phase": "error", "error": f"{type(e).__name__}: {e}"})
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "seconds": round(time.time() - t0, 1)}
     finally:
+        SWEEP_PROGRESS["running"] = False
         SWEEP_LOCK.release()
 
 
@@ -1374,6 +1398,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(wifi_saved())
         elif u.path == "/api/write-gate":
             self._json(gate_status())
+        elif u.path == "/api/scan/sweep/status":
+            self._json(sweep_status())
         elif u.path == "/api/sim/status":
             self._json(sim_status())
         elif u.path == "/api/version":

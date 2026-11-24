@@ -8,7 +8,7 @@
  * Every helper below normalises before anything is sent — a request that is not
  * clean hex is dropped, never guessed.
  */
-import { PIDS, ymmProfileId } from "@ecu/vehicle-db";
+import { PIDS, firstRefusal, protectedModule, ymmProfileId } from "@ecu/vehicle-db";
 import type {
   BodyType, ScanDtc, SystemScanResult, VehicleModule, VehicleProfile, VehicleSystemCategory,
 } from "@ecu/vehicle-db";
@@ -46,6 +46,23 @@ export async function seq(host: string, iface: string, mod: VehicleModule, reque
     out.push(...r.results);
   }
   return out;
+}
+
+/** Airbag / immobiliser? Then only identity and fault-memory reads, in its current session. */
+export function guardOf(mod: VehicleModule) {
+  return protectedModule({ category: mod.category, label: mod.label })?.kind ?? null;
+}
+
+/**
+ * The read path: every request passes the shared read-only policy before it is sent
+ * (packages/vehicle-db/src/readPolicy.ts). Scans, identification and live data use
+ * this; only the operator-confirmed erase / manual write paths use `seq` directly
+ * (and the device's write gate refuses those while it is read-only).
+ */
+export async function readSeqFor(host: string, iface: string, mod: VehicleModule, requests: string[], timeout = 2.0): Promise<SeqItem[]> {
+  const bad = firstRefusal(requests, { protectedKind: guardOf(mod) });
+  if (bad) throw new Error(`Not sent — ${bad}`);
+  return seq(host, iface, mod, requests, timeout);
 }
 
 // ---- normalising what the library knows ------------------------------------------------
@@ -114,7 +131,7 @@ export const OBD_LIVE_PIDS: Record<number, string> = {
 export async function obdSupportedPids(host: string, iface: string, mod: VehicleModule): Promise<number[]> {
   const out: number[] = [];
   for (let base = 0; base <= 0xc0; base += 0x20) {
-    const it = (await seq(host, iface, mod, [`01${base.toString(16).toUpperCase().padStart(2, "0")}`], 1.5))[0];
+    const it = (await readSeqFor(host, iface, mod, [`01${base.toString(16).toUpperCase().padStart(2, "0")}`], 1.5))[0];
     const b = (it?.response ?? "").replace(/\s+/g, "");
     if (!it || it.negative || !b.toLowerCase().startsWith("41") || b.length < 12) break;
     const bits = parseInt(b.slice(4, 12), 16) >>> 0;
@@ -179,8 +196,8 @@ export async function readIdent(host: string, iface: string, mod: VehicleModule)
     if (r && !reqs.has(r.request)) reqs.set(r.request, i.label);
   }
   const list = [...reqs.keys()];
-  const session = preferredSession(mod);
-  const items = await seq(host, iface, mod, session ? [session, ...list] : list);
+  const session = guardOf(mod) ? null : preferredSession(mod);
+  const items = await readSeqFor(host, iface, mod, session ? [session, ...list] : list);
   const body = session ? items.slice(1) : items;
   const rows: IdentRow[] = [];
   body.forEach((it, k) => {
@@ -216,11 +233,13 @@ export interface DtcReadResult { status: SystemScanResult["status"]; dtcs: ScanD
  * system that answers but refuses every read is "unknown" — never "no fault".
  */
 export async function readDtcs(host: string, iface: string, mod: VehicleModule): Promise<DtcReadResult> {
-  let items = await seq(host, iface, mod, ["3E00", "1902FF"], 1.2);
+  let items = await readSeqFor(host, iface, mod, ["3E00", "1902FF"], 1.2);
   if (!items.some((it) => it.response)) return { status: "no_response", dtcs: [] };
   let uds = items[1];
-  if (uds?.negative && [0x7f, 0x7e, 0x22, 0x31].includes(Number(uds.nrc))) {
-    items = await seq(host, iface, mod, ["1003", "1902FF"], 2.0);
+  // a refusal "not in this session" is retried in the extended session — never on an
+  // airbag / immobiliser module, which is only read in the session it is in
+  if (uds?.negative && [0x7f, 0x7e, 0x22, 0x31].includes(Number(uds.nrc)) && !guardOf(mod)) {
+    items = await readSeqFor(host, iface, mod, ["1003", "1902FF"], 2.0);
     uds = items[1];
   }
   const rows: DtcRow[] = [];
@@ -230,12 +249,12 @@ export async function readDtcs(host: string, iface: string, mod: VehicleModule):
   if (uds?.negative) {
     // KWP2000-on-CAN modules (e.g. a Mercedes EGS) refuse service 19 outright and
     // keep their fault memory behind KWP 18 02 FF 00 (all DTCs with their status).
-    const kwp = (await seq(host, iface, mod, ["1802FF00"], 2.0))[0];
+    const kwp = (await readSeqFor(host, iface, mod, ["1802FF00"], 2.0))[0];
     if (kwp?.response && !kwp.negative) { answered = true; rows.push(...parseKwpDtcsFromHex(kwp.response)); }
     else notes.push(`19 02 refused (${nrcText(uds.nrc)})${kwp?.negative ? `; KWP 18 02 refused (${nrcText(kwp.nrc)})` : ""}`);
   }
   if (isObdEcu(mod)) {
-    const obd = await seq(host, iface, mod, ["03", "07", "0A"], 2.0);
+    const obd = await readSeqFor(host, iface, mod, ["03", "07", "0A"], 2.0);
     for (const it of obd) {
       if (!it.response || it.negative) continue;
       answered = true;
@@ -292,8 +311,8 @@ export async function readLive(host: string, iface: string, mod: VehicleModule, 
   for (const [session, all] of bySession) for (let i = 0; i < all.length; i += CHUNK) chunks.push([session, all.slice(i, i + CHUNK)]);
   for (const [session, group] of chunks) {
     const reqs = group.map((g) => g.request);
-    const res = await seq(host, iface, mod, session ? [session, ...reqs] : reqs, 1.5);
-    const body = session ? res.slice(1) : res;
+    const res = await readSeqFor(host, iface, mod, session && !guardOf(mod) ? [session, ...reqs] : reqs, 1.5);
+    const body = session && !guardOf(mod) ? res.slice(1) : res;
     group.forEach((g, k) => {
       const it = body[k];
       if (!it?.response) { out.push({ key: g.key, value: "no response", raw: "", ok: false }); return; }
@@ -348,3 +367,17 @@ export function addressedSystems(profile: VehicleProfile): VehicleModule[] {
 }
 
 export const ymmLabel = (p: { year: number | null; make: string; model: string }) => [p.year, p.make, p.model].filter(Boolean).join(" ");
+
+/** "EZS — Electronic Ignition Switch / …" → { short: "EZS", name: "Electronic Ignition Switch / …" };
+ *  "CDI Engine Control Unit (ECM, OM642 …)" → { short: "ECM", name: "CDI Engine Control Unit" }. */
+export function splitLabel(label: string): { short: string; name: string } {
+  const dash = /^([A-Z][A-Za-z0-9-]{1,8})\s+[—–-]\s+(.+)$/.exec(label);
+  if (dash) return { short: dash[1], name: dash[2].replace(/\s*\(.*$/, "") };
+  const before = label.replace(/\s*\(.*$/, "").replace(/\s+[—–]\s+.*$/, "").trim();
+  const paren = /\(([A-Z]{2,5})(?:[,)\s])/.exec(label);
+  if (paren) return { short: paren[1], name: before || label };
+  const lead = /^([A-Z]{2,6})\b/.exec(label);
+  if (lead) return { short: lead[1], name: before.replace(/^[A-Z]{2,6}\s*(\/\s*)?/, "") || before };
+  const first = label.split(/[\s/(]+/)[0] || label;
+  return { short: first.length > 10 ? first.slice(0, 10) : first, name: before };
+}

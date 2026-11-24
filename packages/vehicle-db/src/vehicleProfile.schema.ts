@@ -11,6 +11,7 @@
  * `ModuleCategory` (from moduleProfile.schema).
  */
 
+import type { CarInventory, InventoryChange } from "./moduleIdentity.js";
 import type { RiskLevel } from "./busKnowledge.schema.js";
 import type { ModuleCapability } from "./benchModule.schema.js";
 
@@ -354,6 +355,11 @@ export interface VinObservation {
   reads: number;              // how many times we've read it
   syncedToShop?: boolean;     // pushed into the JobCount garage
   scans?: VehicleScanRecord[]; // this unit's Auto Scan history, newest last (capped)
+  /** What every module of THIS car said it is (part numbers, versions, serial numbers…),
+   *  from the last identity read — see moduleIdentity.ts. */
+  inventory?: CarInventory;
+  /** Modules whose identity changed between visits (swapped, reflashed), newest last (capped). */
+  inventoryChanges?: InventoryChange[];
 }
 
 /** How one system came out of an Auto Scan. "unknown" = it answered, but its fault

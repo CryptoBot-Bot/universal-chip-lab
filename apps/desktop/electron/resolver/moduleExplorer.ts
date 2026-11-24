@@ -1,3 +1,4 @@
+import { isReadOnlyRequest as policyIsReadOnly } from "@ecu/vehicle-db";
 import Anthropic from "@anthropic-ai/sdk";
 
 import { getApiKey } from "../settings";
@@ -25,23 +26,12 @@ const MAX_STEPS = 30;
 // Read-only diagnostic SIDs. Incl. OBD mode 02 (freeze-frame data) and 06 (on-board
 // monitor test results) — both pure reads; 18 = KWP2000 readDTCsByStatus (Mercedes
 // KWP-on-CAN modules refuse UDS 19). Writes/clears/security/reset stay refused.
-const ALLOWED_SIDS = new Set(["10", "3e", "22", "19", "18", "21", "1a", "01", "02", "03", "06", "07", "09", "0a", "23", "17", "24"]); // 24 = UDS ReadScalingDataByIdentifier (read)
-// Session sub-functions the agent may NEVER enter on a real module: UDS 02 programming
-// (and 82 = 02 with suppress-positive-response), KWP 85 programming (bootloader — an ECU
-// left there can stop working until power-cycled), UDS 04 safetySystem (the airbag
-// scrapping / deployment path). Everything else in 10 is a harmless diagnostic session.
-const FORBIDDEN_SESSIONS = new Set([0x02, 0x82, 0x85, 0x04, 0x84]);
-
-/** The one gate every request the autonomous agent sends goes through. */
+// The one gate every request the autonomous agent sends goes through: the shared
+// read-only policy (packages/vehicle-db/src/readPolicy.ts) — reads, tester-present,
+// harmless sessions and security SEED requests only; never a key, never programming
+// (10 02/82/85) or the safety-system session (10 04/84), never a write service.
 export function isReadOnlyRequest(raw: string): boolean {
-  const r = raw.replace(/\s+/g, "").toLowerCase();
-  if (!/^[0-9a-f]{2,}$/.test(r) || r.length % 2) return false;
-  const sid = r.slice(0, 2);
-  // SecurityAccess only as a seed request (odd sub-function): it changes nothing and shows
-  // whether security exists / which session it needs. A key (even sub-function) is never sent.
-  if (sid === "27") { const sub = parseInt(r.slice(2, 4), 16); return Number.isFinite(sub) && sub % 2 === 1 && r.length === 4; }
-  if (sid === "10") { const sub = parseInt(r.slice(2, 4), 16); return r.length === 4 && Number.isFinite(sub) && !FORBIDDEN_SESSIONS.has(sub); }
-  return ALLOWED_SIDS.has(sid);
+  return policyIsReadOnly(raw);
 }
 
 export interface SeqItem { request: string; response?: string; ok?: boolean; negative?: boolean; nrc?: number; error?: string }

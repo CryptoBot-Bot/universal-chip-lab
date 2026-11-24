@@ -209,31 +209,50 @@ def bus_monitor(ms):
     return {"ok": True, "window_ms": int(dur * 1000), "count": len(frames), "frames": frames}
 
 
+SWEEP = {"running": False}
+
+
 def sweep(d):
     """The daemon's /api/scan/sweep, against the virtual car: tester-present to every request
-    id in the range, 3E 00 then 3E 01 (KWP), every answer counted."""
+    id in the range, 3E 00 then 3E 01 (KWP), every answer counted. Paced (pace_ms per id,
+    default 12) so the app's live address map can be watched the way a real sweep runs;
+    GET /api/scan/sweep/status reports progress like the Pi does."""
     try:
         lo, hi = max(0x500, int(d.get("lo", 0x600))), min(0x7FF, int(d.get("hi", 0x7FF)))
+        pace = max(0.0, min(float(d.get("pace_ms", 12)), 200.0)) / 1000.0
     except (TypeError, ValueError):
         return {"ok": False, "error": "bad range"}
+    if SWEEP.get("running"):
+        return {"ok": False, "error": "a sweep is already running"}
     hits, probed, t0 = [], 0, time.time()
-    with LOCK:
-        v = STATE["vehicle"] if STATE["running"] else None
-        for req in range(lo, hi + 1):
-            if req == 0x7DF or 0x7E0 <= req <= 0x7EF:
-                continue
+    ids = [r for r in range(lo, hi + 1) if not (r == 0x7DF or 0x7E0 <= r <= 0x7EF)]
+    SWEEP.clear()
+    SWEEP.update({"running": True, "phase": "probe", "iface": d.get("iface", "can0"), "lo": f"{lo:03X}", "hi": f"{hi:03X}",
+                  "ext": False, "started": t0, "probed": 0, "total": len(ids), "current": None, "hits": [], "skipped": [], "broadcast": 0})
+    try:
+        for req in ids:
+            SWEEP["current"] = f"{req:03X}"
             probed += 1
-            for e in (v["ecus"] if v else []):
-                if e["req"] != req:
-                    continue
-                for tp in (b"\x3e\x00", b"\x3e\x01"):
-                    r = answer(e, tp)
-                    if r and (r[0] == 0x7E or (len(r) > 1 and r[0] == 0x7F and r[1] == 0x3E)):
-                        hits.append({"req": f"{req:03X}", "resp": f"{e['resp']:03X}", "probe": (bytes([len(tp)]) + tp).hex(),
-                                     "data": (bytes([len(r)]) + r).hex(), "confirmed": True,
-                                     "kind": "uds" if r[0] == 0x7E and tp == b"\x3e\x00" else "kwp"})
-                        break
-                break
+            with LOCK:
+                v = STATE["vehicle"] if STATE["running"] else None
+                for e in (v["ecus"] if v else []):
+                    if e["req"] != req:
+                        continue
+                    for tp in (b"\x3e\x00", b"\x3e\x01"):
+                        r = answer(e, tp)
+                        if r and (r[0] == 0x7E or (len(r) > 1 and r[0] == 0x7F and r[1] == 0x3E)):
+                            hits.append({"req": f"{req:03X}", "resp": f"{e['resp']:03X}", "probe": (bytes([len(tp)]) + tp).hex(),
+                                         "data": (bytes([len(r)]) + r).hex(), "confirmed": True,
+                                         "kind": "uds" if r[0] == 0x7E and tp == b"\x3e\x00" else "kwp"})
+                            SWEEP["hits"] = [{"req": h["req"], "resp": h["resp"]} for h in hits]
+                            break
+                    break
+            SWEEP["probed"] = probed
+            if pace:
+                time.sleep(pace)
+        SWEEP.update({"phase": "done", "current": None, "confirmed": [{"req": h["req"], "resp": h["resp"], "kind": h["kind"]} for h in hits]})
+    finally:
+        SWEEP["running"] = False
     return {"ok": True, "iface": d.get("iface", "can0"), "range": [f"{lo:03X}", f"{hi:03X}"], "ext": False, "probed": probed,
             "seconds": round(time.time() - t0, 1), "broadcast": {}, "skipped": [], "responders": hits, "unconfirmed": []}
 
@@ -292,7 +311,12 @@ class Handler(BaseHTTPRequestHandler):
                         "claim": claim_info(), "battery": {"present": False}, "power": None})
         elif u.path == "/api/version":
             self._json({"daemon_sha256": "desk-simulator", "started": STATE["started"], "uptime_s": int(time.time() - STATE["started"]),
-                        "port": self.server.server_address[1], "features": ["version", "desk-sim", "replay", "sweep"]})
+                        "port": self.server.server_address[1], "features": ["version", "desk-sim", "replay", "sweep", "sweep-status"]})
+        elif u.path == "/api/scan/sweep/status":
+            p = dict(SWEEP)
+            if p.get("started"):
+                p["elapsed"] = round(time.time() - p["started"], 1)
+            self._json(p)
         elif u.path == "/api/vin":
             self._json(read_vin())
         elif u.path == "/api/sim/status":

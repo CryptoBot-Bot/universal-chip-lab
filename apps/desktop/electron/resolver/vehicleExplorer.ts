@@ -1,4 +1,4 @@
-import type { VehicleModuleExploration } from "@ecu/vehicle-db";
+import type { CarInventory, IdentRecord, ModuleInventoryEntry, VehicleModuleExploration } from "@ecu/vehicle-db";
 import { protectedModule } from "@ecu/vehicle-db";
 
 import {
@@ -154,6 +154,8 @@ export interface DiscoverDeps {
   /** Optional: a sequence over one socket — enables the identification pass (22 F187/F190/F18A/F195/F191/F18C). */
   probe?: (tx: string, rx: string, requests: string[]) => Promise<SeqItem[]>;
   onProgress?: (done: number, total: number, found: number) => void;
+  /** Each responder the moment it is confirmed (identification included) — the live map. */
+  onFound?: (m: DiscoveredModule) => void;
   shouldStop: () => boolean;
 }
 
@@ -246,7 +248,9 @@ export async function discoverModules(deps: DiscoverDeps, candidates = ADDRESS_C
       const r = await deps.isotp(c.req, c.resp, "3E00");
       if (r && r.response) {
         const ident = deps.probe ? await readIdent(deps.probe, c.req, c.resp) : undefined;
-        found.push({ name: c.name, requestId: c.req, responseId: c.resp, firstBytes: r.response, negative: !!r.negative, ident });
+        const hit: DiscoveredModule = { name: c.name, requestId: c.req, responseId: c.resp, firstBytes: r.response, negative: !!r.negative, ident };
+        found.push(hit);
+        deps.onFound?.(hit);
       }
     } catch { /* no answer on this address */ }
     // End of the generic pass: a Daimler VIN from any responder adds the Mercedes block.
@@ -280,11 +284,30 @@ export interface MapTarget {
 export type VehicleExplorerEvent =
   | { type: "discover"; done: number; total: number; found: number }
   | { type: "sweep"; ok: boolean; found: number; seconds?: number }
+  | { type: "sweep-progress"; progress: SweepProgress }
+  | { type: "discover-hit"; requestId: string; responseId: string; name: string; ident?: DiscoveredIdent }
+  | { type: "ident-start"; total: number; modules: { moduleId: string; label: string; requestId: string; responseId: string; protectedKind?: string }[] }
+  | { type: "ident-module"; moduleId: string; label: string; index: number; total: number; phase: "start" | "done"; protectedKind?: string; entry?: ModuleInventoryEntry }
+  | { type: "ident-record"; moduleId: string; record: IdentRecord }
+  | { type: "ident-done"; inventory: CarInventory }
   | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
   | { type: "module-event"; moduleId: string; event: ExplorerEvent }
   | { type: "module-done"; moduleId: string; result: ExplorerResult }
   | { type: "status"; text: string }
   | { type: "error"; text: string };
+
+/** GET /api/scan/sweep/status while a sweep runs (Pi daemon and desk simulator). */
+export interface SweepProgress {
+  running: boolean;
+  phase?: "listen" | "probe" | "confirm" | "done" | "error";
+  iface?: string; lo?: string; hi?: string;
+  probed?: number; total?: number; current?: string | null;
+  hits?: { req: string; resp: string }[];
+  skipped?: string[];
+  broadcast?: number;
+  elapsed?: number;
+  error?: string;
+}
 
 export interface DeepMapDeps {
   iface: string;

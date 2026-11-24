@@ -18,7 +18,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { checkRequest, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import type { ProtectedKind } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
 import {
@@ -26,6 +27,7 @@ import {
   loadLibrary, piGet, piPost, readVin, targetFor,
 } from "../electron/pipeline/vehiclePipeline";
 import type { DiscoveredModule, VehicleExplorerEvent } from "../electron/resolver/vehicleExplorer";
+import { identifyAndSave } from "../electron/pipeline/identityPipeline";
 import { getApiKey } from "./settings";
 
 const HELP = `vehicle — run the vehicle pipeline against a Super Device, no Electron.
@@ -39,13 +41,20 @@ Commands
   discover [--deep [--ext]]   probe every diagnostic address (+ the vehicle's known ones; --deep = sweep 600-7FF first,
                               automatic on a first discovery; --ext adds 29-bit), read each module's identification, save
   census                      AI names every discovered module (1 API call), save
+  identify [<module>]         read every module's identity — part numbers, software/hardware versions, SERIAL
+                              NUMBER, supplier, build date, the VIN it holds — and file it under the car's VIN.
+                              No AI, identification reads only; airbag / immobiliser in their current session only.
+                              [--no-ext] skips the extended-session second pass
   modules                     the bound vehicle's modules and how far each is mapped
   map <module>                AI deep-map of ONE module, live and read-only, save
                               (<module> = its id, an address like 7E8, or part of its name)
   capture [--note TEXT]       diagnostic capture → <workspace>/reports/capture-*.json
   run [--map <module>] [--label TEXT] [--no-census] [--deep [--ext] | --no-deep]
-                              vin → discover → census → (map) → capture, recorded as one session
+                              vin → discover → census → identify → (map) → capture, recorded as one session
                               on the device and fetched here at the end
+  audit <recording id|path>   prove a recorded session was read-only: every request sent is checked against the
+                              read-only policy (airbag / immobiliser addresses with the stricter rule). No device
+                              needed — works on fetched recordings. Exit code 1 if anything was not a read.
   rec status | start <label> | stop | list | fetch [<id>]
                               the device's ISO-TP recorder; fetch copies recordings to
                               <workspace>/recordings/<device>/ (no id: every one not yet here)
@@ -66,7 +75,7 @@ AI steps (census, map) need ANTHROPIC_API_KEY in the environment or in <repo>/.e
 // ---- small plumbing -------------------------------------------------------------
 
 interface Args { _: string[]; flags: Record<string, string | boolean> }
-const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "json", "help", "no-census", "all"]);
+const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all"]);
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {} };
@@ -290,6 +299,105 @@ async function runCensus(ctx: Ctx, profile: VehicleProfile, discovered: Paramete
   return { profile: saved, census };
 }
 
+/** Read every module's identity and file it under the car's VIN. Prints records as they arrive. */
+async function runIdentify(ctx: Ctx, profile: VehicleProfile, moduleIds?: string[]) {
+  const st = await readState(ctx);
+  const vin = (typeof ctx.args.flags.vin === "string" ? ctx.args.flags.vin : st.vin ?? "").toUpperCase() || undefined;
+  const known = vin && profile.knownVins?.some((o) => o.vin === vin) ? vin : undefined;
+  const simStatus = (await piGet(ctx.host, "/api/sim/status").catch(() => null)) as { running?: boolean; vehicle?: string; name?: string; iface?: string } | null;
+  const sim = simStatus?.running && (ctx.iface === "vcan0" || /127\.0\.0\.1:8765$/.test(ctx.host)) ? (simStatus.name || simStatus.vehicle || "simulator") : null;
+  say(`Reading module identity on ${ctx.iface} for ${ymm(profile)}${known ? ` · VIN ${known}` : " · no VIN bound — the result is shown, not filed per car"}${sim ? ` · SIMULATOR (${sim})` : ""}`);
+  const t0 = Date.now();
+  const { profile: saved, inventory } = await identifyAndSave(ctx.vehicleLibDir, {
+    host: ctx.host, iface: ctx.iface, profile, vin: known, moduleIds, sim, extended: !ctx.args.flags["no-ext"],
+    onEvent: (e) => {
+      if (e.type === "ident-module" && e.phase === "start") say(`\n  [${e.index + 1}/${e.total}] ${oneLine(e.label, 70)}${e.protectedKind ? `   (protected: ${e.protectedKind} — current session only)` : ""}`);
+      else if (e.type === "ident-record") say(`      ${pad(e.record.label, 26)} ${pad(oneLine(e.record.value, 48), 48)} ${e.record.id}${e.record.session === "03" ? " · ext" : ""}`);
+      else if (e.type === "ident-module" && e.phase === "done" && e.entry) {
+        const x = e.entry;
+        if (x.status !== "ok") say(`      → ${x.status}${x.refused?.length ? ` · refused: ${x.refused.slice(0, 6).join(", ")}${x.refused.length > 6 ? "…" : ""}` : ""}${x.note ? ` · ${x.note}` : ""}`);
+      }
+    },
+  });
+  const ok = inventory.modules.filter((m) => m.status === "ok").length;
+  const serials = inventory.modules.filter((m) => m.summary.serial).length;
+  say(`\nIdentity read in ${Math.round((Date.now() - t0) / 1000)} s — ${ok}/${inventory.modules.length} modules identified, ${serials} serial number(s).`);
+  say(`  ${pad("module", 8)} ${pad("part no.", 14)} ${pad("serial", 20)} ${pad("software", 24)} supplier`);
+  for (const m of inventory.modules) {
+    const x = m.summary;
+    say(`  ${pad(m.responseId, 8)} ${pad(x.partNo ?? "—", 14)} ${pad(oneLine(x.serial ?? "—", 20), 20)} ${pad(oneLine(x.swPartNo ?? x.swVersion ?? "—", 24), 24)} ${oneLine(x.supplier ?? (m.status === "ok" ? "" : m.status), 24)}`);
+  }
+  const changes = known ? saved.knownVins?.find((o) => o.vin === known)?.inventoryChanges?.filter((c) => c.at === inventory.at) ?? [] : [];
+  if (changes.length) {
+    say(`\nCHANGED SINCE THE LAST VISIT (${changes.length}):`);
+    for (const c of changes) say(`  ${c.label}: ${c.key} ${c.from} → ${c.to}`);
+  }
+  say(known ? `Filed under VIN ${known} in ${saved.id}.` : `Part numbers folded into ${saved.id}; bind a VIN ("vin") to keep serial numbers per car.`);
+  return { profile: saved, inventory, changes };
+}
+
+async function cmdIdentify(ctx: Ctx) {
+  const profile = await currentProfile(ctx);
+  const q = ctx.args._[1];
+  const ids = q ? [findModule(profile, q).id] : undefined;
+  const r = await runIdentify(ctx, profile, ids);
+  return { ok: true, inventory: r.inventory, changes: r.changes, profile: r.profile.id };
+}
+
+/** Find a recording by id (any device folder under recordings/) or take a path. */
+function findRecording(recordingsDir: string, ref: string): string {
+  if (fs.existsSync(ref)) return ref;
+  if (fs.existsSync(recordingsDir)) {
+    for (const dev of fs.readdirSync(recordingsDir)) {
+      const f = path.join(recordingsDir, dev, `${ref.replace(/\.jsonl$/, "")}.jsonl`);
+      if (fs.existsSync(f)) return f;
+    }
+  }
+  throw new UsageError(`No recording "${ref}" in ${recordingsDir} — fetch it first (rec fetch ${ref}).`);
+}
+
+/** Every request in a recording, checked against the read-only policy. */
+async function cmdAudit(ctx: Ctx) {
+  const ref = ctx.args._[1];
+  if (!ref) throw new UsageError("audit <recording id or path>");
+  const file = findRecording(ctx.recordingsDir, ref);
+  // which request ids belong to protected modules: from every library vehicle, plus the known Mercedes ones
+  const guarded = new Map<string, ProtectedKind>();
+  for (const p of await loadLibrary(ctx.vehicleLibDir)) {
+    for (const m of p.modules) {
+      const k = protectedModule({ category: m.category, label: m.label })?.kind;
+      const tx = (m.addressing?.request ?? "").toUpperCase();
+      if (k && tx) guarded.set(tx, k);
+    }
+  }
+  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean);
+  const bySid = new Map<string, number>();
+  const violations: string[] = [];
+  let n = 0, prot = 0, sim: string | null = null;
+  for (const line of lines) {
+    let e: { type?: string; tx?: string; req?: string; sim?: string; iface?: string; kind?: string };
+    try { e = JSON.parse(line); } catch { continue; }
+    if (e.type === "session" && e.sim) sim = e.sim;
+    if (e.type !== "x" || !e.req) continue;
+    n += 1;
+    const tx = (e.tx ?? "").toUpperCase();
+    const kind = guarded.get(tx) ?? null;
+    if (kind) prot += 1;
+    const sid = e.req.slice(0, 2).toLowerCase();
+    bySid.set(sid, (bySid.get(sid) ?? 0) + 1);
+    const v = checkRequest(e.req, { protectedKind: kind });
+    if (!v.ok) violations.push(`${e.iface ?? "?"} ${tx} ${e.req}: ${v.reason}`);
+  }
+  say(`Audit of ${path.basename(file)}${sim ? ` (virtual vehicle: ${sim})` : ""}`);
+  say(`  ${n} request(s) sent · ${prot} to airbag / immobiliser addresses (${[...new Set([...guarded.keys()])].join(", ") || "none known"})`);
+  say(`  by service: ${[...bySid.entries()].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${k.toUpperCase()}×${c}`).join("  ")}`);
+  if (violations.length) {
+    say(`\n  NOT READ-ONLY — ${violations.length} request(s) outside the policy:`);
+    for (const v of violations.slice(0, 40)) say(`    ${v}`);
+  } else say(`\n  READ-ONLY: every request was a read the policy allows${prot ? "; protected modules got identity / fault-memory reads only, no session change" : ""}.`);
+  return { ok: violations.length === 0, file, requests: n, protectedRequests: prot, services: Object.fromEntries(bySid), violations };
+}
+
 async function cmdCensus(ctx: Ctx) {
   const profile = await currentProfile(ctx);
   const discovered = discoveredFromProfile(profile);
@@ -503,14 +611,14 @@ async function cmdRun(ctx: Ctx) {
   let profile: VehicleProfile | null = null;
   let discovered: DiscoveredModule[] = [];
   try {
-    say("\n[1/5] VIN");
+    say("\n[1/6] VIN");
     const v = await cmdVin(ctx);
     steps.vin = { ok: v.ok, vin: v.vin ?? null, kind: v.kind ?? null, profile: v.profile?.id ?? null };
     profile = v.profile ?? null;
     if (!v.ok) problems.push("no VIN from the car");
     else if (!profile) problems.push("VIN read but not bound to a library vehicle");
 
-    say("\n[2/5] Discover");
+    say("\n[2/6] Discover");
     discovered = await runDiscover(ctx, profile);
     printDiscovered(discovered);
     if (profile) {
@@ -520,7 +628,7 @@ async function cmdRun(ctx: Ctx) {
     steps.discover = { found: discovered.length, responders: discovered.map((d) => d.responseId) };
     if (!discovered.length) problems.push("no module answered on the bus");
 
-    say("\n[3/5] Census");
+    say("\n[3/6] Census");
     if (ctx.args.flags["no-census"]) say("skipped (--no-census)");
     else if (!profile || !discovered.length) say("skipped (needs a bound vehicle and at least one module)");
     else if (!getApiKey()) { say("skipped — no ANTHROPIC_API_KEY (environment or <repo>/.env)"); problems.push("census skipped: no API key"); }
@@ -532,7 +640,20 @@ async function cmdRun(ctx: Ctx) {
       } catch (e) { say(`Census failed — ${(e as Error).message} (the modules are saved; map still works)`); problems.push(`census failed: ${(e as Error).message}`); }
     }
 
-    say("\n[4/5] Deep-map one module");
+    say("\n[4/6] Identify every module (part numbers, versions, serial numbers)");
+    if (!profile || !discovered.length) say("skipped (needs a bound vehicle and at least one module)");
+    else {
+      try {
+        const idr = await runIdentify(ctx, profile);
+        profile = idr.profile;
+        steps.identify = {
+          modules: idr.inventory.modules.length, identified: idr.inventory.modules.filter((m) => m.status === "ok").length,
+          serials: idr.inventory.modules.filter((m) => m.summary.serial).length, changes: idr.changes.length,
+        };
+      } catch (e) { say(`Identity read failed — ${(e as Error).message}`); problems.push(`identify failed: ${(e as Error).message}`); }
+    }
+
+    say("\n[5/6] Deep-map one module");
     const q = typeof ctx.args.flags.map === "string" ? ctx.args.flags.map : "";
     if (!q) say("skipped (pass --map <module> to deep-map one)");
     else if (!profile) say("skipped (no library vehicle bound)");
@@ -545,7 +666,7 @@ async function cmdRun(ctx: Ctx) {
       } catch (e) { say(`Deep-map failed — ${(e as Error).message}`); problems.push(`deep-map failed: ${(e as Error).message}`); }
     }
 
-    say("\n[5/5] Capture");
+    say("\n[6/6] Capture");
     const cap = await runCapture(ctx, { cli: true, recording: recId, steps, problems });
     steps.capture = cap;
   } finally {
@@ -572,6 +693,7 @@ async function main(): Promise<number> {
 
   const root = findProjectRoot();
   loadEnvFile(root);
+  if (cmd === "audit") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
   const hostRaw = (typeof args.flags.host === "string" ? args.flags.host : process.env.SD_HOST ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!hostRaw) { process.stderr.write("Which device? Pass --host <address[:port]> (or set SD_HOST). Example: --host 100.91.185.100\n"); return 2; }
   const host = /:\d+$/.test(hostRaw) ? hostRaw : `${hostRaw}:8080`;
@@ -586,14 +708,14 @@ async function main(): Promise<number> {
 
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
-    census: cmdCensus, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
+    census: cmdCensus, identify: cmdIdentify, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
   };
   const fn = commands[cmd];
   if (!fn) { process.stderr.write(`Unknown command "${cmd}".\n\n${HELP}\n`); return 2; }
   try {
     // At a real car this must never go unnoticed: with the can1↔can0 jumper still in,
     // a running virtual vehicle answers on can0 as if it were the car.
-    if (["vin", "discover", "census", "map", "capture", "run"].includes(cmd) && ctx.iface !== "vcan0") {
+    if (["vin", "discover", "census", "identify", "map", "capture", "run"].includes(cmd) && ctx.iface !== "vcan0") {
       const sim = (await piGet(ctx.host, "/api/sim/status").catch(() => null)) as { running?: boolean; vehicle?: string; iface?: string } | null;
       if (sim?.running) say(`NOTE: a virtual vehicle (${sim.vehicle}) is running on ${sim.iface}. If the can1↔can0 jumper is in, what answers on ${ctx.iface} is the SIMULATOR, not a car. At a car: "sim stop" and pull the jumper.\n`);
     }

@@ -96,6 +96,7 @@ export type IpcChannel =
   | "vehicleExplorer:discover"
   | "vehicleExplorer:commitDiscovery"
   | "vehicleExplorer:start"
+  | "vehicleExplorer:identify"
   | "vehicleExplorer:stop"
   | "vehicleId:resolve"
   | "vehicleId:decodeOnline"

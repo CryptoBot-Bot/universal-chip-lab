@@ -17,7 +17,8 @@
     "build:cli": "node scripts/build-cli.mjs",
     "vehicle": "node scripts/build-cli.mjs && node dist-cli/vehicle.cjs",
     "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit && tsc -p cli/tsconfig.json --noEmit",
-    "clean": "rimraf dist dist-electron dist-cli release"
+    "clean": "rimraf dist dist-electron dist-cli release",
+    "test": "node scripts/run-tests.mjs"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.102.0",

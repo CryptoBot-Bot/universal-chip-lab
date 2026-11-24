@@ -1,26 +1,33 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 
-import { applyCensus, censusInputFor, lastScanFor, protectedModule, recordScan } from "@ecu/vehicle-db";
+import { applyCensus, censusInputFor, inventoryFor, lastScanFor, protectedModule, recordScan } from "@ecu/vehicle-db";
 import type { SystemScanResult, VehicleModule, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
 
 import { Api, type DiscoveredModule, type VehicleExplorerEvent } from "../../lib/api";
-import { CATEGORY_LABEL, CATEGORY_ORDER, addressedSystems, clean, clearDtcs, readDtcs, scanResult, ymmLabel } from "../../lib/diag";
+import { CATEGORY_LABEL, CATEGORY_ORDER, addressedSystems, clean, clearDtcs, readDtcs, scanResult, splitLabel, ymmLabel } from "../../lib/diag";
+
+export { splitLabel };
 import type { PendingWrite } from "../../lib/writeActions";
 import { WriteConfirmModal } from "../WriteConfirmModal";
 import { Icon } from "./icons";
+import { LiveMap, useLiveRun } from "./LiveMap";
+import { ModuleInventory } from "./ModuleInventory";
 
 /**
  * The vehicle page (B1 layout) — what a scan tool shows once the car is identified:
  *   left column    the vehicle, its VIN and spec, Auto Scan / Fault Scan, its scans;
  *   Systems        counters that double as filters, a tile per system grouped by
  *                  area (faults show their count), then the faults grouped by system;
+ *   Modules        this car's module inventory: part numbers, versions, serial numbers;
+ *   Live map       while a scan runs: the address search, systems appearing, identities
+ *                  filling in — the car being mapped, as it happens;
  *   Service        whole-vehicle actions (read all, erase all, learn all);
  *   History        this car's earlier scans.
  * A car that has been here before opens with its systems and its last scan
  * already on screen — nothing has to be re-discovered to start working.
  */
 
-export type HubTab = "scan" | "units" | "service" | "history";
+export type HubTab = "scan" | "units" | "identity" | "service" | "history";
 export type RowState = SystemScanResult | "scanning";
 
 interface Props {
@@ -41,20 +48,6 @@ interface Props {
 
 type Filter = "all" | "fault" | "clean" | "unread" | "protected";
 type Kind = "fault" | "clean" | "unread" | "scanning";
-
-/** "EZS — Electronic Ignition Switch / …" → { short: "EZS", name: "Electronic Ignition Switch / …" };
- *  "CDI Engine Control Unit (ECM, OM642 …)" → { short: "ECM", name: "CDI Engine Control Unit" }. */
-export function splitLabel(label: string): { short: string; name: string } {
-  const dash = /^([A-Z][A-Za-z0-9-]{1,8})\s+[—–-]\s+(.+)$/.exec(label);
-  if (dash) return { short: dash[1], name: dash[2].replace(/\s*\(.*$/, "") };
-  const before = label.replace(/\s*\(.*$/, "").replace(/\s+[—–]\s+.*$/, "").trim();
-  const paren = /\(([A-Z]{2,5})(?:[,)\s])/.exec(label);
-  if (paren) return { short: paren[1], name: before || label };
-  const lead = /^([A-Z]{2,6})\b/.exec(label);
-  if (lead) return { short: lead[1], name: before.replace(/^[A-Z]{2,6}\s*(\/\s*)?/, "") || before };
-  const first = label.split(/[\s/(]+/)[0] || label;
-  return { short: first.length > 10 ? first.slice(0, 10) : first, name: before };
-}
 
 function kindOf(r: RowState | undefined): Kind {
   if (r === "scanning") return "scanning";
@@ -82,7 +75,9 @@ function summary(systems: SystemScanResult[]): string {
 
 export function VehicleHub(p: Props) {
   const { host, iface, online, profile, vin, tab, rows, setRows } = p;
-  const [busy, setBusy] = useState<null | "auto" | "fault" | "erase" | "learn">(null);
+  const [busy, setBusy] = useState<null | "auto" | "fault" | "erase" | "learn" | "identify">(null);
+  const live = useLiveRun();
+  const [showLive, setShowLive] = useState(false);
   const [phase, setPhase] = useState("");
   const [prog, setProg] = useState<{ done: number; total: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -100,9 +95,10 @@ export function VehicleHub(p: Props) {
   const shown = systems.map((m) => stateOf(m)).filter((r): r is SystemScanResult => !!r && r !== "scanning");
   const learned = systems.filter((m) => m.explored).length;
 
-  async function scan(kind: "auto" | "fault") {
+  async function scan(kind: "auto" | "fault", opts: { fullSearch?: boolean } = {}) {
     if (!online) { setErr("Not connected to the vehicle — connect a device with the pill at the top right, then scan."); return; }
     stop.current = false; setBusy(kind); setErr(null); setNote(null); setRows({});
+    if (kind === "auto") { live.reset(); setShowLive(true); }
     const t0 = Date.now();
     try {
       let cur = profile; let v = vin;
@@ -117,8 +113,8 @@ export function VehicleHub(p: Props) {
         // First time this model is scanned: also sweep the diagnostic address range (about a
         // minute, tester-present only) so maker-specific modules no list knows are found once;
         // after that the profile's own addresses are re-asked on every scan.
-        const firstVisit = !cur.fingerprint;
-        setPhase(firstVisit ? "First scan of this model: searching every diagnostic address (about a minute)…" : "Detecting systems on the bus…");
+        const firstVisit = !cur.fingerprint || !!opts.fullSearch;
+        setPhase(firstVisit ? `${opts.fullSearch ? "Full re-map" : "First scan of this model"}: searching every diagnostic address (about a minute)…` : "Detecting systems on the bus…");
         const off = Api.vehicleExplorer.onEvent((e: VehicleExplorerEvent) => {
           if (e.type === "sweep") setPhase(e.ok ? `Address search done — ${e.found} module address${e.found === 1 ? "" : "es"} answered. Identifying…` : "Address search failed — scanning the known addresses only…");
           if (e.type === "discover") { setProg({ done: e.done, total: e.total }); setPhase(`Detecting systems on the bus… ${e.found} found`); }
@@ -145,6 +141,20 @@ export function VehicleHub(p: Props) {
             cur = await p.saveProfile(applyCensus(cur, census.modules, new Date().toISOString()));
           } catch (e) { setNote(`The systems are saved; naming them did not work (${(e as Error).message}). They keep their address-based names until the next scan.`); }
         }
+      }
+      // Identity of every module that answered: part numbers, versions, serial numbers.
+      // Identification reads only (airbag / immobiliser in their current session only).
+      if (kind === "auto" && responders && responders.size && !stop.current) {
+        const ids = addressedSystems(cur).filter((m) => responders!.has(clean(m.addressing?.response))).map((m) => m.id);
+        setPhase(`Reading the identity of ${ids.length} module${ids.length === 1 ? "" : "s"}…`); setProg(null);
+        const offId = Api.vehicleExplorer.onEvent((e: VehicleExplorerEvent) => {
+          if (e.type === "ident-module" && e.phase === "start") { setPhase(`Identity: ${e.label}`); setProg({ done: e.index, total: e.total }); }
+        });
+        try {
+          const r = await Api.vehicleExplorer.identifyModules({ host, iface, profile: cur, vin: v || undefined, moduleIds: ids, sim: p.simName ?? null });
+          cur = r.profile; p.adoptProfile(cur);
+        } catch (e) { setNote(`The identity read did not finish (${(e as Error).message}); fault memory is read anyway.`); }
+        finally { offId(); }
       }
       const list = addressedSystems(cur);
       const results: SystemScanResult[] = [];
@@ -196,6 +206,24 @@ export function VehicleHub(p: Props) {
         await scan("fault");
       })(),
     });
+  }
+
+  async function readIdentity() {
+    if (!online) { setErr("Not connected — connect a device with the pill at the top right."); return; }
+    stop.current = false; setBusy("identify"); setErr(null); setNote(null);
+    live.reset(); setShowLive(true);
+    const t0 = Date.now();
+    const off = Api.vehicleExplorer.onEvent((e: VehicleExplorerEvent) => {
+      if (e.type === "ident-module" && e.phase === "start") { setPhase(`Identity: ${e.label}`); setProg({ done: e.index, total: e.total }); }
+    });
+    try {
+      const r = await Api.vehicleExplorer.identifyModules({ host, iface, profile, vin: vin || undefined, sim: p.simName ?? null });
+      p.adoptProfile(r.profile);
+      const ok = r.inventory.modules.filter((m) => m.status === "ok").length;
+      const serials = r.inventory.modules.filter((m) => m.summary.serial).length;
+      setNote(`Identity read in ${Math.round((Date.now() - t0) / 1000)} s — ${ok}/${r.inventory.modules.length} modules identified, ${serials} serial number${serials === 1 ? "" : "s"}.${vin ? " Filed under this car." : " Read the VIN to keep serial numbers per car."}`);
+    } catch (e) { setErr((e as Error).message); }
+    finally { off(); setBusy(null); setPhase(""); setProg(null); }
   }
 
   async function learnAll() {
@@ -320,7 +348,7 @@ export function VehicleHub(p: Props) {
 
       <div className="dg-hub-main">
         <div className="dg-seg" role="tablist" aria-label="Vehicle sections">
-          {([["scan", "Systems"], ["service", "Service"], ["history", `History${scans.length ? ` (${scans.length})` : ""}`]] as [HubTab, string][]).map(([id, label]) => (
+          {([["scan", "Systems"], ["identity", "Modules & serials"], ["service", "Service"], ["history", `History${scans.length ? ` (${scans.length})` : ""}`]] as [HubTab, string][]).map(([id, label]) => (
             <button key={id} role="tab" aria-selected={view === id} className={view === id ? "on" : ""} onClick={() => p.onTab(id)}>{label}</button>
           ))}
         </div>
@@ -333,6 +361,9 @@ export function VehicleHub(p: Props) {
             <span style={{ fontWeight: 600 }}>{phase || "Working…"}</span>
             {prog && <div className="ual-progress"><i style={{ width: `${prog.total ? Math.round((prog.done / prog.total) * 100) : 0}%` }} /></div>}
           </div>
+        )}
+        {(showLive || (busy === "auto" || busy === "identify")) && (
+          <LiveMap run={live.run} carVin={vin || undefined} busy={busy === "auto" || busy === "identify"} onClose={() => setShowLive(false)} />
         )}
 
         {view === "scan" && (
@@ -395,6 +426,17 @@ export function VehicleHub(p: Props) {
           </>
         )}
 
+        {view === "identity" && (
+          <ModuleInventory
+            inventory={inventoryFor(profile, vin)}
+            changes={unit?.inventoryChanges ?? []}
+            carVin={vin || undefined}
+            busy={!!busy}
+            canRead={online}
+            onRead={() => void readIdentity()}
+          />
+        )}
+
         {view === "service" && (
           <>
             <div className="dg-tiles" style={{ margin: 0 }}>
@@ -403,6 +445,12 @@ export function VehicleHub(p: Props) {
               </button>
               <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("scan"); quickErase(); }}>
                 <span className="ico"><Icon name="broom" size={22} /></span><span className="t">Erase all codes</span><span className="d">Clear the fault memory of every system that reports a fault. Confirms first; the device refuses it while it is read-only.</span>
+              </button>
+              <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("scan"); void scan("auto", { fullSearch: true }); }}>
+                <span className="ico"><Icon name="car" size={22} /></span><span className="t">Full re-map</span><span className="d">Search every diagnostic address again (about a minute, tester-present only), identify every module, read every fault memory — watch it on the live map.</span>
+              </button>
+              <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("identity"); void readIdentity(); }}>
+                <span className="ico"><Icon name="id" size={22} /></span><span className="t">Read identity</span><span className="d">Part numbers, software and hardware versions, serial numbers and the VIN of every module. Identification reads only.</span>
               </button>
               <button className="dg-tile" disabled={!!busy} onClick={() => setLearnAsk(true)}>
                 <span className="ico"><Icon name="spark" size={22} /></span><span className="t">Learn all systems</span><span className="d">The AI explores every system not learned yet, read-only, and saves what each can do. Airbag and immobiliser are left out.</span>
