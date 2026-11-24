@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
 import {
@@ -369,7 +369,10 @@ async function cmdMap(ctx: Ctx) {
   const q = ctx.args._[1];
   if (!q) throw new UsageError(`map needs a module: its id, an address (7E8) or part of its name. See "modules".`);
   const profile = await currentProfile(ctx);
-  return runMap(ctx, profile, findModule(profile, q));
+  const mod = findModule(profile, q);
+  const guard = protectedModule({ category: mod.category, label: mod.label, summary: (mod as { summary?: string }).summary });
+  if (guard) throw new UsageError(`${mod.label}: not mapped — ${guard.reason}.`);
+  return runMap(ctx, profile, mod);
 }
 
 async function runCapture(ctx: Ctx, extra: unknown) {

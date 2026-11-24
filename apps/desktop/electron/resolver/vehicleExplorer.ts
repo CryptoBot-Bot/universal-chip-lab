@@ -1,4 +1,5 @@
 import type { VehicleModuleExploration } from "@ecu/vehicle-db";
+import { protectedModule } from "@ecu/vehicle-db";
 
 import {
   exploreModule,
@@ -343,6 +344,8 @@ export async function deepMapVehicle(
   for (let i = 0; i < targets.length; i++) {
     if (deps.shouldStop()) { deps.onEvent({ type: "status", text: "Stopped by operator." }); break; }
     const t = targets[i];
+    const guard = protectedModule({ category: t.category, displayName: t.displayName, summary: t.summary });
+    if (guard) { deps.onEvent({ type: "error", text: `${t.displayName}: not mapped — ${guard.reason}` }); continue; }
     deps.onEvent({ type: "module-start", moduleId: t.moduleId, displayName: t.displayName, index: i, total: targets.length });
     try {
       const result = await exploreModule(

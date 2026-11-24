@@ -59,6 +59,8 @@ export function DiagnosticsTab() {
   const [paired, setPaired] = useState<PairedDevice[]>([]);
   const [hostInput, setHostInput] = useState("");
   const [sim, setSim] = useState<{ running: boolean; vehicle?: string | null; name?: string | null } | null>(null);
+  // The device's write gate: "read-only" (writes disabled on the Pi), "disarmed" or "armed".
+  const [gate, setGate] = useState<string | null>(null);
 
   const profile = useMemo(() => profiles.find((x) => x.id === profileId) ?? null, [profiles, profileId]);
   const profilesRef = useRef(profiles); profilesRef.current = profiles;
@@ -86,8 +88,12 @@ export function DiagnosticsTab() {
   useEffect(() => {
     if (!online) { setSim(null); return; }
     let stop = false;
-    const poll = () => Api.superDevice.get<{ running: boolean; vehicle?: string | null; name?: string | null }>(host, "/api/sim/status")
-      .then((s) => { if (!stop) setSim(s); }).catch(() => { if (!stop) setSim(null); });
+    const poll = () => {
+      void Api.superDevice.get<{ running: boolean; vehicle?: string | null; name?: string | null }>(host, "/api/sim/status")
+        .then((s) => { if (!stop) setSim(s); }).catch(() => { if (!stop) setSim(null); });
+      void Api.superDevice.get<{ mode?: string }>(host, "/api/write-gate")
+        .then((g) => { if (!stop) setGate(g?.mode ?? null); }).catch(() => { if (!stop) setGate(null); });
+    };
     void poll();
     const iv = window.setInterval(() => void poll(), 8000);
     return () => { stop = true; window.clearInterval(iv); };
@@ -229,6 +235,8 @@ export function DiagnosticsTab() {
         </div>
         <span className="dg-spacer" />
         {demo && <span className="dg-chip demo" title="Answers come from the desk simulator on this PC, not from a car.">DEMO VEHICLE{sim?.name ? ` · ${sim.name}` : ""}</span>}
+        {!demo && gate === "read-only" && <span className="dg-chip" title="The device refuses every write (erase codes, coding, resets, routines) before it reaches the car. Writes can only be enabled on the Pi itself.">READ-ONLY</span>}
+        {!demo && gate === "armed" && <span className="dg-chip" title="The device's write gate is armed for one module right now.">WRITE GATE ARMED</span>}
         {!demo && sim?.running && <span className="dg-chip" title="A virtual vehicle is running on the device. With the can1↔can0 jumper in, it answers instead of a car.">VIRTUAL VEHICLE RUNNING · {sim.vehicle}</span>}
         <div className={`dg-vci ${online ? "on" : sd.link === "error" ? "err" : sd.link === "connecting" ? "busy" : ""}`}>
           <span className="dot" />

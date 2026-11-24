@@ -58,7 +58,7 @@ def version_info():
         "python": platform.python_version(),
         "port": PORT,
         "files": {n: _sha256(os.path.join(HERE, n)) for n in ("superdevice_ui.py", "virtual_vehicle.py", "powerguard.py")},
-        "features": ["version", "recorder", "replay", "vcan", "sweep", "bus-health"],
+        "features": ["version", "recorder", "replay", "vcan", "sweep", "bus-health", "write-gate"],
     }
 
 
@@ -177,6 +177,19 @@ def send_frame(iface, cid, data):
         return "bad frame"
     if len(data) % 2:
         return "data must be whole bytes"
+    if iface in HW_IFACES:
+        # A raw frame can impersonate any module (speed, gear, a diagnostic write), so on a
+        # real bus it is a write: it goes out only while the gate is armed for this ID.
+        b = bytes.fromhex(data)
+        pci = b[0] >> 4 if b else 0
+        inner = b[1:1 + (b[0] & 0x0F)] if b and pci == 0 else (b[2:] if b and pci == 1 else b"")
+        cls = write_class(inner) if inner else None
+        if cls and cls.startswith("never:"):
+            refusal = gate_check(iface, int(cid, 16), inner)
+        else:
+            refusal = gate_check(iface, int(cid, 16), b"", what=f"raw frame {cid.upper()}#{data.lower()}{f' carrying {cls}' if cls else ''}")
+        if refusal:
+            return refusal
     result = sh(f"cansend {iface} {cid}#{data}").stderr.strip() or "sent"
     REC.log({"type": "tx", "iface": iface, "id": cid.upper(), "data": data.lower(), "result": result})
     return result
@@ -496,8 +509,123 @@ class Recorder:
 REC = Recorder(os.path.join(DATA_DIR, "recordings"))
 
 
+# ---- write gate ------------------------------------------------------------------------
+# Every request that can CHANGE a module is refused here, before it reaches the bus, unless
+# the gate is armed — and it can only be armed when writes are enabled ON THE PI
+# (DATA_DIR/write-gate.json {"writes_enabled": true}, root-owned). Nothing over the network
+# can enable writes. Default and after every boot: read-only. Set 2026-11-23 by Dmytro:
+# "for now we must learn how to reliably READ the cars only".
+WRITE_SIDS = {
+    0x04: "OBD clear codes / MIL", 0x08: "OBD on-board system control", 0x11: "ECU reset",
+    0x14: "clear fault memory", 0x28: "communication control", 0x2E: "write data by identifier",
+    0x2F: "input/output control", 0x30: "KWP input/output control", 0x31: "routine control",
+    0x32: "KWP stop routine", 0x34: "request download", 0x35: "request upload", 0x36: "transfer data",
+    0x37: "transfer exit", 0x38: "routine by address / file transfer", 0x39: "KWP stop routine by address",
+    0x3B: "KWP write data by local id", 0x3D: "write memory by address", 0x83: "access timing parameters",
+    0x84: "secured data transmission", 0x85: "control DTC setting", 0x86: "response on event",
+    0x87: "link control (bus speed change)",
+}
+GATE_FILE = os.path.join(DATA_DIR, "write-gate.json")
+GATE = {"until": 0.0, "iface": None, "tx": None, "owner": "", "reason": "", "writes": 0, "refused": 0}
+GATE_LOCK = threading.Lock()
+
+
+def write_class(payload):
+    """What a diagnostic payload would change, or None for a read. 'never' = refused even armed."""
+    if not payload:
+        return None
+    sid = payload[0]
+    sub = payload[1] if len(payload) > 1 else None
+    if sid == 0x10 and sub in (0x04, 0x84):
+        return "never: safety-system diagnostic session (airbag scrapping / deployment path)"
+    if sid == 0x10 and sub in (0x02, 0x82, 0x85):
+        return "programming (bootloader) session"
+    if sid == 0x27 and sub is not None and sub % 2 == 0:
+        return "security access key"
+    return WRITE_SIDS.get(sid)
+
+
+def writes_enabled():
+    try:
+        with open(GATE_FILE) as f:
+            return bool(json.load(f).get("writes_enabled"))
+    except Exception:
+        return False
+
+
+def gate_status():
+    with GATE_LOCK:
+        left = max(0.0, GATE["until"] - time.time())
+        armed = left > 0
+        return {"writes_enabled": writes_enabled(), "armed": armed, "seconds_left": round(left, 1),
+                "scope": {"iface": GATE["iface"], "tx": f"{GATE['tx']:X}" if GATE["tx"] is not None else None} if armed else None,
+                "owner": GATE["owner"] if armed else "", "reason": GATE["reason"] if armed else "",
+                "writes_since_boot": GATE["writes"], "refused_since_boot": GATE["refused"],
+                "mode": "armed" if armed else ("disarmed" if writes_enabled() else "read-only")}
+
+
+def gate_arm(owner, reason, seconds=60, iface=None, tx=None):
+    if not writes_enabled():
+        return {"ok": False, "error": "read-only mode: writes are disabled on this device "
+                                      f"(enable them on the Pi itself in {GATE_FILE})", **gate_status()}
+    try:
+        secs = max(5.0, min(float(seconds), 600.0))
+        tx_id = int(str(tx), 16) if tx not in (None, "") else None
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad seconds / tx"}
+    if iface is not None and iface not in IFACES:
+        return {"ok": False, "error": "bad iface"}
+    if not (owner and reason):
+        return {"ok": False, "error": "arming needs an owner and a reason"}
+    with GATE_LOCK:
+        GATE.update(until=time.time() + secs, iface=iface, tx=tx_id, owner=str(owner)[:60], reason=str(reason)[:160])
+    REC.log({"type": "gate", "action": "arm", "owner": owner, "reason": reason, "seconds": secs, "iface": iface, "tx": tx})
+    return {"ok": True, **gate_status()}
+
+
+def gate_disarm(owner=""):
+    with GATE_LOCK:
+        was = GATE["until"] > time.time()
+        GATE.update(until=0.0, iface=None, tx=None, owner="", reason="")
+    if was:
+        REC.log({"type": "gate", "action": "disarm", "owner": owner})
+    return {"ok": True, **gate_status()}
+
+
+def gate_check(iface, tx_id, payload, what=None):
+    """None when the request may go out; else the refusal text (nothing is sent)."""
+    what = what or write_class(bytes(payload))
+    if what is None:
+        return None
+    if what.startswith("never:"):
+        allowed = False
+    elif iface in VIRT_IFACES:
+        allowed = True   # the virtual vehicle: practising writes is the point of it
+    else:
+        with GATE_LOCK:
+            allowed = (GATE["until"] > time.time() and GATE["iface"] in (None, iface)
+                       and GATE["tx"] in (None, tx_id))
+    sid = bytes(payload)[0] if payload else 0
+    with GATE_LOCK:
+        GATE["writes" if allowed else "refused"] += 1
+    REC.log({"type": "write" if allowed else "write-refused", "iface": iface, "tx": f"{tx_id:X}",
+             "req": bytes(payload).hex(), "what": what, "owner": GATE["owner"]})
+    if allowed:
+        return None
+    mode = "never allowed" if what.startswith("never:") else (
+        "the device is read-only" if not writes_enabled() else "the write gate is not armed for this module")
+    return f"write gate: {what.replace('never: ', '')}{f' (SID {sid:02X})' if sid else ''} refused — {mode}; nothing was sent"
+
+
+class WriteRefused(Exception):
+    pass
+
+
 def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0, via="isotp"):
     """One ISO-TP request/response (kernel can_isotp handles multi-frame + flow control)."""
+    refusal = gate_check(iface, tx_id, payload)
+    if refusal:
+        raise WriteRefused(refusal)
     t0 = time.time()
     info, data, err = {}, None, ""
     try:
@@ -768,6 +896,8 @@ def isotp_http(iface, tx_hex, rx_hex, data_hex, timeout=2.0):
     t = max(0.2, min(t, 8.0))
     try:
         data = isotp_request(iface, tx_id, rx_id, list(payload), timeout=t)
+    except WriteRefused as e:
+        return {"ok": False, "error": str(e), "gated": True, "request": payload.hex()}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "request": payload.hex()}
     raw = data.hex() if data else ""
@@ -816,6 +946,9 @@ def isotp_seq(iface, tx_hex, rx_hex, requests, timeout=2.0):
                 out.append({"request": str(r), "ok": False, "error": "bad hex"}); continue
             if not payload:
                 out.append({"request": "", "ok": False, "error": "empty"}); continue
+            refusal = gate_check(iface, tx_id, payload)
+            if refusal:
+                out.append({"request": payload.hex(), "ok": False, "error": refusal, "gated": True, "response": ""}); continue
             t0, info = time.time(), {}
             try:
                 sock.send(payload)
@@ -991,6 +1124,7 @@ def device_info():
         "claim": claim_info(),
         "battery": battery_info(),
         "power": power_guard_state(),
+        "write_gate": gate_status()["mode"],
     }
 
 
@@ -1238,6 +1372,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(wifi_scan())
         elif u.path == "/api/wifi/saved":
             self._json(wifi_saved())
+        elif u.path == "/api/write-gate":
+            self._json(gate_status())
         elif u.path == "/api/sim/status":
             self._json(sim_status())
         elif u.path == "/api/version":
@@ -1329,6 +1465,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(isotp_http(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("data"), d.get("timeout", 2.0)))
         elif u.path == "/api/isotp/seq":
             self._json(isotp_seq(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("requests"), d.get("timeout", 2.0)))
+        elif u.path == "/api/write-gate/arm":
+            self._json(gate_arm(d.get("owner"), d.get("reason"), d.get("seconds", 60), d.get("iface"), d.get("tx")))
+        elif u.path == "/api/write-gate/disarm":
+            self._json(gate_disarm(d.get("owner") or ""))
         elif u.path == "/api/scan/sweep":
             self._json(address_sweep(d.get("iface", "can0"), d.get("lo", 0x600), d.get("hi", 0x7FF), bool(d.get("ext")),
                                      d.get("listen_s", 3.0), d.get("wait_ms", 50)))

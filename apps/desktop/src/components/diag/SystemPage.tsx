@@ -144,7 +144,7 @@ export function SystemPage(p: Props) {
         const session = preferredSession(mod) || "1003";
         const res = await seq(host, iface, mod, [session, request], 3.0);
         const it = res[res.length - 1];
-        const line = !it?.response ? "no response" : it.negative ? `refused — ${nrcText(it.nrc)}` : `accepted → ${fmt(it.response)}`;
+        const line = !it?.response ? (it?.error || "no response") : it.negative ? `refused — ${nrcText(it.nrc)}` : `accepted → ${fmt(it.response)}`;
         setWriteLog((l) => [...l.slice(-20), `${new Date().toLocaleTimeString()}  ${fmt(request)}  →  ${line}`]);
       }),
     });

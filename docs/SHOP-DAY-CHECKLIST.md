@@ -124,3 +124,36 @@ without anyone at the car — everything the app does goes through the Pi's HTTP
   Before plugging into the car: **virtual vehicle off, can1↔can0 jumper pulled, can0's
   120 Ω terminator OFF** (§0.3, §1.3), and the UPS showing a battery % (without it there
   is no clean shutdown when the plug is pulled).
+
+## 5. Read-only by default — what the device will and will not do (2026-11-23)
+
+Rule set by Dmytro after the first real car (a customer's 2015 Sprinter): **for now the
+lab only READS cars.** Enforced in three places, so no front end can get round it:
+
+- **The Pi's write gate** (`superdevice_ui.py`, `GET /api/write-gate`). Every request that
+  can change a module — clear codes (UDS 14 / OBD 04), writes (2E / 3B / 3D), I/O control
+  (2F / 30), routines (31 / 32 / 38 / 39), resets (11), downloads (34–37), communication /
+  DTC-setting control (28 / 85), security keys (27 even), programming sessions (10 02 / 82 /
+  85) and raw frames on a real bus — is refused **before it reaches the bus**, with a
+  "write gate: … nothing was sent" message. The airbag safety-system session (10 04 / 84)
+  is refused even when armed. The virtual bus (vcan0) is exempt — practising is its point.
+  Arming (`POST /api/write-gate/arm`, 5–600 s, one bus + one module, owner + reason,
+  logged in the recorder) only works once writes are enabled **on the Pi itself**:
+  `/var/lib/superdevice/write-gate.json` → `{"writes_enabled": true}` (root, over SSH or at
+  the bench). Nothing over the network can enable writes. Diagnostics shows **READ-ONLY**.
+- **Protected modules** (`packages/vehicle-db/src/protectedModules.ts`): airbag / restraint
+  systems and immobiliser / ignition-lock / keyless modules are never explored by the AI
+  mapper (`map` refuses them; "Map all" skips them). Reading their fault codes in Auto Scan
+  stays allowed — that is what every scan tool does.
+- **The AI mapper's own gate** (`isReadOnlyRequest` in `moduleExplorer.ts`): reads and normal
+  diagnostic sessions only; seed requests (27 odd) allowed, keys never.
+
+**Discovery on a new car:** the first scan of a model also runs the Pi's address sweep
+(`POST /api/scan/sweep`, about a minute: wakes the bus with 7DF 01 00, listens, sends only
+tester-present on IDs the car does not use, confirms every hit). That is how the Sprinter's
+12 Mercedes modules on 6xx/7xx → 4Ex were found. Every later scan re-asks the addresses the
+model is known to use. CLI: `discover --deep [--ext]` (29-bit too) / `--no-deep`.
+
+**Long sessions:** watch the car's voltage (OBD 01 42). With the ignition on and the engine
+off, the Sprinter fell to 11.5 V in about 30 minutes; the Pi's power guard then shut it down
+cleanly and it came back by itself on 12 V. For mapping sessions, run the engine.

@@ -16,7 +16,7 @@ import type {
 import { Api } from "./api";
 import { decodeObdPid, identifierAscii, parseKwpDtcsFromHex, parseObdDtcsFromHex, parseUdsDtcsFromHex, type DtcRow } from "./uds";
 
-export interface SeqItem { request: string; response?: string; ok?: boolean; negative?: boolean; nrc?: number | null; error?: string }
+export interface SeqItem { request: string; response?: string; ok?: boolean; negative?: boolean; nrc?: number | null; error?: string; gated?: boolean }
 
 export const clean = (h?: string) => (h || "").replace(/[^0-9a-fA-F]/g, "").toUpperCase();
 export const fmt = (h?: string) => clean(h).replace(/(..)/g, "$1 ").trim();
@@ -264,7 +264,8 @@ export async function clearDtcs(host: string, iface: string, mod: VehicleModule)
     const obd = (await seq(host, iface, mod, ["04"], 3.0))[0];
     if (obd?.response && !obd.negative) return { ok: true, detail: "cleared the OBD way (mode 04)" };
   }
-  return { ok: false, detail: !it?.response ? "no response to the clear request" : `refused — ${nrcText(it.nrc)}` };
+  if (it?.gated) return { ok: false, detail: "not sent — the device is read-only (its write gate refuses every write)" };
+  return { ok: false, detail: !it?.response ? (it?.error || "no response to the clear request") : `refused — ${nrcText(it.nrc)}` };
 }
 
 export function scanResult(mod: VehicleModule, r: DtcReadResult): SystemScanResult {
