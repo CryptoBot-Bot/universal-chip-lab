@@ -47,6 +47,20 @@ export async function loadStoredVehicleProfiles(dir: string): Promise<VehicleSto
   return { records, errors };
 }
 
+/** Simulator-answered content in a profile (scans, inventories, sweeps carry a `sim` tag). */
+export function simulatorContent(record: VehicleProfile): string[] {
+  const out: string[] = [];
+  for (const o of record.knownVins ?? []) {
+    if (o.scans?.some((s) => s.sim)) out.push("a scan");
+    if (o.inventory?.sim) out.push("a module inventory");
+  }
+  for (const m of record.modules) if (m.sweeps?.some((s) => s.sim)) { out.push("a completeness sweep"); break; }
+  return out;
+}
+
+/** The library of real cars. Simulator sessions use a sandbox folder (see simLibrary.ts). */
+export const REAL_LIBRARY_NAME = "vehicle-library";
+
 export async function saveStoredVehicleProfile(
   dir: string,
   record: VehicleProfile,
@@ -54,6 +68,12 @@ export async function saveStoredVehicleProfile(
 ): Promise<VehicleProfile> {
   const problems = validateVehicleProfile(record);
   if (problems.length) throw new Error(`invalid vehicle profile: ${problems.join(", ")}`);
+  // Backstop: real data only in the real library. Simulator sessions are redirected to a
+  // sandbox before they get here; if one ever slips through, it is refused, not saved.
+  if (path.basename(path.resolve(dir)) === REAL_LIBRARY_NAME) {
+    const sim = simulatorContent(record);
+    if (sim.length) throw new Error(`not saved: ${sim.join(" and ")} came from a simulator — the real library keeps real cars only`);
+  }
   await mkdir(dir, { recursive: true });
   const stamped: VehicleProfile = {
     ...record,

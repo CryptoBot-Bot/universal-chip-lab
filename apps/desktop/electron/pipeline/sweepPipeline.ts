@@ -7,7 +7,7 @@
  * Safety: airbag / immobiliser modules are never swept; every request goes through
  * the read-only policy (readSeq); a session opened is closed again (10 01).
  */
-import { addSweep, asciiOf, dataOf, protectedModule, rangeLabel, rangeRequests, requestId, sweepPlan } from "@ecu/vehicle-db";
+import { addSweep, asciiOf, checkRequest, dataOf, protectedModule, rangeLabel, rangeRequests, requestId, sweepPlan } from "@ecu/vehicle-db";
 import type { ModuleSweep, SweepHit, VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 import { saveStoredVehicleProfile } from "@ecu/vehicle-db/vehicleStore";
 
@@ -46,6 +46,18 @@ function nrcOf(it?: SeqItem): number | null {
 }
 const positive = (it: SeqItem | undefined, sid: number) => !!it?.response && it.response.replace(/\s+/g, "").toLowerCase().startsWith((sid + 0x40).toString(16));
 
+/** Diagnostic sessions an earlier real map of this module proved useful, best first ("92", "81"…). Harmless sessions only. */
+export function provenSessions(m: Pick<VehicleModule, "explored">): string[] {
+  const x = m.explored;
+  const texts = [...(x?.liveData ?? []).map((i) => i.session ?? ""), ...(x?.identification ?? []).map((i) => i.session ?? ""), ...(x?.sessions ?? []).map((i) => i.id)];
+  const out: string[] = [];
+  for (const t of texts) for (const h of t.toUpperCase().match(/\b[0-9A-F]{2}\b/g) ?? []) {
+    if (h === "01" || out.includes(h)) continue;
+    if (checkRequest(`10${h}`).ok) out.push(h);
+  }
+  return out;
+}
+
 /** Modules a sweep may cover: addressed, and never airbag / immobiliser. */
 export function sweepTargets(profile: VehicleProfile, moduleIds?: string[]): VehicleModule[] {
   return profile.modules
@@ -72,19 +84,24 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
   // which session to read in
   const sessions: ModuleSweep["sessions"] = [];
   let session = "01";
+  const proven = provenSessions(m);
+  const tryOpen = async (sid: string): Promise<boolean> => {
+    const a = (await seq([`10${sid}`]))[0];
+    sessions.push({ id: sid, ok: positive(a, 0x10), ...(nrcOf(a) !== null ? { nrc: nrcOf(a)! } : {}) });
+    return positive(a, 0x10);
+  };
   if (protocol === "uds") {
-    const s = (await seq(["1003"]))[0];
-    sessions.push({ id: "03", ok: positive(s, 0x10), ...(nrcOf(s) !== null ? { nrc: nrcOf(s)! } : {}) });
-    if (positive(s, 0x10)) session = "03";
+    // extended session — on a chassis module (brakes, steering, stability) only if an earlier visit proved it
+    if ((m.category !== "chassis" || proven.includes("03")) && await tryOpen("03")) session = "03";
   } else {
-    const first = await seq(["2101", "2102", "2103", "2104"]);
-    const refusedAll = first.every((it) => { const n = nrcOf(it); return n === 0x7f || n === 0x22 || n === 0x11 || n === 0x12 || !it.response; });
-    sessions.push({ id: "01", ok: !refusedAll });
-    if (refusedAll) {
-      for (const sid of KWP_SESSIONS) {
-        const s = (await seq([`10${sid}`]))[0];
-        sessions.push({ id: sid, ok: positive(s, 0x10), ...(nrcOf(s) !== null ? { nrc: nrcOf(s)! } : {}) });
-        if (positive(s, 0x10)) { session = sid; break; }
+    for (const sid of proven) { if (await tryOpen(sid)) { session = sid; break; } }
+    if (session === "01") {
+      const first = await seq(["2101", "2102", "2103", "2104"]);
+      const refusedAll = first.every((it) => { const n = nrcOf(it); return n === 0x7f || n === 0x22 || n === 0x11 || n === 0x12 || !it.response; });
+      sessions.push({ id: "01", ok: !refusedAll });
+      // sessions nobody proved are tried on other modules only, and only when the default gave nothing
+      if (refusedAll && m.category !== "chassis") {
+        for (const sid of KWP_SESSIONS) if (!proven.includes(sid) && await tryOpen(sid)) { session = sid; break; }
       }
     }
   }
@@ -129,7 +146,8 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
       });
     }
   } finally {
-    if (open.length) { try { await seq(["1001"]); } catch { /* it falls back to default on its own */ } }
+    // back to the module's normal session: 10 01 on UDS, 10 81 on KWP2000 (it also times back by itself)
+    if (open.length) { try { await seq([protocol === "kwp2000" ? "1081" : "1001"]); } catch { /* it falls back to default on its own */ } }
   }
 
   const sweep: ModuleSweep = {

@@ -74,6 +74,7 @@ const api = {
   },
   vehicleLib: {
     list:    (payload?: { builtIn?: boolean }) => invoke("vehicleLib:list", payload),
+    setSimulation: (payload: { on: boolean }) => invoke("vehicleLib:setSimulation", payload),
     save:    (record: unknown) => invoke("vehicleLib:save", record),
     delete:  (id: string) => invoke("vehicleLib:delete", { id }),
     bake:    () => invoke("vehicleLib:bake"),

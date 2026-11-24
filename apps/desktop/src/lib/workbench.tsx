@@ -74,6 +74,13 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   }, [online, sd.host]);
 
   const demo = online && sd.host === DESK_SIM;
+
+  // Real data only in the real library: whenever a simulator answers — the desk simulator,
+  // the virtual bus vcan0, a virtual vehicle running on the device — the main process works
+  // on a sandbox copy of the library, so nothing a simulator does can reach a real car's record.
+  const simulated = online && (demo || iface === "vcan0" || !!sim?.running);
+  useEffect(() => { void Api.vehicleLib.setSimulation({ on: simulated }).catch(() => { /* old main process: nothing to switch */ }); }, [simulated]);
+
   return (
     <Ctx.Provider value={{ iface, setIface, gate, sim, demo, simCar: simCarName(sim) }}>
       {children}

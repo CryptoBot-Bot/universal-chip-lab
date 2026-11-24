@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { checkRequest } from "@ecu/vehicle-db";
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 
-import { sweepModule, sweepTargets } from "./sweepPipeline";
+import { provenSessions, sweepModule, sweepTargets } from "./sweepPipeline";
 
 function fakeEcm() {
   const sent: string[] = [];
@@ -59,4 +59,50 @@ test("sweep: extended session, every identifier, a second read, back to default"
 test("a protected module handed in directly is refused", async () => {
   fakeEcm();
   await assert.rejects(sweepModule({ host: "fake:8080", iface: "vcan0", profile, condition: "x" }, profile.modules[1], 0, 1), /never swept/);
+});
+
+/** A KWP module that answers local-ID reads only in one session; records which sessions were asked. */
+function fakeKwp(openSession: string) {
+  const sent: string[] = [];
+  let session = "01";
+  globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+    const b = JSON.parse(init?.body ?? "{}") as { requests: string[] };
+    const results = b.requests.map((q0) => {
+      const q = q0.toUpperCase();
+      sent.push(q);
+      if (q.startsWith("10")) { const ok = q.slice(2) === openSession || q === "1001"; session = ok && q !== "1001" ? openSession : session; return ok ? { request: q, response: `50${q.slice(2)}` } : { request: q, response: "7F1012", negative: true, nrc: 0x12 }; }
+      if (session === openSession && q === "2105") return { request: q, response: "6105AA" };
+      return { request: q, response: "7F2122", negative: true, nrc: 0x22 };
+    });
+    return new Response(JSON.stringify({ ok: true, results }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  return sent;
+}
+const kwpMod = (over: Record<string, unknown>) => ({ ...mod("esp", "Electronic Stability Program", "chassis", "726", "4E6", "kwp2000"), ...over }) as unknown as VehicleModule;
+const run = (m: VehicleModule) => sweepModule({ host: "fake:8080", iface: "vcan0", profile: { ...profile, modules: [m] } as VehicleProfile, condition: "x" }, m, 0, 1);
+
+test("sessions proven by an earlier real map come first; text like 'default' proves nothing", () => {
+  const explored = { liveData: [{ id: "21 05", label: "x", session: "81 (also 92)" }], identification: [], sessions: [{ id: "default", label: "" }, { id: "85", label: "programming" }] };
+  assert.deepEqual(provenSessions({ explored } as never), ["81", "92"]);   // 85 (programming) is never a candidate
+});
+
+test("a chassis module (brakes / stability) never gets an unproven session", async () => {
+  const sent = fakeKwp("92");
+  await run(kwpMod({}));
+  assert.ok(!sent.some((q) => q.startsWith("10") && q !== "1001"), sent.filter((q) => q.startsWith("10")).join(","));
+});
+
+test("a proven session is used, also on a chassis module", async () => {
+  const sent = fakeKwp("92");
+  const m = kwpMod({ explored: { liveData: [{ id: "21 05", label: "x", session: "92" }], identification: [], sessions: [] } });
+  const sw = await run(m);
+  assert.equal(sent[0], "1092");
+  assert.ok(sw.hits.some((h) => h.id === "21 05" && h.session === "92"));
+  assert.equal(sent[sent.length - 1], "1081");
+});
+
+test("another module may try the standard KWP sessions when the default gives nothing", async () => {
+  const sent = fakeKwp("92");
+  await run(mod("body", "Body module", "body", "72E", "4EE", "kwp2000") as VehicleModule);
+  assert.ok(sent.includes("1089") && sent.includes("1092"));
 });

@@ -51,6 +51,7 @@ import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSk
 import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicleExplorer";
 import { identifyAndSave } from "../pipeline/identityPipeline";
 import { sweepAndSave } from "../pipeline/sweepPipeline";
+import { ensureSimLibrary, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
 import {
   captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
 } from "../pipeline/vehiclePipeline";
@@ -121,7 +122,13 @@ export async function registerIpcHandlers(
   const jobFiles = new JobFileManager(layout);
   const chipAssetsDir = path.join(layout.root, "chip-assets");
   const busIntelDir = path.join(layout.root, "vehicle-intel");
-  const vehicleLibDir = path.join(layout.root, "vehicle-library");
+  // Real cars live in vehicle-library; whenever a simulator answers (desk simulator, vcan0, a
+  // virtual vehicle on the device) the renderer switches this process to a sandbox copy, so
+  // nothing a simulator does can reach a real car's record. See pipeline/simLibrary.ts.
+  let simulationMode = false;
+  const realLibDir = realLibraryDir(layout.root);
+  const simLibDir = simLibraryDir(layout.root);
+  const libDir = () => (simulationMode ? simLibDir : realLibDir);
   const benchModuleDir = path.join(layout.root, "bench-modules");
   const benchModuleAssetsDir = path.join(layout.root, "bench-module-assets");
 
@@ -276,7 +283,7 @@ export async function registerIpcHandlers(
   // map is measured against. Read-only, no AI; airbag / immobiliser never swept.
   register("vehicleExplorer:sweep", async (event, p: { host?: string; iface: string; profile: VehicleProfile; moduleIds?: string[]; condition: string; wide?: boolean; sim?: string | null }) => {
     vehicleExplorerStop = false;
-    return sweepAndSave(vehicleLibDir, {
+    return sweepAndSave(libDir(), {
       host: p.host, iface: p.iface, profile: p.profile, moduleIds: p.moduleIds, condition: p.condition || "ignition on", wide: p.wide, sim: p.sim,
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
@@ -287,7 +294,7 @@ export async function registerIpcHandlers(
   // build date — plain identification reads only, streamed live, filed per car (VIN).
   register("vehicleExplorer:identify", async (event, p: { host?: string; iface: string; profile: VehicleProfile; vin?: string; moduleIds?: string[]; sim?: string | null; extended?: boolean }) => {
     vehicleExplorerStop = false;
-    return identifyAndSave(vehicleLibDir, {
+    return identifyAndSave(libDir(), {
       host: p.host, iface: p.iface, profile: p.profile, vin: p.vin, moduleIds: p.moduleIds, sim: p.sim, extended: p.extended,
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
@@ -297,7 +304,7 @@ export async function registerIpcHandlers(
   // Discovery as its own saving stage: persist the responders (address + lastSeen)
   // into the YMM profile, healing any pre-existing duplicate module entries.
   register("vehicleExplorer:commitDiscovery", (_e, p: { profile: VehicleProfile; discovered: DiscoveredModuleInput[] }) =>
-    commitDiscovery(vehicleLibDir, p.profile, p.discovered ?? []));
+    commitDiscovery(libDir(), p.profile, p.discovered ?? []));
 
   register("vehicleExplorer:start", async (event, p: {
     host?: string; iface: string; profile: VehicleProfile;
@@ -305,7 +312,7 @@ export async function registerIpcHandlers(
   }) => {
     vehicleExplorerStop = false;
     return deepMapAndSave({
-      host: p.host, iface: p.iface, profile: p.profile, targets: p.targets, vehicleLibDir,
+      host: p.host, iface: p.iface, profile: p.profile, targets: p.targets, vehicleLibDir: libDir(),
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
@@ -324,7 +331,7 @@ export async function registerIpcHandlers(
   // Module census: name every discovered module from its part number (AI).
   register("vehicleId:census", (_e, input: CensusInput) => censusModules(input));
   // Free NHTSA vPIC decode (cached per VIN under the vehicle library) — step ① of identity.
-  register("vehicleId:decodeOnline", (_e, p: { vin: string }) => decodeVinOnline(p.vin, vinDecodeCacheFile(vehicleLibDir)));
+  register("vehicleId:decodeOnline", (_e, p: { vin: string }) => decodeVinOnline(p.vin, vinDecodeCacheFile(realLibDir)));
 
   // ---- AI Module Explorer (autonomous read-only diagnostic agent, streamed)
   const explorerRunsDir = path.join(layout.root, "explorer-runs");
@@ -756,26 +763,32 @@ export async function registerIpcHandlers(
   // persist to disk here and merge on top; "bake" folds them into the bundle.
   // The library: vehicles actually read. `builtIn` adds the hand-written starter maps
   // (only the archived 3D cockpit / training room ask for them).
+  register("vehicleLib:setSimulation", async (_e, p: { on: boolean }) => {
+    const on = !!p?.on;
+    if (on) await ensureSimLibrary(realLibDir, simLibDir);
+    simulationMode = on;
+    return { on };
+  });
   register("vehicleLib:list", async (_e, p?: { builtIn?: boolean }) => {
-    const { records, errors } = await loadStoredVehicleProfiles(vehicleLibDir);
+    const { records, errors } = await loadStoredVehicleProfiles(libDir());
     if (errors.length > 0) {
       console.warn(`[ECL] Skipped ${errors.length} invalid vehicle profile(s):`, errors.join("; "));
     }
     return mergeVehicleProfiles(records, { builtIn: !!p?.builtIn });
   });
   register("vehicleLib:save", async (_e, record: VehicleProfile) => {
-    await saveStoredVehicleProfile(vehicleLibDir, record, new Date().toISOString());
-    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
+    await saveStoredVehicleProfile(libDir(), record, new Date().toISOString());
+    const { records } = await loadStoredVehicleProfiles(libDir());
     return mergeVehicleProfiles(records);
   });
   register("vehicleLib:delete", async (_e, p: { id: string }) => {
-    const removed = await deleteStoredVehicleProfile(vehicleLibDir, p.id);
-    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
+    const removed = await deleteStoredVehicleProfile(libDir(), p.id);
+    const { records } = await loadStoredVehicleProfiles(libDir());
     return { removed, records: mergeVehicleProfiles(records) };
   });
   register("vehicleLib:analyze", (_e, scan: VehicleScan) => mapVehicle(scan));
   register("vehicleLib:bake", async () => {
-    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
+    const { records } = await loadStoredVehicleProfiles(libDir());
     const target = path.join(
       opts.projectRoot,
       "packages", "vehicle-db", "src", "vehicleProfileCommunity.json",

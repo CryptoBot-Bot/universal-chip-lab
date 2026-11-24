@@ -30,6 +30,7 @@ import type { DiscoveredModule, VehicleExplorerEvent } from "../electron/resolve
 import { identifyAndSave } from "../electron/pipeline/identityPipeline";
 import { sweepAndSave } from "../electron/pipeline/sweepPipeline";
 import { benchModules, runBench, summarise, type TruthVehicle } from "../electron/pipeline/calibration";
+import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../electron/pipeline/simLibrary";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { getApiKey } from "./settings";
 
@@ -806,6 +807,12 @@ async function cmdRun(ctx: Ctx) {
 
 // ---- main ------------------------------------------------------------------------------
 
+/** Simulator sessions work on the sandbox copy of the library — real cars' records stay untouched. */
+async function useSandbox(ctx: Ctx): Promise<void> {
+  await ensureSimLibrary(realLibraryDir(ctx.ws), simLibraryDir(ctx.ws));
+  ctx.vehicleLibDir = simLibraryDir(ctx.ws);
+}
+
 async function main(): Promise<number> {
   let args: Args;
   try { args = parseArgs(process.argv.slice(2)); } catch (e) { process.stderr.write(`${(e as Error).message}\n`); return 2; }
@@ -828,6 +835,9 @@ async function main(): Promise<number> {
     recordingsDir: path.join(ws, "recordings"), stateFile: path.join(ws, "cli", "last.json"), appVersion, args,
   };
 
+  // A simulator by address (desk simulator) or by bus (vcan0): sandbox library, whatever the command.
+  if (isSimulatorTarget(hostRaw === "offline" ? undefined : hostRaw, ctx.iface)) await useSandbox(ctx);
+
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
     census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
@@ -839,7 +849,10 @@ async function main(): Promise<number> {
     // a running virtual vehicle answers on can0 as if it were the car.
     if (["vin", "discover", "census", "identify", "sweep", "map", "capture", "run"].includes(cmd) && ctx.iface !== "vcan0") {
       const sim = (await piGet(ctx.host, "/api/sim/status").catch(() => null)) as { running?: boolean; vehicle?: string; iface?: string } | null;
-      if (sim?.running) say(`NOTE: a virtual vehicle (${sim.vehicle}) is running on ${sim.iface}. If the can1↔can0 jumper is in, what answers on ${ctx.iface} is the SIMULATOR, not a car. At a car: "sim stop" and pull the jumper.\n`);
+      if (sim?.running) {
+        await useSandbox(ctx);
+        say(`NOTE: a virtual vehicle (${sim.vehicle}) is running on ${sim.iface}. If the can1↔can0 jumper is in, what answers on ${ctx.iface} is the SIMULATOR, not a car — this run works on the sandbox library. At a car: "sim stop" and pull the jumper.\n`);
+      }
     }
     const result = await fn(ctx);
     if (JSON_MODE) process.stdout.write(JSON.stringify(result) + "\n");

@@ -491,6 +491,8 @@ export const Api = {
   vehicleLib: {
     /** Vehicles actually read. `{ builtIn: true }` adds the hand-written starter maps (archive tools only). */
     list:   (payload?: { builtIn?: boolean }) => unwrap<VehicleProfile[]>(api.vehicleLib.list(payload) as never),
+    /** Work on the sandbox copy of the library while a simulator answers (real cars' records stay untouched). */
+    setSimulation: (payload: { on: boolean }) => unwrap<{ on: boolean }>(api.vehicleLib.setSimulation(payload) as never),
     save:   (record: VehicleProfile) => unwrap<VehicleProfile[]>(api.vehicleLib.save(record) as never),
     delete: (id: string) =>
       unwrap<{ removed: boolean; records: VehicleProfile[] }>(api.vehicleLib.delete(id) as never),

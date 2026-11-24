@@ -56,6 +56,7 @@ export type IpcChannel =
   | "busIntel:analyze"
   | "busIntel:bake"
   | "vehicleLib:list"
+  | "vehicleLib:setSimulation"
   | "vehicleLib:save"
   | "vehicleLib:delete"
   | "vehicleLib:bake"
