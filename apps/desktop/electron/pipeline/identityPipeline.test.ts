@@ -33,6 +33,16 @@ function fakeCar() {
       if (r === "22f18c") return { response: `62f18c${ascii("SN-SRS-0002")}` };
       return { response: "7f227f", negative: true, nrc: 0x7f };          // "not in this session" — must NOT trigger 10 03
     }
+    if (tx === "7E3") {                                                  // filed as UDS, speaks only KWP
+      if (r.startsWith("22")) return { response: "7f2211", negative: true, nrc: 0x11 };
+      if (r === "1a87") return { response: `5a87${ascii("1112223334")}` };
+      return { response: "7f1a12", negative: true, nrc: 0x12 };
+    }
+    if (tx === "7E4") {                                                  // filed as KWP, speaks only UDS
+      if (r.startsWith("1a")) return { response: "7f1a11", negative: true, nrc: 0x11 };
+      if (r === "22f18c") return { response: `62f18c${ascii("SN-UDS-0003")}` };
+      return { response: "7f2231", negative: true, nrc: 0x31 };
+    }
     if (tx === "7E1") {                                                  // KWP gearbox
       if (r.startsWith("22")) return { response: "7f2211", negative: true, nrc: 0x11 };
       if (r === "1a87") return { response: `5a87${ascii("G0034464110")}` };
@@ -99,6 +109,23 @@ test("identity read: what is read, filed and never sent", async () => {
   assert.equal(events[0], "ident-start");
   assert.ok(events.includes("ident-record"));
   assert.equal(events[events.length - 1], "ident-done");
+});
+
+test("a module filed under the wrong protocol is still identified", async () => {
+  fakeCar();
+  const misfiled = {
+    ...profile,
+    modules: [
+      mod("a", "Module A", "body", "7E3", "7EB", "uds"),        // really KWP
+      mod("b", "Module B", "body", "7E4", "7EC", "kwp2000"),    // really UDS
+    ],
+  } as unknown as VehicleProfile;
+  const inv = await identifyCar({ host: "fake:8080", iface: "vcan0", profile: misfiled, extended: false });
+  const by = Object.fromEntries(inv.modules.map((m) => [m.moduleId, m]));
+  assert.equal(by.a.summary.partNo, "1112223334");
+  assert.equal(by.a.protocol, "kwp2000");
+  assert.equal(by.b.summary.serial, "SN-UDS-0003");
+  assert.equal(by.b.protocol, "uds");
 });
 
 test("identity read can skip the extended pass", async () => {

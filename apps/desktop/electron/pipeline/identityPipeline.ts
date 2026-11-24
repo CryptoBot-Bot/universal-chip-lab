@@ -69,9 +69,11 @@ async function readModule(o: IdentifyOptions, m: VehicleModule, mercedes: boolea
   const tx = clean(m.addressing!.request), rx = clean(m.addressing!.response);
   const guard: ProtectedKind | undefined = protectedModule({ category: m.category, label: m.label })?.kind;
   const proto: "uds" | "kwp2000" | "unknown" = m.protocol === "kwp2000" ? "kwp2000" : m.protocol === "uds" || m.protocol === "obd2" ? "uds" : "unknown";
-  const plan = identPlan(proto, { mercedes });
-  const udsSpecs = plan.filter((s) => s.req.startsWith("22"));
-  const kwpSpecs = plan.filter((s) => s.req.startsWith("1A"));
+  // Both protocols' lists are ready: the one the module is filed under is asked first, the
+  // other only if the first gave nothing or the module said "service not supported" — so a
+  // module filed under the wrong protocol (census guesses, maker quirks) is still identified.
+  const udsSpecs = identPlan("uds", { mercedes });
+  const kwpSpecs = identPlan("kwp2000");
 
   const records: IdentRecord[] = [];
   const refused = new Map<string, number>();   // req → NRC
@@ -117,17 +119,19 @@ async function readModule(o: IdentifyOptions, m: VehicleModule, mercedes: boolea
 
   let note: string | undefined;
   try {
-    // pass 1 — the session the module is in (default)
+    // pass 1 — the session the module is in (default); its own protocol first
+    const silent = (): ModuleInventoryEntry => ({ moduleId: m.id, label: m.label, requestId: tx, responseId: rx, protocol: proto, status: "no_response", records: [], summary: {}, ...(guard ? { protectedKind: guard } : {}) });
     let udsOutcome: "done" | "silent" | "unsupported" | "skipped" = "skipped";
-    if (udsSpecs.length) udsOutcome = await ask(udsSpecs, "01");
-    if (udsOutcome === "silent" && !answered) {
-      return { moduleId: m.id, label: m.label, requestId: tx, responseId: rx, protocol: proto, status: "no_response", records: [], summary: {}, ...(guard ? { protectedKind: guard } : {}) };
-    }
-    const udsRecords = records.length;
-    if (kwpSpecs.length && (proto === "kwp2000" || udsOutcome === "unsupported" || udsRecords === 0)) {
+    if (proto === "kwp2000") {
       const k = await ask(kwpSpecs, "01");
-      if (k === "silent" && !answered) {
-        return { moduleId: m.id, label: m.label, requestId: tx, responseId: rx, protocol: proto, status: "no_response", records: [], summary: {}, ...(guard ? { protectedKind: guard } : {}) };
+      if (k === "silent" && !answered) return silent();
+      if (k === "unsupported" || records.length === 0) udsOutcome = await ask(udsSpecs, "01");
+    } else {
+      udsOutcome = await ask(udsSpecs, "01");
+      if (udsOutcome === "silent" && !answered) return silent();
+      if (udsOutcome === "unsupported" || records.length === 0) {
+        const k = await ask(kwpSpecs, "01");
+        if (k === "silent" && !answered) return silent();
       }
     }
     // pass 2 — refused UDS records again in the extended session (never on protected modules)
