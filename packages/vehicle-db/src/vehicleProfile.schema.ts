@@ -353,6 +353,56 @@ export interface VinObservation {
   lastReadAt: string;         // ISO — most recent read
   reads: number;              // how many times we've read it
   syncedToShop?: boolean;     // pushed into the JobCount garage
+  scans?: VehicleScanRecord[]; // this unit's Auto Scan history, newest last (capped)
+}
+
+/** How one system came out of an Auto Scan. "unknown" = it answered, but its fault
+ * memory could not be read (service refused) — never shown as "no fault". */
+export type SystemScanStatus = "ok" | "fault" | "no_response" | "unknown";
+
+export interface ScanDtc { code: string; description?: string; status?: string }
+
+export interface SystemScanResult {
+  moduleId: string;
+  label: string;
+  requestId?: string;
+  responseId: string;
+  status: SystemScanStatus;
+  dtcs: ScanDtc[];
+  note?: string;              // why "unknown", or how the codes were read
+}
+
+/**
+ * One Auto Scan of one real unit (a VIN): which systems answered and what fault
+ * codes each held. The YMM profile keeps WHAT the vehicle has and how to talk to
+ * it; the scan record keeps the STATE of this particular car on that day — the
+ * vehicle history a returning car is opened with.
+ */
+export interface VehicleScanRecord {
+  at: string;                 // ISO
+  kind: "auto" | "fault";     // full scan (with discovery) or a re-read of the known systems
+  iface?: string;
+  durationMs?: number;
+  sim?: string;               // set when a virtual vehicle answered (desk simulator / simulator on the device) — not a real car
+  systems: SystemScanResult[];
+}
+
+/** Append a scan to a unit's history (newest last, capped). Pure. The VIN must
+ * already be on the profile (learnVin) — a scan of an unbound car is not kept. */
+export function recordScan(profile: VehicleProfile, vin: string, scan: VehicleScanRecord, cap = 12): VehicleProfile {
+  const v = (vin || "").trim().toUpperCase();
+  if (!profile.knownVins?.some((o) => o.vin === v)) return profile;
+  return {
+    ...profile,
+    knownVins: profile.knownVins.map((o) => (o.vin === v ? { ...o, scans: [...(o.scans ?? []), scan].slice(-cap) } : o)),
+  };
+}
+
+/** The most recent scan on file for a unit, if any. */
+export function lastScanFor(profile: VehicleProfile | null | undefined, vin: string): VehicleScanRecord | null {
+  const v = (vin || "").trim().toUpperCase();
+  const scans = profile?.knownVins?.find((o) => o.vin === v)?.scans;
+  return scans?.length ? scans[scans.length - 1] : null;
 }
 
 export interface VehicleProfile {

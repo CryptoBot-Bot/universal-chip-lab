@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-electron/
+dist-cli/
+__pycache__/
 out/
 build/
 .cache/

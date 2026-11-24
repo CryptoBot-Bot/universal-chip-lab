@@ -144,6 +144,40 @@ export function learnVin(profile: VehicleProfile, vin: string, now: string): { p
   return { profile: { ...p, vinPatterns, wmi }, vinIsNew: r.vinIsNew };
 }
 
+/** How a just-read VIN was tied to the library (see bindVinIdentity). */
+export interface VinBinding {
+  /** The profile to save, with this unit learned — or null when nothing may be bound yet. */
+  profile: VehicleProfile | null;
+  /** "vin" / "pattern" / "ymm": an existing profile; "new": filed from the online decode; null: unresolved. */
+  kind: "vin" | "pattern" | "ymm" | "new" | null;
+  vinIsNew: boolean;
+  resolution: IdentityResolution;
+}
+
+/**
+ * The standard "VIN read → which library vehicle" step, in one pure function:
+ * the trusted online decode (NHTSA) confirms Year/Make/Model, which binds an
+ * existing profile (exact VIN / learned pattern / that YMM) or files a new one;
+ * either way the unit is learned on it. With no certain match and no usable
+ * decode it returns profile null — the AI Identify stage is the fallback, never
+ * a guess. Mirrors the cockpit's read-VIN flow so the command-line runner and
+ * the UI bind identically.
+ */
+export function bindVinIdentity(profiles: VehicleProfile[], vin: string, online: OnlineVinDecode | null, now: string): VinBinding {
+  const confirmed = online?.ok ? { year: online.year, make: online.make, model: online.model } : null;
+  const resolution = resolveVehicleIdentity(profiles, vin, confirmed);
+  if (resolution.bound) {
+    const { profile, vinIsNew } = learnVin(resolution.bound.profile, vin, now);
+    const kind = resolution.bound.kind as "vin" | "pattern" | "ymm";
+    return { profile: online?.ok && !profile.decoded ? { ...profile, decoded: online } : profile, kind, vinIsNew, resolution };
+  }
+  if (online?.ok) {
+    const { profile } = learnVin(profileFromOnlineDecode(online, now), vin, now);
+    return { profile, kind: "new", vinIsNew: true, resolution };
+  }
+  return { profile: null, kind: null, vinIsNew: false, resolution };
+}
+
 /** Jaccard overlap of two responder sets (0..1) — how alike two buses look. */
 export function fingerprintSimilarity(a?: VehicleFingerprint | null, b?: VehicleFingerprint | null): number {
   const A = new Set((a?.responders ?? []).map((x) => x.toUpperCase()));

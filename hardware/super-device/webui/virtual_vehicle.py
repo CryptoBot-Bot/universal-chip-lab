@@ -16,6 +16,12 @@ the daemon uses, so padding/framing interoperate exactly.
     python3 virtual_vehicle.py --selftest            # validate responder, no CAN needed
     python3 virtual_vehicle.py --list
     python3 virtual_vehicle.py --describe corolla    # GROUND TRUTH per module (score the AI)
+    sudo python3 virtual_vehicle.py --iface vcan0 --replay /var/lib/superdevice/recordings/<id>.jsonl
+    python3 virtual_vehicle.py --replay-info <file.jsonl>   # what a recording holds, no CAN needed
+
+--iface vcan0 is a kernel-only bus (no wiring): the daemon creates it when asked
+to start a vehicle there. --replay turns a recording the daemon made on a REAL
+car (its ISO-TP recorder) into a vehicle that answers what that car answered.
 
 Design: every MODULE TYPE is a real-world TEMPLATE (see TEMPLATES) — the
 structure a tester actually meets on that kind of ECU:
@@ -35,6 +41,7 @@ faults. Each ECU keeps STATE (session with S3 timeout, security unlock — test 
 flash (34/35/36) stay gated: that is the bench path.
 """
 import argparse
+import json
 import math
 import socket
 import struct
@@ -808,6 +815,14 @@ def respond(e, data):
 
 # ---- ISO-TP server per ECU + broadcast loop ---------------------------------
 
+CAN_EFF_FLAG = 0x80000000
+
+
+def _can_id(i):
+    """29-bit ("extended") ids carry the EFF flag on the wire, as in the daemon."""
+    return i | CAN_EFF_FLAG if i > 0x7FF else i
+
+
 def _isotp_bind(iface, rx_id, tx_id):
     s = socket.socket(AF_CAN, socket.SOCK_DGRAM, CAN_ISOTP)
     try:
@@ -816,11 +831,12 @@ def _isotp_bind(iface, rx_id, tx_id):
     except OSError:
         pass
     s.settimeout(0.5)
-    s.bind((iface, rx_id, tx_id))
+    s.bind((iface, _can_id(rx_id), _can_id(tx_id)))
     return s
 
 
-def serve_ecu(iface, e):
+def serve_ecu(iface, e, responder=None):
+    responder = responder or respond
     try:
         sock = _isotp_bind(iface, e["req"], e["resp"])
     except OSError as ex:
@@ -837,7 +853,7 @@ def serve_ecu(iface, e):
         if not req:
             continue
         try:
-            resp = respond(e, bytes(req))
+            resp = responder(e, bytes(req))
             if resp:
                 sock.send(resp)
         except Exception as ex:
@@ -896,6 +912,185 @@ def run(iface, vehicle_key):
     except KeyboardInterrupt:
         RUNNING.clear()
     print("[vv] stopped", flush=True)
+
+
+# ---- replay: a vehicle rebuilt from a recording --------------------------------
+# The daemon's recorder logs every ISO-TP exchange with a car as JSONL ("x" lines:
+# tx, rx, req, resp) plus bus-monitor snapshots ("bus" lines). load_replay() turns
+# one such file into ECUs — one per (request id, response id) pair that answered —
+# that reply to each request with what the car replied:
+#   • keyed by the diagnostic session the request was made in (the same 22 xxxx can
+#     answer differently in the extended session), falling back to any session;
+#   • a request recorded several times cycles through its recorded answers in
+#     order, so live values move the way they moved on the car;
+#   • a request the car never saw gets silence (a timeout), not an invented reply.
+# Broadcast traffic is replayed from the last bus snapshot (last bytes, real rates).
+
+REPLAY_MAX_ANSWERS = 64      # per request, per session
+REPLAY_MAX_FPS = 1500        # total broadcast frames per second
+
+
+def load_replay(path):
+    ecus, bus, used = {}, {}, {}
+    label, vin, lines, bad = "", "", 0, 0
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                bad += 1          # the torn last line of a session still being written
+                continue
+            lines += 1
+            kind = r.get("type")
+            if kind == "session":
+                label = r.get("label") or r.get("id") or label
+            elif kind == "bus":
+                if r.get("frames"):
+                    bus[r.get("iface")] = r["frames"]
+            elif kind == "x":
+                try:
+                    tx, rx = int(r["tx"], 16), int(r["rx"], 16)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                req = str(r.get("req") or "").lower()
+                resp = str(r.get("resp") or "").lower()
+                if not req:
+                    continue
+                e = ecus.get((tx, rx))
+                if e is None:
+                    e = ecus[(tx, rx)] = {
+                        "name": f"replay {tx:X}->{rx:X}", "req": tx, "resp": rx, "table": {}, "any": {},
+                        "silent": set(), "asked": 0, "_sess": 0x01, "_last": 0.0, "cursor": {},
+                        "state": {"session": 0x01, "last_rx": 0.0},
+                    }
+                t = float(r.get("t") or 0.0)
+                if e["_sess"] != 0x01 and e["_last"] and t - e["_last"] > S3_TIMEOUT:
+                    e["_sess"] = 0x01      # the car's own S3 timer dropped it back to default
+                e["_last"] = t
+                e["asked"] += 1
+                used[r.get("iface")] = used.get(r.get("iface"), 0) + 1
+                if not resp:
+                    e["silent"].add(req)
+                    continue
+                for table, key in ((e["table"], (e["_sess"], req)), (e["any"], req)):
+                    seq = table.setdefault(key, [])
+                    if len(seq) < REPLAY_MAX_ANSWERS:
+                        seq.append(resp)
+                if req[:2] == "10" and resp[:2] == "50" and len(resp) >= 4:
+                    e["_sess"] = int(resp[2:4], 16) & 0x7F
+                elif req[:2] == "11" and resp[:2] == "51":
+                    e["_sess"] = 0x01
+                if not vin and (resp.startswith("490201") or resp.startswith("62f190")):
+                    txt = "".join(chr(b) for b in bytes.fromhex(resp[6:]) if 0x20 < b < 0x7F)
+                    if len(txt) >= 11:
+                        vin = txt[:17]
+    answering = {k: e for k, e in ecus.items() if e["any"]}
+    main_iface = max(used, key=used.get) if used else None
+    frames = bus.get(main_iface) or next(iter(bus.values()), [])
+    diag_ids = {i for e in answering.values() for i in (e["req"], e["resp"])}
+    broadcast = []
+    for fr in frames:
+        try:
+            text = str(fr["id"])
+            cid = int(text, 16)
+            data = bytes.fromhex(str(fr.get("bytes", "")).replace(" ", ""))[:8]
+            hz = float(fr.get("hz") or 0)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if cid in diag_ids or hz <= 0:
+            continue
+        broadcast.append((cid | CAN_EFF_FLAG if len(text) > 3 else cid, min(hz, 100.0), data))
+    total = sum(hz for _, hz, _ in broadcast)
+    if total > REPLAY_MAX_FPS:
+        broadcast = [(c, hz * REPLAY_MAX_FPS / total, d) for (c, hz, d) in broadcast]
+    return {"name": f"replay of {label or path}", "vin": vin, "ecus": list(answering.values()), "silent_only": len(ecus) - len(answering),
+            "broadcast": broadcast, "lines": lines, "bad_lines": bad, "iface": main_iface}
+
+
+def replay_respond(e, data):
+    """Answer one request from the recording, or None (silence) if the car never answered it."""
+    st = e["state"]
+    now = _tick()
+    if st["session"] != 0x01 and st["last_rx"] and now - st["last_rx"] > S3_TIMEOUT:
+        st["session"] = 0x01
+    st["last_rx"] = now
+    req = bytes(data).hex()
+    key = (st["session"], req)
+    seq = e["table"].get(key)
+    if not seq:
+        key = ("any", req)
+        seq = e["any"].get(req)
+    if not seq:
+        return None
+    i = e["cursor"].get(key, 0)
+    e["cursor"][key] = i + 1
+    resp = bytes.fromhex(seq[i % len(seq)])
+    if req[:2] == "10" and resp[:1] == b"\x50" and len(resp) >= 2:
+        st["session"] = resp[1] & 0x7F
+    elif req[:2] == "11" and resp[:1] == b"\x51":
+        st["session"] = 0x01
+    return resp
+
+
+def replay_broadcast_loop(iface, frames):
+    try:
+        raw = socket.socket(PF_CAN, socket.SOCK_RAW, CAN_RAW)
+        raw.bind((iface,))
+    except OSError as ex:
+        print(f"[vv] broadcast disabled: {ex}", flush=True)
+        return
+    items = [(struct.pack("=IB3x8s", cid, len(data), data.ljust(8, b"\x00")), 1.0 / hz) for (cid, hz, data) in frames]
+    due = [_tick() + i * 0.0007 for i in range(len(items))]
+    while RUNNING.is_set():
+        now = _tick()
+        for i, (pkt, period) in enumerate(items):
+            if now >= due[i]:
+                due[i] = now + period
+                try:
+                    raw.send(pkt)
+                except OSError:
+                    pass
+        time.sleep(0.002)
+
+
+def replay_info(path):
+    v = load_replay(path)
+    print(f"# {v['name']} — VIN {v['vin'] or 'not read'} — {len(v['ecus'])} answering address pair(s), "
+          f"{v['silent_only']} that never answered, {len(v['broadcast'])} broadcast id(s), {v['lines']} line(s)"
+          + (f", {v['bad_lines']} unreadable" if v["bad_lines"] else ""))
+    for e in sorted(v["ecus"], key=lambda x: x["req"]):
+        answers = sum(len(s) for s in e["any"].values())
+        sessions = sorted({k[0] for k in e["table"]})
+        print(f"  {e['req']:X}->{e['resp']:X}  {len(e['any'])} distinct request(s), {answers} answer(s) kept, {e['asked']} asked, "
+              f"{len(e['silent'])} unanswered, session(s) {' '.join(f'{s:02X}' for s in sessions)}")
+    return 0 if v["ecus"] else 1
+
+
+def run_replay(iface, path):
+    try:
+        v = load_replay(path)
+    except OSError as ex:
+        print(f"[vv] cannot read the recording: {ex}", flush=True)
+        return 1
+    if not v["ecus"]:
+        print(f"[vv] nothing to replay in {path}: no exchange got an answer", flush=True)
+        return 1
+    print(f"[vv] Virtual Vehicle: {v['name']}  VIN {v['vin'] or '?'}  on {iface}  ({len(v['ecus'])} address pairs, "
+          f"{len(v['broadcast'])} broadcast ids)", flush=True)
+    for e in v["ecus"]:
+        threading.Thread(target=serve_ecu, args=(iface, e, replay_respond), daemon=True).start()
+    if v["broadcast"]:
+        threading.Thread(target=replay_broadcast_loop, args=(iface, v["broadcast"]), daemon=True).start()
+    try:
+        while RUNNING.is_set():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        RUNNING.clear()
+    print("[vv] stopped", flush=True)
+    return 0
 
 
 # ---- ground truth ------------------------------------------------------------
@@ -1002,6 +1197,43 @@ def selftest():
         check("no two ECUs share a request id", len({e["req"] for e in v["ecus"]}) == len(v["ecus"]))
         check("all templates have >=3 measurement DIDs", all(len(TEMPLATES[e["tpl"]]["data"]) >= 3 for e in v["ecus"]))
 
+    # replay: a recording in, the same answers out
+    import os
+    import tempfile
+    print("--- replay of a recording")
+    rec = [
+        {"type": "session", "id": "t", "label": "selftest car"},
+        {"type": "x", "t": 100.0, "iface": "can0", "tx": "7E0", "rx": "7E8", "req": "0902", "resp": "490201" + b"JTDEPRAE0LJ012345".hex()},
+        {"type": "x", "t": 100.1, "iface": "can0", "tx": "7E0", "rx": "7E8", "req": "220100", "resp": "7f2231"},
+        {"type": "x", "t": 100.2, "iface": "can0", "tx": "7E0", "rx": "7E8", "req": "1003", "resp": "5003003201f4"},
+        {"type": "x", "t": 100.3, "iface": "can0", "tx": "7E0", "rx": "7E8", "req": "220100", "resp": "6201000bb8"},
+        {"type": "x", "t": 100.4, "iface": "can0", "tx": "7E0", "rx": "7E8", "req": "220100", "resp": "6201000bc0"},
+        {"type": "x", "t": 100.5, "iface": "can0", "tx": "7E0", "rx": "7E8", "req": "2e0200ff", "resp": "", "err": "TimeoutError"},
+        {"type": "x", "t": 101.0, "iface": "can0", "tx": "7C0", "rx": "7C8", "req": "3e00", "resp": "", "err": "TimeoutError"},
+        {"type": "x", "t": 102.0, "iface": "can0", "tx": "18DA10F1", "rx": "18DAF110", "req": "3e00", "resp": "7e00"},
+        {"type": "bus", "iface": "can0", "window_ms": 700, "frames": [
+            {"id": "1C4", "dlc": 8, "bytes": "0B E0 20 11 00 00 00 00", "hz": 50.0},
+            {"id": "7E8", "dlc": 8, "bytes": "02 7E 00 00 00 00 00 00", "hz": 1.4}]},
+    ]
+    fd, tmp = tempfile.mkstemp(suffix=".jsonl")
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(json.dumps(r) for r in rec) + '\n{"type":"x","t":103,"tx":"7E0"')   # + a torn last line
+    try:
+        v = load_replay(tmp)
+        check("replay: 2 answering pairs, 1 silent-only, VIN found", len(v["ecus"]) == 2 and v["silent_only"] == 1 and v["vin"] == "JTDEPRAE0LJ012345")
+        check("replay: torn last line skipped", v["bad_lines"] == 1)
+        check("replay: diagnostic id kept out of the broadcast", [c for c, _, _ in v["broadcast"]] == [0x1C4])
+        e = next(x for x in v["ecus"] if x["req"] == 0x7E0)
+        check("replay: default session -> the default-session answer", replay_respond(e, bytes.fromhex("220100")) == bytes.fromhex("7f2231"))
+        check("replay: 10 03 accepted", replay_respond(e, bytes.fromhex("1003"))[:2] == bytes([0x50, 0x03]))
+        a, b, c = (replay_respond(e, bytes.fromhex("220100")) for _ in range(3))
+        check("replay: extended session cycles the recorded samples", (a, b, c) == (bytes.fromhex("6201000bb8"), bytes.fromhex("6201000bc0"), bytes.fromhex("6201000bb8")))
+        check("replay: a request the car never answered -> silence", replay_respond(e, bytes.fromhex("2e0200ff")) is None)
+        check("replay: a request never recorded -> silence", replay_respond(e, bytes.fromhex("22f187")) is None)
+        check("replay: 29-bit pair kept", any(x["req"] == 0x18DA10F1 for x in v["ecus"]) and _can_id(0x18DA10F1) & CAN_EFF_FLAG)
+    finally:
+        os.remove(tmp)
+
     print(f"\n=== {'ALL PASS' if fails == 0 else str(fails) + ' FAILED'} · {len(VEHICLES)} vehicles · {len(TEMPLATES)} module templates ===")
     return 0 if fails == 0 else 1
 
@@ -1013,7 +1245,13 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--describe", metavar="VEHICLE", choices=list(VEHICLES))
+    ap.add_argument("--replay", metavar="FILE", help="serve what a recorded car answered (a daemon recording, .jsonl)")
+    ap.add_argument("--replay-info", metavar="FILE", help="print what a recording holds and exit (no CAN needed)")
     args = ap.parse_args()
+    if args.replay_info:
+        return replay_info(args.replay_info)
+    if args.replay:
+        return run_replay(args.iface, args.replay)
     if args.list:
         for k in VEHICLES:
             v = VEHICLES[k]()

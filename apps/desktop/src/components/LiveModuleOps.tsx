@@ -321,7 +321,7 @@ export function LiveModuleOps({ host, iface, profile, module, onModuleUpdate }: 
         </div>
       )}
 
-      <WriteConfirmModal pending={op?.pending ?? null} onCancel={() => setOp(null)} onConfirm={() => { const c = op?.commit; setOp(null); c?.(); }} />
+      <WriteConfirmModal target="vehicle" pending={op?.pending ?? null} onCancel={() => setOp(null)} onConfirm={() => { const c = op?.commit; setOp(null); c?.(); }} />
     </div>
   );
 }

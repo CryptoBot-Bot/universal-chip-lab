@@ -119,18 +119,29 @@ export function bytesFromHex(hex: string): number[] {
 
 export interface DtcRow { code: string; description: string; statusByte: string; status: string }
 
+/** ISO 14229-1 status-of-DTC bits. 0x10 / 0x40 ("test not completed") say nothing
+ * about a fault: an ECU answering 19 02 FF lists every code it CAN set with those
+ * bits — the 2015 Sprinter's ECM returned 279 records, 6 of them faults. */
+const DTC_ACTIVE = 0x01, DTC_FAILED_THIS_CYCLE = 0x02, DTC_PENDING = 0x04, DTC_CONFIRMED = 0x08, DTC_MIL = 0x80;
+
+/** A record that is a fault: failing now, pending, confirmed (stored) or lighting the MIL. */
+export function isFaultStatus(s: number): boolean {
+  return (s & (DTC_ACTIVE | DTC_PENDING | DTC_CONFIRMED | DTC_MIL)) !== 0;
+}
+
 function dtcStatusFlags(s: number): string {
   const f: string[] = [];
-  if (s & 0x01) f.push("failed");
-  if (s & 0x02) f.push("failed-this-cycle");
-  if (s & 0x08) f.push("confirmed");
-  if (s & 0x40) f.push("pending");
-  if (s & 0x80) f.push("MIL");
+  if (s & DTC_ACTIVE) f.push("failed");
+  if (s & DTC_FAILED_THIS_CYCLE) f.push("failed-this-cycle");
+  if (s & DTC_CONFIRMED) f.push("confirmed");
+  if (s & DTC_PENDING) f.push("pending");
+  if (s & DTC_MIL) f.push("MIL");
   return f.join(" · ") || "—";
 }
 
-/** Decode a 0x19/0x02 response (hex) into detailed rows, keeping the status byte. */
-export function parseUdsDtcsFromHex(hex: string): DtcRow[] {
+/** Decode a 0x19/0x02 response (hex) into detailed rows, keeping the status byte.
+ * Only fault records are returned unless `all` is set (see isFaultStatus). */
+export function parseUdsDtcsFromHex(hex: string, all = false): DtcRow[] {
   const b = bytesFromHex(hex);
   const start = b.findIndex((_, k) => b[k] === 0x59 && b[k + 1] === 0x02);
   if (start < 0) return [];
@@ -139,12 +150,39 @@ export function parseUdsDtcsFromHex(hex: string): DtcRow[] {
   for (let i = 0; i + 3 < body.length; i += 4) {
     const [h, m, l, st] = [body[i], body[i + 1], body[i + 2], body[i + 3]];
     if (h === 0 && m === 0 && l === 0 && st === 0) continue;
+    if (!all && !isFaultStatus(st)) continue;
     const base = decodeDtc(h, m);
     out.push({
       code: l ? `${base}-${l.toString(16).toUpperCase().padStart(2, "0")}` : base,
       description: dtcDescription(base),
       statusByte: st.toString(16).toUpperCase().padStart(2, "0"),
       status: dtcStatusFlags(st),
+    });
+  }
+  return out;
+}
+
+/**
+ * Decode a KWP2000 0x18 (readDiagnosticTroubleCodesByStatus) response:
+ * [0x58, count, {DTC hi, DTC lo, status}…]. KWP-on-CAN modules (Mercedes EGS and
+ * others of that era) refuse UDS 0x19 with 7F 19 11 and answer this instead.
+ */
+export function parseKwpDtcsFromHex(hex: string): DtcRow[] {
+  const b = bytesFromHex(hex);
+  const start = b.indexOf(0x58);
+  if (start < 0 || b.length < start + 2) return [];
+  const count = b[start + 1];
+  const body = b.slice(start + 2);
+  const out: DtcRow[] = [];
+  for (let n = 0, i = 0; n < count && i + 2 < body.length; n++, i += 3) {
+    const [h, l, st] = [body[i], body[i + 1], body[i + 2]];
+    if (h === 0 && l === 0) continue;
+    const base = decodeDtc(h, l);
+    out.push({
+      code: base,
+      description: dtcDescription(base),
+      statusByte: st.toString(16).toUpperCase().padStart(2, "0"),
+      status: `KWP status 0x${st.toString(16).toUpperCase().padStart(2, "0")}${st & 0x80 ? " · MIL" : ""}`,
     });
   }
   return out;
@@ -202,6 +240,25 @@ export function decodeObdPid(reqHex: string, respHex: string): string | null {
     case 0x42: return n((A * 256 + B) / 1000, "V", 2);
     case 0x43: return n((A * 256 + B) * 100 / 255, "%", 1);
     case 0x1f: return n(A * 256 + B, "s");
+    // SAE J1979 — added from the 2015 Sprinter (OM642 diesel), which supports 55 PIDs
+    case 0x21: case 0x31: return n(A * 256 + B, "km");                 // distance with MIL on / since codes cleared
+    case 0x4d: case 0x4e: return n(A * 256 + B, "min");                // time with MIL on / since codes cleared
+    case 0x30: return n(A, "warm-ups");                                // warm-ups since codes cleared
+    case 0x33: return n(A, "kPa");                                     // barometric pressure
+    case 0x22: return n((A * 256 + B) * 0.079, "kPa", 1);              // fuel rail pressure (rel. manifold)
+    case 0x23: return n((A * 256 + B) * 10, "kPa");                    // fuel rail gauge pressure (diesel / GDI)
+    case 0x2c: case 0x2e: return n((A * 100) / 255, "%", 1);           // commanded EGR / evap purge
+    case 0x2d: return n((A * 100) / 128 - 100, "%", 1);                // EGR error
+    case 0x3c: case 0x3d: case 0x3e: case 0x3f: return n((A * 256 + B) / 10 - 40, "°C", 1); // catalyst temps
+    case 0x52: return n((A * 100) / 255, "%", 1);                      // ethanol %
+    case 0x59: return n((A * 256 + B) * 10, "kPa");                    // fuel rail absolute pressure
+    case 0x5a: return n((A * 100) / 255, "%", 1);                      // relative accelerator pedal
+    case 0x5b: return n((A * 100) / 255, "%", 1);                      // hybrid battery remaining
+    case 0x5d: return n((A * 256 + B) / 128 - 210, "°", 2);            // fuel injection timing
+    case 0x5e: return n((A * 256 + B) / 20, "L/h", 2);                 // engine fuel rate
+    case 0x61: case 0x62: return n(A - 125, "%");                      // driver demand / actual engine torque
+    case 0x63: return n(A * 256 + B, "Nm");                            // engine reference torque
+    case 0xa6: { const v = ((b[idx + 2] ?? 0) * 2 ** 24 + (b[idx + 3] ?? 0) * 2 ** 16 + (b[idx + 4] ?? 0) * 256 + (b[idx + 5] ?? 0)) / 10; return n(v, "km", 1); } // odometer
     default: return null;
   }
 }

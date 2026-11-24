@@ -108,6 +108,38 @@ export function CockpitTab() {
 
   useEffect(() => { void refreshLibrary(); }, []);
 
+  // Live library: the command-line runner (`pnpm vehicle …`) or another window may be
+  // working on this same vehicle while the cockpit is open — it saves to the same
+  // library files. Re-read the library every few seconds and adopt a newer copy of
+  // the vehicle on screen, so discovery / census / deep-map results show up as they land.
+  useEffect(() => {
+    const stamp = (list: VehicleProfile[]) => list.map((p) => `${p.id}@${p.provenance?.updatedAt ?? ""}`).join("|");
+    let last = "";
+    const iv = setInterval(async () => {
+      try {
+        const list = await Api.vehicleLib.list();
+        const sig = stamp(list);
+        if (sig === last) return;
+        last = sig;
+        setProfiles(list);
+        // what the map looks like — changes when a discovery, census or deep-map landed,
+        // not when a save only re-stamped the same content
+        const mapSig = (p: VehicleProfile) => `${p.fingerprint?.takenAt ?? ""};` + p.modules
+          .map((m) => `${m.id}:${m.lastSeenAt ?? ""}:${m.censusAt ?? ""}:${m.explored?.runCount ?? 0}`).join(",");
+        setSelected((cur) => {
+          const fresh = cur ? list.find((p) => p.id === cur.id) : undefined;
+          if (!cur || !fresh || fresh.provenance?.updatedAt === cur.provenance?.updatedAt) return cur;
+          if (mapSig(fresh) !== mapSig(cur)) {
+            const mapped = fresh.modules.filter((m) => m.explored).length;
+            setMsg(`↻ ${fresh.year ?? ""} ${fresh.make} ${fresh.model}: map updated from outside this window at ${new Date().toLocaleTimeString()} — ${fresh.modules.length} modules, ${mapped} deep-mapped.`);
+          }
+          return fresh;
+        });
+      } catch { /* library unreadable this tick — keep what is shown */ }
+    }, 4000);
+    return () => clearInterval(iv);
+  }, []);
+
   async function refreshLibrary() {
     try { setProfiles(await Api.vehicleLib.list()); } catch (e) { setMsg((e as Error).message); }
   }

@@ -86,7 +86,41 @@ without anyone at the car — everything the app does goes through the Pi's HTTP
   capture JSON** (§2.4). It contains the raw responses, so gaps (an unknown address
   layout, a module that refused a session, a wrong census name) can be diagnosed and
   fixed against real data, then verified on the bench sim before the next visit.
-- **Next step for true remote access to the car** (not built yet): a reverse tunnel from
-  the Pi to a relay (e.g. Tailscale on the Pi) so the Pi's API is reachable from home while
-  the device is plugged into a car at the shop. The daemon already exposes everything over
-  HTTP, so that is a networking change, not an app change.
+- **From anywhere (built 2026-11-21):** the Pi is on the VPN, so its API and SSH are
+  reachable from the home PC while it is plugged into a car at the shop (ssh host
+  `superdevice`; `superdevice-lan` on the home network). Three tools ride on that
+  (AS-BUILT §7.2c):
+  - **the command-line runner** — the app's pipeline without the app:
+    `pnpm vehicle --host <pi address> run --map <module>` (from the repo root)
+    does VIN → NHTSA → discover → census → deep-map one module → capture, records the
+    whole visit on the Pi and copies the recording to `<workspace>/recordings/`.
+    Single steps: `status`, `vin`, `discover`, `census`, `modules`, `map`, `capture`.
+  - **the recorder** — every ISO-TP exchange is kept on the Pi's disk whether or not
+    anyone asked (`vehicle … rec list`, `rec fetch`). Back home, `vehicle … sim replay
+    <recording id> --on vcan0` turns a visit into a virtual car to develop against.
+  - **`deploy.py`** — push a daemon fix by SSH key; it checks the daemon answers after
+    the restart and puts the previous files back by itself if it does not.
+  Never deploy anything that touches the VPN daemon or the Wi-Fi setup from afar: they
+  are the only way in.
+- **Working the car live from the home PC (2026-11-21):** you are at the car with the
+  laptop, streaming the home PC's screen (Moonlight); the Pi is in the OBD port on the
+  shop Wi-Fi; the Claude Code session on the home PC reaches it over the VPN. What that
+  session does first, so you know what to expect on screen:
+  1. `pnpm vehicle --host <pi address> status` — wants: can0 **UP, ERROR-ACTIVE, rx
+     counting**; `Sim not running`; a recorder line. (It warns loudly if a virtual
+     vehicle is still running.)
+  2. `… run --label "<the car>"` — VIN → NHTSA → discover → census → capture, recorded
+     on the Pi and copied home (~1–2 min, one AI call).
+  3. `… map <module>` — one module at a time (3–5 min each).
+  4. Anything odd: it reads the capture / recording, fixes code, `deploy.py` if the fix
+     is in the daemon (the Pi rolls back by itself if the new daemon does not answer).
+  To watch the car take shape while that happens, double-click **`START-CHIP-LAB.bat`**
+  in the repo on the home PC: it runs the app from source on the SAME library the
+  command line writes to, and the Vehicle Cockpit re-reads that library every few seconds
+  (a "↻ map updated from outside this window" line appears when something landed). In the
+  app use REAL VEHICLE and connect to the Pi's VPN address (listed under Pi Devices) —
+  the `.local` name only resolves at home. Let one side drive a module at a time: the
+  app and the command line asking the same ECU at the same moment can cross answers.
+  Before plugging into the car: **virtual vehicle off, can1↔can0 jumper pulled, can0's
+  120 Ω terminator OFF** (§0.3, §1.3), and the UPS showing a battery % (without it there
+  is no clean shutdown when the plug is pulled).

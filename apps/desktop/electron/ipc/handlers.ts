@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -14,9 +14,9 @@ import {
 } from "@ecu/chip-db/store";
 import { JobEngine, ModuleJobEngine, SafetyEngine } from "@ecu/core";
 import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump-tools";
-import { createModuleRegistry, foldDiscoveredModules, foldExploration, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles, SEED_VEHICLE_PROFILES } from "@ecu/vehicle-db";
-import type { CanonicalModule, DiscoveredModuleInput } from "@ecu/vehicle-db";
-import type { BenchModuleProfile, BusModuleKnowledge, VehicleModule, VehicleProfile, VehicleSystemCategory } from "@ecu/vehicle-db";
+import { createModuleRegistry, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles } from "@ecu/vehicle-db";
+import type { DiscoveredModuleInput } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, VehicleProfile } from "@ecu/vehicle-db";
 import {
   deleteStoredBusKnowledge,
   loadStoredBusKnowledge,
@@ -48,10 +48,10 @@ import { deleteDump, exportDump, listDumps, readDumpSlice, type DumpFormat } fro
 import { mapBus, type BusMapInput } from "../resolver/busMapper";
 import { deleteExplorerRun, listExplorerRuns, saveExplorerRun, type StoredExplorerRun } from "../explorerRuns";
 import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSkeleton, type SeqItem, type BusFrame } from "../resolver/moduleExplorer";
+import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicleExplorer";
 import {
-  discoverModules, deepMapVehicle, resultToExplorationInput,
-  type DeepMapDeps, type MapTarget, type VehicleExplorerEvent,
-} from "../resolver/vehicleExplorer";
+  captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
+} from "../pipeline/vehiclePipeline";
 import { identifyVehicle, censusModules, type IdentifyInput, type CensusInput } from "../resolver/vehicleIdentifier";
 import { decodeVinOnline } from "../resolver/vinOnline";
 import { mapModule, type MapModuleInput } from "../resolver/moduleMapper";
@@ -72,24 +72,6 @@ import type { IpcChannel, IpcResponse } from "./channels";
 interface RegisterOptions {
   projectRoot: string;
   appVersion: string;
-}
-
-/** Talk to the SuperDevice Pi's HTTP API from the main process (renderer is behind CSP). */
-const DEFAULT_PI_HOST = "superdevice.local:8080";
-async function piGet(host: string | undefined, pathq: string, timeoutMs = 8000): Promise<unknown> {
-  const h = (host && host.trim()) || DEFAULT_PI_HOST;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`http://${h}${pathq}`, { signal: controller.signal });
-    if (!res.ok) throw new Error(`SuperDevice HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    const m = err instanceof Error ? err.message : String(err);
-    throw new Error(`Cannot reach SuperDevice at ${h} — ${m}`);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /** Sweep the local /24 subnet(s) for SuperDevices (they answer /api/device). */
@@ -123,27 +105,6 @@ async function discoverDevices(): Promise<{ host: string; ip: string; hostname: 
   }
   await Promise.all(Array.from({ length: 48 }, () => worker()));
   return found.sort((a, b) => a.ip.localeCompare(b.ip));
-}
-
-async function piPost(host: string | undefined, pathq: string, body: unknown, timeoutMs = 8000): Promise<unknown> {
-  const h = (host && host.trim()) || DEFAULT_PI_HOST;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`http://${h}${pathq}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`SuperDevice HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    const m = err instanceof Error ? err.message : String(err);
-    throw new Error(`Cannot reach SuperDevice at ${h} — ${m}`);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export async function registerIpcHandlers(
@@ -214,8 +175,9 @@ export async function registerIpcHandlers(
 
   // ---- SuperDevice (Raspberry Pi 5 CAN interface, over its HTTP API)
   register("superDevice:status", (_e, p: { host?: string }) => piGet(p?.host, "/api/status"));
-  register("superDevice:vin", (_e, p: { host?: string; iface?: string }) =>
-    piGet(p?.host, `/api/vin${p?.iface ? `?iface=${encodeURIComponent(p.iface)}` : ""}`));
+  // The daemon tries five ways to read a VIN (1.5 s each): the wait must outlast
+  // them, or a car that does not answer shows as "cannot reach the device".
+  register("superDevice:vin", (_e, p: { host?: string; iface?: string }) => readVin(p?.host, p?.iface || "can0"));
   register("superDevice:up", (_e, p: { host?: string; iface: string; bitrate?: number; fd?: boolean }) =>
     piPost(p?.host, "/api/up", { iface: p.iface, bitrate: p.bitrate ?? 500000, dbitrate: 2000000, fd: !!p.fd }));
   register("superDevice:down", (_e, p: { host?: string; iface: string }) =>
@@ -290,25 +252,17 @@ export async function registerIpcHandlers(
   // ---- AI Vehicle Explorer: discover modules on the real bus, then deep-map each
   //      one (reusing the per-module explorer), persisting the capability board
   //      into the YMM profile so next time we already know how to talk to it.
-  const CATS: VehicleSystemCategory[] = ["powertrain", "transmission", "chassis", "body", "infotainment", "safety", "network", "hvac", "other"];
-  const coerceCat = (c?: string): VehicleSystemCategory => (CATS.includes(c as VehicleSystemCategory) ? (c as VehicleSystemCategory) : "other");
+  //      The steps themselves live in ../pipeline/vehiclePipeline.ts, shared with
+  //      the command-line runner (cli/vehicle.ts).
   let vehicleExplorerStop = false;
 
   register("vehicleExplorer:stop", () => { vehicleExplorerStop = true; return { ok: true }; });
 
-  register("vehicleExplorer:discover", async (event, p: { host?: string; iface: string; ident?: boolean }) => {
+  register("vehicleExplorer:discover", async (event, p: { host?: string; iface: string; ident?: boolean; known?: AddressCandidate[]; deep?: boolean }) => {
     vehicleExplorerStop = false;
-    return discoverModules({
-      isotp: async (tx, rx, data) => {
-        const r = (await piPost(p.host, "/api/isotp", { iface: p.iface, tx, rx, data, timeout: 0.45 })) as { response?: string; negative?: boolean };
-        return r && r.response ? { response: r.response, negative: !!r.negative } : null;
-      },
-      // Identification pass (22 F187/F190/F18A/F195/F191/F18C) on every responder — on
-      // by default: it is what lets the library recognise the car and its modules.
-      probe: p.ident === false ? undefined : async (tx, rx, requests) => {
-        const r = (await piPost(p.host, "/api/isotp/seq", { iface: p.iface, tx, rx, requests, timeout: 1.0 })) as { results?: SeqItem[] };
-        return r.results ?? [];
-      },
+    return discoverOnBus({
+      host: p.host, iface: p.iface, ident: p.ident, known: p.known, deep: p.deep,
+      onSweep: (r) => { try { event.sender.send("vehicleExplorer:event", { type: "sweep", ok: r.ok, found: r.responders?.length ?? 0, seconds: r.seconds }); } catch { /* window gone */ } },
       onProgress: (done, total, found) => { try { event.sender.send("vehicleExplorer:event", { type: "discover", done, total, found }); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
@@ -316,98 +270,19 @@ export async function registerIpcHandlers(
 
   // Discovery as its own saving stage: persist the responders (address + lastSeen)
   // into the YMM profile, healing any pre-existing duplicate module entries.
-  register("vehicleExplorer:commitDiscovery", async (_e, p: { profile: VehicleProfile; discovered: DiscoveredModuleInput[] }) => {
-    const profile: VehicleProfile = JSON.parse(JSON.stringify(p.profile));
-    const now = new Date().toISOString();
-    // Canonical identities from the seed for this YMM, keyed by response id — so
-    // a live responder adopts the real module name/category and old duplicates heal.
-    const canonical = new Map<string, CanonicalModule>();
-    const seed = SEED_VEHICLE_PROFILES.find((s) => s.id === profile.id);
-    for (const m of seed?.modules ?? []) {
-      const resp = (m.addressing?.response ?? "").toUpperCase().replace(/[^0-9A-F]/g, "");
-      if (resp) canonical.set(resp, { id: m.id, label: m.label, category: m.category, location: m.location, bus: m.bus });
-    }
-    profile.modules = foldDiscoveredModules(profile.modules, p.discovered ?? [], profile.buses[0]?.id || "hs-can", now, canonical);
-    // The bus fingerprint — what answered and what each said it was — is how the
-    // identity resolver and the AI recognise this vehicle next time.
-    if ((p.discovered ?? []).length) {
-      profile.fingerprint = {
-        takenAt: now,
-        responders: p.discovered.map((d) => d.responseId.toUpperCase()),
-        ecus: p.discovered.map((d) => ({ responseId: d.responseId.toUpperCase(), requestId: d.requestId, ...(d.ident ?? {}) })),
-        calId: profile.fingerprint?.calId, cvn: profile.fingerprint?.cvn,
-      };
-    }
-    await saveStoredVehicleProfile(vehicleLibDir, profile, now);
-    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
-    return mergeVehicleProfiles(records).find((m) => m.id === profile.id) ?? profile;
-  });
+  register("vehicleExplorer:commitDiscovery", (_e, p: { profile: VehicleProfile; discovered: DiscoveredModuleInput[] }) =>
+    commitDiscovery(vehicleLibDir, p.profile, p.discovered ?? []));
 
   register("vehicleExplorer:start", async (event, p: {
     host?: string; iface: string; profile: VehicleProfile;
     targets: { moduleId: string; displayName: string; brand: string; category: string; protocol: string; requestId: string; responseId: string }[];
   }) => {
     vehicleExplorerStop = false;
-    const profile: VehicleProfile = JSON.parse(JSON.stringify(p.profile));
-    const send = (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } };
-
-    const vehicleLabel = [profile.year, profile.make, profile.model, profile.trim].filter(Boolean).join(" ");
-    const mapTargets: MapTarget[] = p.targets.map((t) => {
-      const m = profile.modules.find((x) => x.id === t.moduleId);
-      return {
-        ...t,
-        prior: m?.explored,
-        identity: m?.identity ? { partNo: m.identity.partNo, supplier: m.identity.supplier, sw: m.identity.sw, hw: m.identity.hw, serial: m.identity.serial } : undefined,
-        summary: m?.summary,
-        vehicle: vehicleLabel,
-      };
-    });
-
-    // Serialize the incremental saves so overlapping module-done events can't clobber the file.
-    let saveChain: Promise<void> = Promise.resolve();
-
-    const deps: DeepMapDeps = {
-      iface: p.iface,
-      probe: async (tx, rx, requests) => {
-        const r = (await piPost(p.host, "/api/isotp/seq", { iface: p.iface, tx, rx, requests, timeout: 2.0 }, 45000)) as { results?: SeqItem[] };
-        return r.results ?? [];
-      },
-      scanBus: async (ms) => {
-        const r = (await piGet(p.host, `/api/bus/monitor?iface=${encodeURIComponent(p.iface)}&ms=${ms}`)) as { frames?: BusFrame[]; window_ms?: number };
-        return { frames: r.frames ?? [], window_ms: r.window_ms };
-      },
-      onEvent: (e) => {
-        send(e);
-        if (e.type === "module-done") {
-          const t = p.targets.find((x) => x.moduleId === e.moduleId);
-          const now = new Date().toISOString();
-          const input = resultToExplorationInput(e.result);
-          saveChain = saveChain.then(async () => {
-            let mod = profile.modules.find((m) => m.id === e.moduleId);
-            if (!mod) {
-              mod = {
-                id: e.moduleId,
-                label: t?.displayName || e.moduleId,
-                category: coerceCat(t?.category),
-                bus: profile.buses[0]?.id || "hs-can",
-                location: "cabin_front",
-                addressing: { request: t?.requestId, response: t?.responseId },
-              } as VehicleModule;
-              profile.modules.push(mod);
-            }
-            mod.explored = foldExploration(mod.explored, input, now, profile.knownVins?.[0]?.vin);
-            try { await saveStoredVehicleProfile(vehicleLibDir, profile, now); }
-            catch (err) { send({ type: "error", text: `save failed: ${(err as Error).message}` }); }
-          });
-        }
-      },
+    return deepMapAndSave({
+      host: p.host, iface: p.iface, profile: p.profile, targets: p.targets, vehicleLibDir,
+      onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
-    };
-
-    await deepMapVehicle(mapTargets, deps);
-    await saveChain;
-    const { records } = await loadStoredVehicleProfiles(vehicleLibDir);
-    return mergeVehicleProfiles(records).find((m) => m.id === profile.id) ?? profile;
+    });
   });
 
   // AI vehicle identifier — VIN structure + bus fingerprint + library candidates →
@@ -417,50 +292,13 @@ export async function registerIpcHandlers(
   // away from the car) needs to see what happened: device health, both buses, the
   // raw VIN attempts, a full discovery with identification strings, a bus snapshot,
   // and the vehicle profile as saved. Written under <workspace>/reports/.
-  register("vehicleLib:capture", async (_e, p: { host?: string; iface: string; vin?: string; profile?: VehicleProfile; note?: string; extra?: unknown }) => {
-    const startedAt = new Date().toISOString();
-    const errors: string[] = [];
-    const safe = async <T,>(label: string, fn: () => Promise<T>): Promise<T | null> => {
-      try { return await fn(); } catch (e) { errors.push(`${label}: ${(e as Error).message}`); return null; }
-    };
-    const status = await safe("status", () => piGet(p.host, "/api/status"));
-    const device = await safe("device", () => piGet(p.host, "/api/device"));
-    const sim = await safe("sim", () => piGet(p.host, "/api/sim/status"));
-    const vinRead = await safe("vin", () => piGet(p.host, `/api/vin?iface=${encodeURIComponent(p.iface)}`));
-    const busBefore = await safe("bus-monitor", () => piGet(p.host, `/api/bus/monitor?iface=${encodeURIComponent(p.iface)}&ms=1000`, 12000));
-    const discovered = await safe("discovery", () => discoverModules({
-      isotp: async (tx, rx, data) => {
-        const r = (await piPost(p.host, "/api/isotp", { iface: p.iface, tx, rx, data, timeout: 0.45 })) as { response?: string; negative?: boolean };
-        return r && r.response ? { response: r.response, negative: !!r.negative } : null;
-      },
-      probe: async (tx, rx, requests) => {
-        const r = (await piPost(p.host, "/api/isotp/seq", { iface: p.iface, tx, rx, requests, timeout: 1.0 })) as { results?: SeqItem[] };
-        return r.results ?? [];
-      },
-      shouldStop: () => false,
-    }));
-    const obdBaseline = await safe("obd-baseline", () => piPost(p.host, "/api/isotp/seq", { iface: p.iface, tx: "7E0", rx: "7E8", requests: ["0100", "0120", "0902", "0904", "0906", "090A", "03", "07", "0A", "1003", "22F186", "1902FF"], timeout: 2.0 }, 45000));
-    const capture = {
-      kind: "chiplab-diagnostic-capture", version: 1, appVersion: opts.appVersion, startedAt, finishedAt: new Date().toISOString(),
-      host: p.host, iface: p.iface, note: p.note ?? "", vin: p.vin ?? (vinRead as { vin?: string } | null)?.vin ?? null,
-      device: { status, device, sim },
-      vinRead, busSnapshot: busBefore, discovered, obdBaseline,
-      profile: p.profile ?? null, extra: p.extra ?? null, errors,
-    };
-    const dir = path.join(layout.root, "reports");
-    await mkdir(dir, { recursive: true });
-    const name = `capture-${(capture.vin || "novin").toString().replace(/[^A-Za-z0-9]/g, "")}-${startedAt.replace(/[:.]/g, "-")}.json`;
-    const file = path.join(dir, name);
-    const text = JSON.stringify(capture, null, 2);
-    await writeFile(file, text, "utf8");
-    const n = Array.isArray(discovered) ? discovered.length : 0;
-    return { path: file, bytes: Buffer.byteLength(text), summary: `${n} module(s) discovered · VIN ${capture.vin ?? "none"} · ${errors.length} error(s)` };
-  });
+  register("vehicleLib:capture", (_e, p: { host?: string; iface: string; vin?: string; profile?: VehicleProfile; note?: string; extra?: unknown }) =>
+    captureDiagnostics({ ...p, reportsDir: path.join(layout.root, "reports"), appVersion: opts.appVersion }));
 
   // Module census: name every discovered module from its part number (AI).
   register("vehicleId:census", (_e, input: CensusInput) => censusModules(input));
   // Free NHTSA vPIC decode (cached per VIN under the vehicle library) — step ① of identity.
-  register("vehicleId:decodeOnline", (_e, p: { vin: string }) => decodeVinOnline(p.vin, path.join(vehicleLibDir, "vin-decode-cache.json")));
+  register("vehicleId:decodeOnline", (_e, p: { vin: string }) => decodeVinOnline(p.vin, vinDecodeCacheFile(vehicleLibDir)));
 
   // ---- AI Module Explorer (autonomous read-only diagnostic agent, streamed)
   const explorerRunsDir = path.join(layout.root, "explorer-runs");

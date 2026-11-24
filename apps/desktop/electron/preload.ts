@@ -143,7 +143,7 @@ const api = {
     },
   },
   vehicleExplorer: {
-    discover: (payload: { host?: string; iface: string; ident?: boolean }) => invoke("vehicleExplorer:discover", payload),
+    discover: (payload: { host?: string; iface: string; ident?: boolean; known?: { name: string; req: string; resp: string }[]; deep?: boolean }) => invoke("vehicleExplorer:discover", payload),
     commitDiscovery: (payload: { profile: unknown; discovered: unknown[] }) =>
       invoke("vehicleExplorer:commitDiscovery", payload),
     start: (payload: { host?: string; iface: string; profile: unknown; targets: unknown[] }) =>

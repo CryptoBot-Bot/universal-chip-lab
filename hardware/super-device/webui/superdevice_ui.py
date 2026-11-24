@@ -8,22 +8,70 @@ bitrate (classic or CAN-FD), streams live bus traffic, and sends frames.
 Runs as root (via systemd) so it can drive `ip`/`cansend` directly.
 Open from the laptop at:  http://superdevice.local:8080
 """
-import json, os, re, shlex, subprocess, time
+import hashlib, json, os, platform, re, shlex, shutil, socket, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-PORT = 8080
-IFACES = ("can0", "can1")
+# SD_PORT / SD_DATA_DIR exist so a second, staging copy of this daemon can run
+# beside the installed one (other port, other data dir) to try a change out.
+PORT = int(os.environ.get("SD_PORT", "8080"))
+DATA_DIR = os.environ.get("SD_DATA_DIR", "/var/lib/superdevice")
+HW_IFACES = ("can0", "can1")
+# vcan0 is a kernel-only CAN bus: the virtual vehicle and this daemon can both sit
+# on it, so the whole pipeline runs with no can1<->can0 jumper. It exists only
+# while a virtual vehicle runs on it (sim_start creates it, sim_stop removes it).
+VIRT_IFACES = ("vcan0",)
+IFACES = HW_IFACES + VIRT_IFACES
 HEXID = re.compile(r"^[0-9A-Fa-f]{1,8}$")
 HEXDATA = re.compile(r"^[0-9A-Fa-f]{0,128}$")
+STARTED = time.time()
 
 
 def sh(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
 
+def _sha256(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DAEMON_SHA = _sha256(os.path.abspath(__file__))  # the code actually running (hashed at start)
+try:
+    HOSTNAME = socket.gethostname()
+except Exception:
+    HOSTNAME = ""
+
+
+def version_info():
+    """What is running: deploy.py compares daemon_sha256 with the file it sent, so
+    a restart that left the old process alive is not mistaken for a deploy."""
+    return {
+        "daemon_sha256": DAEMON_SHA,
+        "started": round(STARTED, 3),
+        "uptime_s": int(time.time() - STARTED),
+        "pid": os.getpid(),
+        "python": platform.python_version(),
+        "port": PORT,
+        "files": {n: _sha256(os.path.join(HERE, n)) for n in ("superdevice_ui.py", "virtual_vehicle.py", "powerguard.py")},
+        "features": ["version", "recorder", "replay", "vcan", "sweep", "bus-health"],
+    }
+
+
+def _iface_exists(iface):
+    return os.path.isdir(f"/sys/class/net/{iface}")
+
+
 def status():
-    out = {"ifaces": [], "sys": {}}
+    # "ifaces" stays exactly the two hardware channels: the app picks the bus it
+    # talks to from that list (the UP one with the most traffic), and a virtual bus
+    # with a simulated car chattering on it must never win that pick at a real car.
+    # A virtual bus that exists is reported separately, under "virtual".
+    out = {"ifaces": [], "virtual": [], "sys": {}}
     try:
         data = json.loads(sh("ip -j -d -s link show").stdout)
     except Exception:
@@ -31,8 +79,10 @@ def status():
     seen = {d.get("ifname"): d for d in data}
     for name in IFACES:
         d = seen.get(name)
+        bucket = out["ifaces"] if name in HW_IFACES else out["virtual"]
         if not d:
-            out["ifaces"].append({"name": name, "present": False})
+            if name in HW_IFACES:  # a virtual bus is listed only while it exists
+                bucket.append({"name": name, "present": False})
             continue
         flags = d.get("flags", [])
         info = (d.get("linkinfo", {}) or {}).get("info_data", {}) or {}
@@ -42,7 +92,7 @@ def status():
         st = d.get("stats64", {}) or {}
         rx = (st.get("rx", {}) or {})
         tx = (st.get("tx", {}) or {})
-        out["ifaces"].append({
+        bucket.append({
             "name": name, "present": True,
             "up": "UP" in flags,
             "bitrate": bt.get("bitrate", 0),
@@ -51,7 +101,7 @@ def status():
             "canstate": info.get("state", ""),
             "rx": rx.get("packets", 0), "tx": tx.get("packets", 0),
             "rxerr": rx.get("errors", 0) + rx.get("dropped", 0),
-            "role": "HS-CAN" if name == "can0" else "MS-CAN",
+            "role": "VIRTUAL" if name in VIRT_IFACES else ("HS-CAN" if name == "can0" else "MS-CAN"),
         })
     sysinfo = out["sys"]
     try:
@@ -71,9 +121,42 @@ def status():
     return out
 
 
+def ensure_int_pin_input(iface):
+    """A CAN controller's interrupt GPIO must be an INPUT before the bus comes up.
+    The stock mcp251xfd overlay (can0, GPIO25) sets that; the custom can1 overlay
+    (mcp-can1-spi1, GPIO24) does not, and on a Pi 5 a pin left unconfigured reads
+    LOW — so can1's level-low interrupt was asserted for ever: ~31,000 interrupts/s
+    and a third of a core whenever can1 was up, and the kernel switching the
+    interrupt off ("irq 186: nobody cared") as soon as can1 carried under ~30
+    frames/s, leaving it deaf. Measured 2026-11-21: 31054 -> 81 interrupts/s with
+    the pin set to input. The pin number comes from the device tree, so this
+    follows the overlay; it is a no-op on a pin that is already an input."""
+    if iface not in HW_IFACES:
+        return
+    try:
+        with open(f"/sys/class/net/{iface}/device/of_node/interrupts", "rb") as f:
+            gpio = int.from_bytes(f.read(4), "big")
+    except OSError:
+        return
+    if not 0 <= gpio <= 27:
+        return
+    fields = sh(f"pinctrl get {gpio}").stdout.split(":", 1)[-1].split()
+    if fields and fields[0] != "ip":
+        sh(f"pinctrl set {gpio} ip pu")
+        print(f"[sd] {iface}: interrupt pin GPIO{gpio} was '{fields[0]}', now an input with pull-up", flush=True)
+
+
 def iface_up(iface, bitrate, dbitrate, fd):
     if iface not in IFACES:
         return "bad iface"
+    ensure_int_pin_input(iface)
+    if iface in VIRT_IFACES:  # no bit timing on a virtual bus — create it if missing, then up
+        if not _iface_exists(iface):
+            sh("modprobe vcan")
+            r = sh(f"ip link add dev {iface} type vcan")
+            if r.returncode != 0:
+                return r.stderr.strip() or "could not create the virtual bus"
+        return sh(f"ip link set {iface} up").stderr.strip() or "ok"
     sh(f"ip link set {iface} down")
     # loopback off is explicit: the ctrlmode persists across down/up, so without it a
     # prior self-test can leave the iface internally looped (no real bus traffic).
@@ -94,12 +177,21 @@ def send_frame(iface, cid, data):
         return "bad frame"
     if len(data) % 2:
         return "data must be whole bytes"
-    return sh(f"cansend {iface} {cid}#{data}").stderr.strip() or "sent"
+    result = sh(f"cansend {iface} {cid}#{data}").stderr.strip() or "sent"
+    REC.log({"type": "tx", "iface": iface, "id": cid.upper(), "data": data.lower(), "result": result})
+    return result
 
 
 def _ensure_up(iface, bitrate=500000):
     st = sh(f"ip -br link show {iface}").stdout
+    if iface in VIRT_IFACES:
+        # a vcan reports state UNKNOWN; its flags say whether it is up. Never create
+        # one here: a request to a virtual bus nobody started should fail plainly.
+        if st and "UP" not in st.split("<")[-1].split(">")[0].split(","):
+            sh(f"ip link set {iface} up")
+        return
     if " UP " not in f" {st} " and "UP" not in st.split()[1:2]:
+        ensure_int_pin_input(iface)
         sh(f"ip link set {iface} up type can bitrate {bitrate} loopback off restart-ms 100")
 
 
@@ -132,27 +224,295 @@ def _isotp_socket(iface, tx_id, rx_id, timeout):
     return sock
 
 
-def _recv_final(sock, timeout):
+def _recv_final(sock, timeout, info=None):
     """Receive one diagnostic response, skipping 7F xx 78 (requestCorrectlyReceived-
     ResponsePending): real ECUs send that while they work on slow requests (DTC reads,
-    routines, security) and the final answer follows — up to P2* (5 s)."""
+    routines, security) and the final answer follows — up to P2* (5 s). `info`, when
+    given, gets the number of pending replies skipped (for the recorder)."""
     import time as _t
     deadline = _t.time() + max(timeout, 0.2) + 5.0
     data = sock.recv(4095)
     while len(data) >= 3 and data[0] == 0x7F and data[2] == 0x78 and _t.time() < deadline:
+        if info is not None:
+            info["pending"] = info.get("pending", 0) + 1
         sock.settimeout(max(0.5, min(5.0, deadline - _t.time())))
         data = sock.recv(4095)
     return data
 
 
-def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0):
+# ---- ISO-TP recorder ----------------------------------------------------------
+# Every diagnostic exchange this daemon performs is appended to a JSONL file on
+# the Pi's own disk, so a visit to a car leaves a complete record that can be
+# fetched afterwards (GET /api/rec/get) and replayed by the virtual vehicle
+# (virtual_vehicle.py --replay). It is always on: with no named session the lines
+# go to one automatic file per day. One line per event:
+#   {"type":"session"|"resume"|"end", ...}                     file header / daemon restart / session end
+#   {"type":"x","t":epoch,"iface","tx","rx","req","resp","ms","via","k", ["pending","err","sim"]}
+#        one request and its final response ("resp":"" = no answer); "k" numbers the
+#        socket, so requests that shared one diagnostic session share a k (k starts
+#        again at 1 after a "resume" line, i.e. after a daemon restart)
+#   {"type":"bus","iface","window_ms","frames":[{id,dlc,bytes,hz}]}   a bus-monitor snapshot
+#   {"type":"tx","iface","id","data"}                          a raw frame sent from the panel
+#   {"type":"sim","event":"start"|"stop",...}                  the virtual vehicle came or went
+# Recording must never break a diagnostic request: every failure is swallowed and
+# shown in /api/rec/status instead.
+
+REC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
+
+
+class Recorder:
+    IDLE_END = 6 * 3600      # a named session nobody stopped ends after this long without traffic
+    MIN_FREE_MB = 200        # stop writing rather than fill the SD card
+
+    def __init__(self, root):
+        self.root = root
+        self.lock = threading.Lock()
+        self.fh = None
+        self.cur = None           # {"id","label","note","started","auto"}
+        self.lines = 0            # lines this process wrote to the current file
+        self.last_write = 0.0
+        self.last_sync = 0.0
+        self.last_space_check = 0.0
+        self.full = False
+        self.error = ""
+        self.sock_seq = 0
+        self.resumed = False      # current.json looked at once per process
+
+    def _path(self, sid):
+        return os.path.join(self.root, sid + ".jsonl")
+
+    def _state_path(self):
+        return os.path.join(self.root, "current.json")
+
+    def next_sock(self):
+        with self.lock:
+            self.sock_seq += 1
+            return self.sock_seq
+
+    # -- everything below runs with self.lock held --------------------------------
+    def _emit(self, obj):
+        now = time.time()
+        obj.setdefault("t", round(now, 3))
+        self.fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
+        self.fh.flush()
+        if now - self.last_sync > 2.0:
+            os.fsync(self.fh.fileno())
+            self.last_sync = now
+        self.lines += 1
+        self.last_write = now
+
+    def _close(self, end=False):
+        if self.fh:
+            try:
+                if end:
+                    self._emit({"type": "end", "id": self.cur["id"]})
+                self.fh.flush()
+                os.fsync(self.fh.fileno())
+                self.fh.close()
+            except Exception:
+                pass
+        self.fh = None
+        self.cur = None
+
+    def _open(self, cur):
+        os.makedirs(self.root, exist_ok=True)
+        path = self._path(cur["id"])
+        new = not os.path.exists(path) or os.path.getsize(path) == 0
+        self.fh = open(path, "a", encoding="utf-8")
+        self.cur = cur
+        self.lines = 0
+        self._emit({
+            "type": "session" if new else "resume", "id": cur["id"], "label": cur.get("label", ""),
+            "note": cur.get("note", ""), "auto": bool(cur.get("auto")), "started": cur.get("started"),
+            "host": HOSTNAME, "daemon": DAEMON_SHA[:12], "sim": _sim_tag(),
+        })
+
+    def _auto_id(self):
+        return time.strftime("%Y%m%d") + "-auto"
+
+    def _ensure(self):
+        now = time.time()
+        if now - self.last_space_check > 60:
+            self.last_space_check = now
+            try:
+                os.makedirs(self.root, exist_ok=True)
+                self.full = shutil.disk_usage(self.root).free < self.MIN_FREE_MB * 1024 * 1024
+            except Exception:
+                self.full = False
+        if self.full:
+            raise OSError(f"less than {self.MIN_FREE_MB} MB free — recording paused")
+        if self.cur and not self.cur.get("auto") and self.last_write and now - self.last_write > self.IDLE_END:
+            self._close(end=True)
+            self._forget_state()
+        if self.cur and self.cur.get("auto") and self.cur["id"] != self._auto_id():
+            self._close()
+        self._resume_once()
+        if self.cur is None:
+            self._open({"id": self._auto_id(), "label": "", "note": "", "auto": True,
+                        "started": time.strftime("%Y-%m-%dT%H:%M:%S")})
+
+    def _resume_once(self):
+        """A named session survives a daemon restart (a deploy must not split a
+        visit): the first look after start reopens the session current.json names."""
+        if self.cur is not None or self.resumed:
+            return
+        self.resumed = True
+        try:
+            st = json.loads(open(self._state_path()).read())
+            if REC_ID.match(st.get("id", "")) and os.path.exists(self._path(st["id"])):
+                if time.time() - os.path.getmtime(self._path(st["id"])) > self.IDLE_END:
+                    self._forget_state()   # left open long ago (device was off): that visit is over
+                    return
+                self._open({"id": st["id"], "label": st.get("label", ""), "note": st.get("note", ""),
+                            "started": st.get("started"), "auto": False})
+        except Exception:
+            pass
+
+    def _forget_state(self):
+        try:
+            os.remove(self._state_path())
+        except OSError:
+            pass
+
+    # -- public ---------------------------------------------------------------------
+    def log(self, obj):
+        with self.lock:
+            try:
+                self._ensure()
+                self._emit(obj)
+                self.error = ""
+            except Exception as e:
+                self.error = f"{type(e).__name__}: {e}"
+
+    def exchange(self, iface, tx_id, rx_id, payload, data, err, t0, via, k, pending=0):
+        rec = {
+            "type": "x", "t": round(t0, 3), "iface": iface, "tx": f"{tx_id:X}", "rx": f"{rx_id:X}",
+            "req": bytes(payload).hex(), "resp": data.hex() if data else "",
+            "ms": round((time.time() - t0) * 1000, 1), "via": via, "k": k,
+        }
+        if pending:
+            rec["pending"] = pending
+        if err:
+            rec["err"] = err
+        sim = _sim_tag()
+        if sim:
+            rec["sim"] = sim   # a virtual vehicle was running on this device at that moment
+        self.log(rec)
+
+    def start(self, label, note=""):
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", (label or "").strip())[:40].strip("-")
+        sid = time.strftime("%Y%m%d-%H%M%S") + (f"-{slug}" if slug else "")
+        with self.lock:
+            try:
+                self._close(end=bool(self.cur and not self.cur.get("auto")))
+                cur = {"id": sid, "label": (label or "").strip()[:120], "note": (note or "").strip()[:500],
+                       "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "auto": False}
+                self._open(cur)
+                with open(self._state_path(), "w") as f:
+                    f.write(json.dumps(cur))
+                self.resumed = True
+                self.error = ""
+            except Exception as e:
+                self.error = f"{type(e).__name__}: {e}"
+                return {"ok": False, "error": self.error}
+        return {"ok": True, **self.status()}
+
+    def stop(self):
+        with self.lock:
+            self._resume_once()
+            named = bool(self.cur and not self.cur.get("auto"))
+            ended = self.cur["id"] if named else None
+            if named:
+                self._close(end=True)
+            self._forget_state()
+            self.resumed = True
+        return {"ok": True, "ended": ended, **self.status()}
+
+    def flush(self):
+        with self.lock:
+            if self.fh:
+                try:
+                    self.fh.flush()
+                    os.fsync(self.fh.fileno())
+                except Exception:
+                    pass
+
+    def status(self):
+        with self.lock:
+            self._resume_once()
+            cur = dict(self.cur) if self.cur else None
+            if cur:
+                try:
+                    cur["bytes"] = os.path.getsize(self._path(cur["id"]))
+                except OSError:
+                    cur["bytes"] = 0
+                cur["lines_this_run"] = self.lines
+            try:
+                free_mb = int(shutil.disk_usage(self.root if os.path.isdir(self.root) else "/").free / 1048576)
+            except Exception:
+                free_mb = None
+            return {"recording": not self.full and not self.error, "session": cur, "dir": self.root,
+                    "free_mb": free_mb, "error": self.error or None}
+
+    def path_for(self, sid):
+        if not REC_ID.match(sid or ""):
+            return None
+        p = self._path(sid)
+        return p if os.path.isfile(p) else None
+
+    def list(self):
+        self.flush()
+        out = []
+        try:
+            names = sorted(n for n in os.listdir(self.root) if n.endswith(".jsonl"))
+        except OSError:
+            names = []
+        active = self.cur["id"] if self.cur else None
+        for n in names:
+            p = os.path.join(self.root, n)
+            sid = n[:-6]
+            entry = {"id": sid, "bytes": 0, "lines": 0, "exchanges": 0, "active": sid == active}
+            try:
+                h = hashlib.sha256()
+                with open(p, "rb") as f:
+                    first = f.readline()
+                    h.update(first)
+                    lines, x = (1 if first else 0), 0
+                    for line in f:
+                        h.update(line)
+                        lines += 1
+                        if line.startswith(b'{"type":"x"'):
+                            x += 1
+                head = json.loads(first or b"{}")
+                entry.update(bytes=os.path.getsize(p), lines=lines, exchanges=x, sha256=h.hexdigest(),
+                             label=head.get("label", ""), note=head.get("note", ""), auto=bool(head.get("auto")),
+                             started=head.get("started"), sim=head.get("sim"), mtime=int(os.path.getmtime(p)))
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}: {e}"
+            out.append(entry)
+        return {"sessions": out, "dir": self.root}
+
+
+REC = Recorder(os.path.join(DATA_DIR, "recordings"))
+
+
+def isotp_request(iface, tx_id, rx_id, payload, timeout=2.0, via="isotp"):
     """One ISO-TP request/response (kernel can_isotp handles multi-frame + flow control)."""
-    sock = _isotp_socket(iface, tx_id, rx_id, timeout)
+    t0 = time.time()
+    info, data, err = {}, None, ""
     try:
-        sock.send(bytes(payload))
-        return _recv_final(sock, timeout)
+        sock = _isotp_socket(iface, tx_id, rx_id, timeout)
+        try:
+            sock.send(bytes(payload))
+            data = _recv_final(sock, timeout, info)
+            return data
+        finally:
+            sock.close()
+    except Exception as e:
+        err = type(e).__name__
+        raise
     finally:
-        sock.close()
+        REC.exchange(iface, tx_id, rx_id, payload, data, err, t0, via, REC.next_sock(), info.get("pending", 0))
 
 
 def bus_monitor(iface, ms=700):
@@ -192,7 +552,116 @@ def bus_monitor(iface, ms=700):
         f["hz"] = round(f["count"] / dur, 1)
         out.append(f)
     out.sort(key=lambda x: int(x["id"], 16))
+    REC.log({"type": "bus", "iface": iface, "window_ms": int(dur * 1000), "frames": out})
     return {"ok": True, "window_ms": int(dur * 1000), "count": len(out), "frames": out}
+
+
+SWEEP_LOCK = threading.Lock()
+
+
+def address_sweep(iface="can0", lo=0x600, hi=0x7FF, ext=False, listen_s=3.0, wait_ms=50):
+    """Find diagnostic modules on addresses no list knows (maker schemes such as
+    Mercedes 6xx/7xx -> 4Ex). Sends ONLY tester-present (3E 00, then 3E 01 for KWP),
+    one frame at a time, never on an ID the bus itself uses:
+      1. wake the bus with a functional OBD request (7DF 01 00) — gateway cars stay silent
+         until a tester talks — then listen `listen_s`; every ID heard is off-limits;
+      2. before each send re-check that ID was never heard (slow broadcasts appear late);
+      3. a hit is a single-frame 7E xx / 7F 3E nrc on another ID; each is re-confirmed.
+    11-bit range is clamped to 0x500-0x7FF (below that is broadcast territory).
+    ext=True also tries the ISO 15765-4 29-bit physical block 18DA<tt>F1 -> 18DAF1<tt>."""
+    import select as _sel
+    import struct as _st
+    if iface not in IFACES:
+        return {"ok": False, "error": "bad iface"}
+    try:
+        lo, hi = max(0x500, int(lo)), min(0x7FF, int(hi))
+        listen_s = max(1.0, min(float(listen_s), 10.0))
+        wait = max(0.02, min(float(wait_ms) / 1000.0, 0.2))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad range"}
+    if hi < lo:
+        return {"ok": False, "error": "bad range"}
+    if not SWEEP_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "a sweep is already running"}
+    t0 = time.time()
+    try:
+        _ensure_up(iface)
+        FMT, EFF = "=IB3x8s", 0x80000000
+        s = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+        s.bind((iface,))
+        s.setblocking(False)
+        seen = {}
+
+        def frames_for(dur):
+            out, end = [], time.time() + dur
+            while True:
+                left = end - time.time()
+                if left <= 0:
+                    return out
+                r, _, _ = _sel.select([s], [], [], left)
+                if not r:
+                    continue
+                cid, dlc, data = _st.unpack(FMT, s.recv(16))
+                key = (cid & 0x1FFFFFFF) | (EFF if cid & EFF else 0)
+                seen[key] = seen.get(key, 0) + 1
+                out.append((key, data[:dlc]))
+
+        def send(cid, payload):
+            s.send(_st.pack(FMT, cid, 8, bytes(payload) + bytes(8 - len(payload))))
+
+        def is_tp_answer(d):
+            return len(d) >= 3 and d[0] in (0x02, 0x03) and (d[1] == 0x7E or (d[1] == 0x7F and d[2] == 0x3E))
+
+        send(0x7DF, [0x02, 0x01, 0x00])          # wake: standard OBD "PIDs supported"
+        frames_for(listen_s)
+        broadcast = {f"{k & 0x1FFFFFFF:X}": n for k, n in sorted(seen.items())}
+        own = {0x7DF} | set(range(0x7E0, 0x7F0))  # legislated block: the normal list covers it
+        targets = [(c, None) for c in range(lo, hi + 1)]
+        if ext:
+            targets += [((0x18DA00F1 | (tt << 8)) | EFF, (0x18DAF100 | tt) | EFF) for tt in range(0x100)]
+
+        def probe(req, want_resp=None):
+            for tp in ([0x02, 0x3E, 0x00], [0x02, 0x3E, 0x01]):
+                send(req, tp)
+                for cid, d in frames_for(wait):
+                    if cid == req or (cid & 0x7FF) in own and not (cid & EFF):
+                        continue
+                    if want_resp is not None and cid != want_resp:
+                        continue
+                    if is_tp_answer(d) and (want_resp is not None or seen.get(cid, 0) <= 2):
+                        return cid, bytes(tp).hex(), d.hex()
+            return None
+
+        hits, skipped, probed = [], [], 0
+        for req, want in targets:
+            if (req & 0x7FF) in own and not (req & EFF):
+                continue
+            if seen.get(req):
+                skipped.append(f"{req & 0x1FFFFFFF:X}")
+                continue
+            probed += 1
+            got = probe(req, want)
+            if got:
+                hits.append({"req": f"{req & 0x1FFFFFFF:X}", "resp": f"{got[0] & 0x1FFFFFFF:X}", "probe": got[1], "data": got[2]})
+        confirmed = []
+        for h in hits:   # second, targeted ask: the same answer on the same ID, or it does not count
+            req = int(h["req"], 16) | (EFF if len(h["req"]) > 3 else 0)
+            resp = int(h["resp"], 16) | (EFF if len(h["resp"]) > 3 else 0)
+            again = probe(req, resp)
+            h["confirmed"] = bool(again)
+            h["kind"] = "uds" if h["data"][2:4] == "7e" and h["probe"] == "023e00" else "kwp" if h["data"][2:4] == "7f" else "unknown"
+            if again:
+                confirmed.append(h)
+        s.close()
+        out = {"ok": True, "iface": iface, "range": [f"{lo:03X}", f"{hi:03X}"], "ext": bool(ext), "probed": probed,
+               "seconds": round(time.time() - t0, 1), "broadcast": broadcast, "skipped": skipped,
+               "responders": confirmed, "unconfirmed": [h for h in hits if not h["confirmed"]]}
+        REC.log({"type": "sweep", **out})
+        return out
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "seconds": round(time.time() - t0, 1)}
+    finally:
+        SWEEP_LOCK.release()
 
 
 VIN_ATTEMPTS = [
@@ -225,7 +694,7 @@ def read_vin(iface="can0"):
     tried = []
     for tx, rx, payload, label in VIN_ATTEMPTS:
         try:
-            data = isotp_request(iface, tx, rx, payload, timeout=1.5)
+            data = isotp_request(iface, tx, rx, payload, timeout=1.5, via="vin")
         except Exception as e:
             tried.append(f"{label}: {type(e).__name__}")
             continue
@@ -234,7 +703,47 @@ def read_vin(iface="can0"):
         if vin:
             return {"ok": True, "vin": vin, "raw": raw, "via": label}
         tried.append(f"{label}: {raw or 'no data'}")
-    return {"ok": False, "error": "no VIN from the ECM (ignition on? bus speed 500k? cable on pins 6/14?)", "tried": tried}
+    out = {"ok": False, "error": "no VIN from the ECM (ignition on? bus speed 500k? cable on pins 6/14?)", "tried": tried}
+    if iface in HW_IFACES:
+        h = bus_health(iface)
+        out["bus"] = h
+        if h.get("no_ack"):
+            # Our frames went out and NOTHING acknowledged them — no powered node on this wire.
+            # The controller would keep retransmitting the last frame forever: cycle it clean.
+            iface_up(iface, h.get("bitrate") or 500000, 2000000, False)
+            out["diagnosis"] = "no-ack"
+            out["error"] = ("nothing on the bus acknowledged the request (tx error counter "
+                            f"{h.get('tx_err')}, 0 frames received) — the device is not on a live CAN bus here: "
+                            "ignition ON? OBD pin 6 → can0 H and pin 14 → can0 L wired? Pre-2008 cars may use "
+                            "K-line (pin 7) instead of CAN. The bus was reset so the stuck request stops.")
+        elif h.get("rx_err", 0) > 0 and h.get("rx_packets", 0) == 0:
+            out["diagnosis"] = "bitrate"
+            out["error"] = (f"traffic is on the bus but none of it decodes at {h.get('bitrate')} bit/s "
+                            f"(rx errors {h.get('rx_err')}) — try another bitrate (250k / 125k)")
+        elif h.get("rx_packets", 0) > 0:
+            out["diagnosis"] = "no-ecm-answer"
+            out["error"] = ("the bus is alive (frames seen and acknowledged) but no ECM answered the VIN request "
+                            "on 7E0/7DF/29-bit — a gateway or a maker address scheme; run discovery anyway")
+    return out
+
+
+def bus_health(iface):
+    """Controller error counters + traffic for one CAN channel (from `ip -details -statistics`)."""
+    txt = sh(f"ip -details -statistics link show {iface}").stdout
+    h = {"iface": iface}
+    m = re.search(r"can state (\S+) \(berr-counter tx (\d+) rx (\d+)\)", txt)
+    if m:
+        h["state"], h["tx_err"], h["rx_err_counter"] = m.group(1), int(m.group(2)), int(m.group(3))
+    m = re.search(r"bitrate (\d+)", txt)
+    h["bitrate"] = int(m.group(1)) if m else 0
+    m = re.search(r"RX:.*?\n\s*(\d+)\s+(\d+)\s+(\d+)", txt)
+    if m:
+        h["rx_packets"], h["rx_err"] = int(m.group(2)), int(m.group(3))
+    m = re.search(r"TX:.*?\n\s*(\d+)\s+(\d+)", txt)
+    if m:
+        h["tx_packets"] = int(m.group(2))
+    h["no_ack"] = bool(h.get("tx_err", 0) >= 128 and h.get("rx_packets", 0) == 0) or h.get("state") in ("ERROR-PASSIVE", "BUS-OFF") and h.get("rx_packets", 0) == 0
+    return h
 
 
 def isotp_http(iface, tx_hex, rx_hex, data_hex, timeout=2.0):
@@ -298,6 +807,7 @@ def isotp_seq(iface, tx_hex, rx_hex, requests, timeout=2.0):
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
     out = []
+    k = REC.next_sock()
     try:
         for r in requests[:24]:
             try:
@@ -306,11 +816,14 @@ def isotp_seq(iface, tx_hex, rx_hex, requests, timeout=2.0):
                 out.append({"request": str(r), "ok": False, "error": "bad hex"}); continue
             if not payload:
                 out.append({"request": "", "ok": False, "error": "empty"}); continue
+            t0, info = time.time(), {}
             try:
                 sock.send(payload)
-                data = _recv_final(sock, t)
+                data = _recv_final(sock, t, info)
             except Exception as e:
+                REC.exchange(iface, tx_id, rx_id, payload, None, type(e).__name__, t0, "seq", k, info.get("pending", 0))
                 out.append({"request": payload.hex(), "ok": False, "error": f"{type(e).__name__}: {e}", "response": ""}); continue
+            REC.exchange(iface, tx_id, rx_id, payload, data, "", t0, "seq", k, info.get("pending", 0))
             resp = data.hex() if data else ""
             negative = len(data) >= 3 and data[0] == 0x7F
             out.append({
@@ -601,51 +1114,74 @@ def ap_control(action):
 # pipeline runs against it on can0 exactly as against a real car.
 
 VV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "virtual_vehicle.py")
-_SIM = {"proc": None, "vehicle": None, "iface": None}
+_SIM = {"proc": None, "vehicle": None, "iface": None, "replay": None}
+
+
+def _sim_tag():
+    """Name of the virtual vehicle running right now, or None — stamped on recorded
+    exchanges so data from a real car is never confused with the simulator's."""
+    p = _SIM["proc"]
+    return _SIM["vehicle"] if (p and p.poll() is None) else None
 
 
 def sim_status():
     p = _SIM["proc"]
     running = bool(p and p.poll() is None)
     if not running and _SIM["proc"] is not None:
-        _SIM.update(proc=None, vehicle=None, iface=None)
+        _SIM.update(proc=None, vehicle=None, iface=None, replay=None)
     return {
         "running": running,
         "vehicle": _SIM["vehicle"] if running else None,
         "iface": _SIM["iface"] if running else None,
+        "replay": _SIM["replay"] if running else None,
         "pid": (p.pid if running else None),
     }
 
 
-def sim_start(iface, vehicle):
+def sim_start(iface, vehicle, replay=None):
+    """Start the virtual vehicle. `vehicle` picks a built-in model; `replay` (a
+    recording id from /api/rec/list) instead plays back what a real car answered.
+    iface "vcan0" needs no wiring; "can1" needs the can1<->can0 jumper."""
     iface = iface or "can1"
     vehicle = vehicle or "corolla"
     if iface not in IFACES:
         return {"ok": False, "error": "bad iface"}
     if not os.path.exists(VV_PATH):
         return {"ok": False, "error": "virtual_vehicle.py not deployed"}
+    if replay:
+        rec_path = REC.path_for(str(replay))
+        if not rec_path:
+            return {"ok": False, "error": f"no recording '{replay}' on this device"}
+        REC.flush()
+        what, name = ["--replay", rec_path], f"replay:{replay}"
+    else:
+        what, name = ["--vehicle", vehicle], vehicle
     sim_stop()
     sh("modprobe can_isotp")
     bus = iface_up(iface, 500000, 2000000, False)
     try:
         proc = subprocess.Popen(
-            ["python3", VV_PATH, "--iface", iface, "--vehicle", vehicle],
+            ["python3", VV_PATH, "--iface", iface] + what,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "bus": bus}
-    _SIM.update(proc=proc, vehicle=vehicle, iface=iface)
+    _SIM.update(proc=proc, vehicle=name, iface=iface, replay=(str(replay) if replay else None))
     time.sleep(0.6)
     st = sim_status()
     st["ok"] = st["running"]
     st["bus"] = bus
     if not st["running"]:
-        st["error"] = "virtual vehicle exited immediately (can_isotp missing? iface down?)"
+        st["error"] = "virtual vehicle exited immediately (can_isotp missing? iface down? empty recording?)"
+    else:
+        REC.log({"type": "sim", "event": "start", "vehicle": name, "iface": iface})
     return st
 
 
 def sim_stop():
     p = _SIM["proc"]
+    was = _SIM["vehicle"] if (p and p.poll() is None) else None
+    iface = _SIM["iface"]
     if p and p.poll() is None:
         try:
             p.terminate()
@@ -655,7 +1191,11 @@ def sim_stop():
                 p.kill()
         except Exception:
             pass
-    _SIM.update(proc=None, vehicle=None, iface=None)
+    _SIM.update(proc=None, vehicle=None, iface=None, replay=None)
+    if was:
+        REC.log({"type": "sim", "event": "stop", "vehicle": was, "iface": iface})
+        if iface in VIRT_IFACES:  # the virtual bus lives only as long as its vehicle
+            sh(f"ip link del {iface}")
     return {"ok": True}
 
 
@@ -700,6 +1240,33 @@ class Handler(BaseHTTPRequestHandler):
             self._json(wifi_saved())
         elif u.path == "/api/sim/status":
             self._json(sim_status())
+        elif u.path == "/api/version":
+            self._json(version_info())
+        elif u.path == "/api/rec/status":
+            self._json(REC.status())
+        elif u.path == "/api/rec/list":
+            self._json(REC.list())
+        elif u.path == "/api/rec/get":
+            # the recording itself, byte for byte (JSONL). The size is fixed before
+            # sending so a session still being written downloads as a clean prefix.
+            REC.flush()
+            p = REC.path_for(parse_qs(u.query).get("id", [""])[0])
+            if not p:
+                self._json({"error": "no such recording"}, 404)
+                return
+            size = os.path.getsize(p)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            with open(p, "rb") as f:
+                left = size
+                while left > 0:
+                    chunk = f.read(min(65536, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
         elif u.path == "/api/net":
             self._json(net_status())
         elif u.path == "/api/bus/monitor":
@@ -751,13 +1318,20 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/ap":
             self._json(ap_control(d.get("action")))
         elif u.path == "/api/sim/start":
-            self._json(sim_start(d.get("iface", "can1"), d.get("vehicle", "corolla")))
+            self._json(sim_start(d.get("iface", "can1"), d.get("vehicle", "corolla"), d.get("replay")))
         elif u.path == "/api/sim/stop":
             self._json(sim_stop())
+        elif u.path == "/api/rec/start":
+            self._json(REC.start(d.get("label"), d.get("note") or ""))
+        elif u.path == "/api/rec/stop":
+            self._json(REC.stop())
         elif u.path == "/api/isotp":
             self._json(isotp_http(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("data"), d.get("timeout", 2.0)))
         elif u.path == "/api/isotp/seq":
             self._json(isotp_seq(d.get("iface", "can0"), d.get("tx"), d.get("rx"), d.get("requests"), d.get("timeout", 2.0)))
+        elif u.path == "/api/scan/sweep":
+            self._json(address_sweep(d.get("iface", "can0"), d.get("lo", 0x600), d.get("hi", 0x7FF), bool(d.get("ext")),
+                                     d.get("listen_s", 3.0), d.get("wait_ms", 50)))
         else:
             self._json({"error": "not found"}, 404)
 
@@ -918,7 +1492,10 @@ refresh(); setInterval(refresh,2500);
 
 
 if __name__ == "__main__":
-    ensure_wifi_powersave_off()
+    if PORT == 8080:  # a staging copy on another port leaves the network settings alone
+        ensure_wifi_powersave_off()
+    for _iface in HW_IFACES:  # also covers a bus that is already up when the daemon restarts
+        ensure_int_pin_input(_iface)
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"SuperDevice UI on http://0.0.0.0:{PORT}")
+    print(f"SuperDevice UI on http://0.0.0.0:{PORT}  (daemon {DAEMON_SHA[:12]}, recordings in {REC.root})", flush=True)
     srv.serve_forever()

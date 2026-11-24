@@ -8,6 +8,7 @@ import { SuperDeviceProvider } from "./lib/superdevice-connection";
 import { ChipDatabase } from "./routes/ChipDatabase";
 import { CockpitTab } from "./routes/CockpitTab";
 import { DevicesTab } from "./routes/DevicesTab";
+import { DiagnosticsTab } from "./routes/DiagnosticsTab";
 import { DumpsTab } from "./routes/DumpsTab";
 import { BenchTab } from "./routes/BenchTab";
 import { TrainingRoom } from "./routes/TrainingRoom";
@@ -55,6 +56,7 @@ export default function App() {
           <Route path="/dumps" element={<DumpsTab />} />
           <Route path="/bench" element={<BenchTab />} />
           <Route path="/obd" element={<Navigate to="/bench" replace />} />
+          <Route path="/diag" element={<DiagnosticsTab />} />
           <Route path="/cockpit" element={<CockpitTab />} />
           <Route path="/vehicles" element={<VehicleDatabase />} />
           <Route path="/training" element={<TrainingRoom />} />

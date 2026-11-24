@@ -13,6 +13,13 @@ interface Props {
   pending: PendingWrite | null;
   onCancel: () => void;
   onConfirm: () => void;
+  /**
+   * Where the write goes — the dialog must never call a real write "simulated".
+   *   "simulated" (default)  the in-app software simulator of the 3D cockpit / inspector;
+   *   "vehicle"              the bus the device is connected to: a real module;
+   *   "demo"                 the desk simulator's virtual vehicle (no hardware).
+   */
+  target?: "simulated" | "vehicle" | "demo";
 }
 
 const SEV: Record<WriteSeverity, { label: string; color: string }> = {
@@ -21,7 +28,7 @@ const SEV: Record<WriteSeverity, { label: string; color: string }> = {
   critical: { label: "CRITICAL", color: "#ef4444" },
 };
 
-export function WriteConfirmModal({ pending, onCancel, onConfirm }: Props) {
+export function WriteConfirmModal({ pending, onCancel, onConfirm, target = "simulated" }: Props) {
   const [ack, setAck] = useState(false);
   const [phrase, setPhrase] = useState("");
 
@@ -64,7 +71,17 @@ export function WriteConfirmModal({ pending, onCancel, onConfirm }: Props) {
           </section>
         </div>
 
-        {ex.touchesMemory ? (
+        {target === "vehicle" ? (
+          <div className="wc-safety" style={{ borderColor: "var(--danger)" }}>
+            <strong>This is sent to the vehicle.</strong> The request goes out on the bus the device is connected to and
+            the module acts on it for real. Stable battery voltage, ignition on, and nobody working on the car.
+          </div>
+        ) : target === "demo" ? (
+          <div className="wc-safety">
+            <strong>Demo vehicle.</strong> The device is the desk simulator — the request goes to a virtual car on this
+            PC and nothing real is touched. On a real car this same button sends for real.
+          </div>
+        ) : ex.touchesMemory ? (
           <div className="wc-safety">
             <strong>Simulated in the cockpit.</strong> This is a <strong>memory write</strong> — the clone / reflash
             path. On real hardware it routes through the Cloning Ceremony (donor image archived, verified, rollback
@@ -94,7 +111,7 @@ export function WriteConfirmModal({ pending, onCancel, onConfirm }: Props) {
         <div className="wc-actions">
           <button onClick={onCancel}>Cancel</button>
           <button className="wc-go" style={{ background: ready ? sev.color : undefined }} disabled={!ready} onClick={onConfirm}>
-            Proceed (simulated)
+            {target === "vehicle" ? "Send to the vehicle" : target === "demo" ? "Send (demo vehicle)" : "Proceed (simulated)"}
           </button>
         </div>
       </div>

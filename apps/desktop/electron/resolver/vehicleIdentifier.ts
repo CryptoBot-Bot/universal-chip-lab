@@ -201,15 +201,19 @@ export async function censusModules(input: CensusInput): Promise<CensusResult> {
     "",
     "Produce the module census for every responding address.",
   ].join("\n");
-  const response = await client.messages.create({
+  // Streamed, with room to think: a 15-module Mercedes census spent all of an 8000-token
+  // non-streaming budget on thinking and returned no text (2026-11-23). Streaming keeps a
+  // large max_tokens clear of the SDK's HTTP timeout; finalMessage() gives the whole reply.
+  const response = await client.messages.stream({
     model: MODEL,
-    max_tokens: 8000,
+    max_tokens: 64000,
     thinking: { type: "adaptive" },
     system: CENSUS_SYSTEM,
     output_config: { format: { type: "json_schema", schema: CENSUS_SCHEMA } },
     messages: [{ role: "user", content }],
-  });
+  }).finalMessage();
   if (response.stop_reason === "refusal") throw new Error("The model declined this request.");
+  if (response.stop_reason === "max_tokens") throw new Error(`The census ran out of room (${response.usage.output_tokens} output tokens) before it finished.`);
   const text = response.content.find((b): b is Anthropic.TextBlock => b.type === "text");
   if (!text) throw new Error("The model returned no census.");
   let parsed: { modules?: unknown[] };

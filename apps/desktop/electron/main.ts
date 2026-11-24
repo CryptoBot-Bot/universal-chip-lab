@@ -120,7 +120,8 @@ async function createMainWindow(): Promise<void> {
 
   if (isDev) {
     await mainWindow.loadURL(DEV_SERVER_URL);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    // START-CHIP-LAB.bat sets ECL_NO_DEVTOOLS: the app from source, without the extra window.
+    if (!process.env.ECL_NO_DEVTOOLS) mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
     const indexPath = path.resolve(__dirname, "..", "dist", "index.html");
     await mainWindow.loadURL(pathToFileURL(indexPath).toString());

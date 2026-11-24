@@ -405,6 +405,72 @@ actually driven. can0↔can1 must be physically jumpered or can0 sees nothing.
   `<workspace>/reports/`. This is the remote-troubleshooting artefact
   (`docs/SHOP-DAY-CHECKLIST.md` §4).
 
+### 7.2c Recorder, replay, wire-free virtual bus, key deploy, CLI runner (2026-11-21)
+
+- **ISO-TP recorder** (`Recorder` in `superdevice_ui.py`, always on): every diagnostic
+  exchange the daemon performs — VIN attempts, `/api/isotp`, `/api/isotp/seq`, plus
+  bus-monitor snapshots and raw frames sent from the panel — is appended as one JSON line
+  to `/var/lib/superdevice/recordings/<id>.jsonl` on the Pi's own disk (flushed per line,
+  pauses below 200 MB free). With no named session the lines go to one file per day
+  (`YYYYMMDD-auto`); `POST /api/rec/start {label}` opens a named session (a visit),
+  `/api/rec/stop` closes it, a named session survives a daemon restart and ends by itself
+  after 6 h without traffic. `GET /api/rec/status|list`, `GET /api/rec/get?id=` (the file,
+  byte for byte). Lines made while a virtual vehicle was running carry `"sim":"<name>"`,
+  so real-car data is never confused with the simulator's. Line format: the comment
+  above the class.
+- **Replay** (`virtual_vehicle.py --replay <file.jsonl>`, or `/api/sim/start
+  {"replay":"<recording id>"}`): a recording becomes a vehicle that answers each request
+  with what the car answered — per diagnostic session, cycling through repeated answers so
+  live values move, silent for a request the car never answered — and broadcasts the last
+  bus snapshot at its real rates. `--replay-info <file>` prints what a recording holds
+  (runs anywhere, no CAN).
+- **`vcan0`, a wire-free bus**: `/api/sim/start {"iface":"vcan0"}` creates a kernel
+  virtual CAN bus, runs the vehicle on it, and the pipeline talks to it with
+  `iface: "vcan0"` — no can1↔can0 jumper. It tests everything except the transceivers, and it is reported under `virtual` in `/api/status`, never in `ifaces` (the app picks its bus from `ifaces`);
+  it is removed again on `/api/sim/stop`. The jumpered can1→can0 loop (§7.2) stays the
+  test that includes the hardware.
+- **can1's interrupt pin (GPIO24) — found and fixed 2026-11-21.** The custom
+  `mcp-can1-spi1` overlay sets up SPI1 and its chip-select but never makes the
+  controller's INT pin an input (the stock overlay does that for can0/GPIO25). On a
+  Pi 5 an unconfigured pin reads LOW, so can1's level-low interrupt was asserted for
+  ever: **~31,000 interrupts/s and ~30 % of a core whenever can1 was up** (`irq/186`
+  in `top`), with the driver finding real work only by accident. The kernel switches
+  such an interrupt off when fewer than 1 in 1000 firings are handled — i.e. as soon as
+  can1 carried under ~30 frames/s — logging `irq 186: nobody cared … Disabling IRQ
+  #186` and leaving can1 deaf until cycled down/up. That is why the virtual vehicle on
+  can1 died within 4 s whenever nothing ACKed it (no jumper), and it would have killed
+  can1 on any quiet MS-CAN bus. **Fix in the daemon** (`ensure_int_pin_input`): at
+  start and before every bus-up it reads each channel's INT GPIO from the device tree
+  and, if the pin is not an input, runs `pinctrl set <n> ip pu`. Measured with the
+  jumper loop running: 31,054 → 81 interrupts/s (the frame rate), `irq/186` 20 % → 0 %
+  CPU, spurious count 86,854/87,083 → 1/412. The proper fix is one more fragment in the
+  overlay source (`brcm,pins = <24>; brcm,function = <0>;` like the stock one) — a
+  `/boot/firmware` change, to do on site with a screen, after which the daemon guard is
+  a no-op. Check any time: `pinctrl get 24,25` must both say `ip`.
+- **Desk simulator** (`webui/desk_sim.py`, 2026-11-21): the daemon's HTTP API on a PC
+  (`http://127.0.0.1:8765`) with the virtual vehicle's responder behind it and no CAN at
+  all — for building and demonstrating the app while the Pi is away. Faithful: every
+  ECU's answers, sessions, security, DTC clear/re-set. Not simulated: bus timing, ISO-TP
+  framing, wiring; an empty address answers "no response" in 30 ms instead of 0.45 s.
+  `START-CHIP-LAB.bat` starts it; in the app it is the "Desk simulator" device, shown as
+  DEMO VEHICLE; `POST /api/sim/start {"vehicle":"f150"}` swaps the car.
+- **`GET /api/version`**: sha256 of the running daemon file, start time, feature list.
+- **Deploy** (`webui/deploy.py`): SSH key only (host alias `superdevice` in
+  `~/.ssh/config`, over the VPN; `superdevice-lan` at home). It stages the changed files,
+  then `sd_apply.py` runs ON the Pi as its own systemd unit: backup → install → restart →
+  wait until the daemon answers and reports the new file's hash → otherwise restore the
+  backup and restart. The rollback therefore completes even if the link drops. `--status`,
+  `--dry-run`, `--rollback [--to ID]`; backups in `/opt/superdevice/.backups/`, results in
+  `/var/lib/superdevice/deploy/`. It deploys the three Python files only — never the
+  Wi-Fi helpers (`ap.sh`, `netwatch.sh`) or service units, and it refuses a file that
+  names the VPN: those are the only way in while the Pi is at a shop.
+- **CLI runner** (`apps/desktop/cli/vehicle.ts`; from the repo root `pnpm vehicle --host <addr>
+  <command>`): `status`, `vin`, `discover`, `census`, `modules`,
+  `map <module>`, `capture`, `run`, `rec …`, `sim …`. No Electron; it calls the same
+  functions as the app (`electron/pipeline/vehiclePipeline.ts`, which the IPC handlers
+  now wrap). Read-only by construction. AI steps take the key from `ANTHROPIC_API_KEY`
+  / `<repo>/.env`.
+
 ### 7.3 Wi-Fi power save (the "lost connection → restored" flicker) — FIXED 2026-09-04
 
 The onboard BCM4345/6 radio had power save enabled (`brcmfmac: power save enabled` in

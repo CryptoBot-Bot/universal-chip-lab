@@ -106,6 +106,35 @@ export const ADDRESS_CANDIDATES: AddressCandidate[] = [
   { name: "IPC (GM)", req: "24C", resp: "64C" },
 ];
 
+/**
+ * Mercedes-Benz / Daimler diagnostic nodes — NOT on the generic list: they answer on
+ * their own scheme (request 0x6xx/0x7xx → response 0x4Ex/0x4Fx, or request + 1), mostly
+ * KWP2000-on-CAN. Found by a tester-present sweep of 0x600–0x7FF on a 2015 Sprinter 3500
+ * (NCV3, OM642) on 2026-11-23; every one gave a Mercedes part number.
+ * Probed only when a responder's VIN says Daimler (see isDaimlerVin), so other makes
+ * never see frames on these IDs. Names are placeholders — the census names them.
+ */
+export const MERCEDES_CANDIDATES: AddressCandidate[] = [
+  { name: "Mercedes node 662 (KWP)", req: "662", resp: "4E2" },
+  { name: "Mercedes node 6A5 (UDS)", req: "6A5", resp: "4E5" },
+  { name: "Mercedes node 6BC (KWP)", req: "6BC", resp: "4FC" },
+  { name: "Mercedes node 6C8 (KWP)", req: "6C8", resp: "4E8" },
+  { name: "Mercedes node 726 (KWP)", req: "726", resp: "4E6" },
+  { name: "Mercedes node 72E (KWP)", req: "72E", resp: "4EE" },
+  { name: "Mercedes node 784 (UDS)", req: "784", resp: "785" },
+  { name: "Mercedes node 788 (KWP)", req: "788", resp: "789" },
+  { name: "Mercedes node 791 (KWP)", req: "791", resp: "4F1" },
+  { name: "Mercedes node 792 (KWP)", req: "792", resp: "793" },
+  { name: "Mercedes node 794 (KWP)", req: "794", resp: "795" },
+  { name: "Mercedes node 796 (KWP)", req: "796", resp: "797" },
+];
+
+/** Daimler / Mercedes-Benz WMIs: WD* (Germany, incl. Sprinter for Dodge/Freightliner),
+ * W1K/N/V/W/X/Y/Z (2019+), 4JG / 55S (US-built). */
+export function isDaimlerVin(vin?: string): boolean {
+  return /^(WD[A-Z0-9]|W1[KNVWXYZ]|4JG|55S)/i.test((vin ?? "").trim());
+}
+
 /** Identification strings read off a responder during discovery (UDS 22 Fxxx). */
 export interface DiscoveredIdent { partNo?: string; supplier?: string; sw?: string; hw?: string; serial?: string; vin?: string }
 
@@ -136,7 +165,32 @@ export const IDENT_DIDS: { did: string; key: keyof DiscoveredIdent }[] = [
   { did: "F195", key: "sw" },       // software version
   { did: "F191", key: "hw" },       // hardware number
   { did: "F18C", key: "serial" },   // ECU serial
+  // Mercedes-Benz answers its own identification DIDs instead of F187/F195/F191
+  // (seen on a 2015 Sprinter: F187 → 7F 22 31, F111 → "6429011100" = A 642 901 11 00).
+  // Read after the standard ones and used only where those gave nothing.
+  { did: "F111", key: "partNo" },   // MB hardware part number
+  { did: "F121", key: "sw" },       // MB software part number(s)
 ];
+
+/** KWP2000 ReadEcuIdentification (1A) options — for KWP-on-CAN modules that refuse
+ * every 22 read (the Sprinter's EGS: 22 → 7F 22 11, 1A 87 → part number, 1A 90 → VIN). */
+export const KWP_IDENT: { req: string; key: keyof DiscoveredIdent }[] = [
+  { req: "1A87", key: "partNo" },
+  { req: "1A90", key: "vin" },
+];
+
+/** The longest printable run of a KWP 5A xx response (its ASCII field), if one is long enough. */
+export function kwpIdentText(hexResp?: string): string | undefined {
+  const clean = (hexResp || "").replace(/\s+/g, "");
+  if (clean.length < 6 || !clean.toLowerCase().startsWith("5a")) return undefined;
+  const bytes = (clean.slice(4).match(/../g) ?? []).map((b) => parseInt(b, 16));
+  let best = "", cur = "";
+  for (const n of bytes) {
+    if (n >= 0x20 && n < 0x7f) { cur += String.fromCharCode(n); if (cur.trim().length > best.length) best = cur.trim(); }
+    else cur = "";
+  }
+  return best.length >= 6 ? best : undefined;
+}
 
 /** Decode a 62 Fxxx positive response to printable ASCII (or a short hex if not text). */
 export function identText(hexResp?: string): string | undefined {
@@ -160,8 +214,19 @@ export async function readIdent(probe: NonNullable<DiscoverDeps["probe"]>, tx: s
       const spec = IDENT_DIDS[i];
       if (!spec || !it || it.negative || !it.response) return;
       const v = identText(it.response);
-      if (v) { out[spec.key] = v; any = true; }
+      if (v && !out[spec.key]) { out[spec.key] = v; any = true; }
     });
+    if (!any) {
+      const kwp = await probe(tx, rx, KWP_IDENT.map((k) => k.req));
+      kwp.forEach((it, i) => {
+        const spec = KWP_IDENT[i];
+        if (!spec || !it || it.negative || !it.response) return;
+        let v = kwpIdentText(it.response);
+        // a part number is the trailing digit run — a status byte before it can be printable ("G9069013501")
+        if (v && spec.key === "partNo") v = v.match(/\d{10,}$/)?.[0] ?? v;
+        if (v && !out[spec.key]) { out[spec.key] = v; any = true; }
+      });
+    }
     return any ? out : undefined;
   } catch { return undefined; }
 }
@@ -171,9 +236,11 @@ export async function readIdent(probe: NonNullable<DiscoverDeps["probe"]>, tx: s
  * an ECU is listening on that address. */
 export async function discoverModules(deps: DiscoverDeps, candidates = ADDRESS_CANDIDATES): Promise<DiscoveredModule[]> {
   const found: DiscoveredModule[] = [];
-  for (let i = 0; i < candidates.length; i++) {
+  const list = [...candidates];
+  let makerBlockAdded = false;
+  for (let i = 0; i < list.length; i++) {
     if (deps.shouldStop()) break;
-    const c = candidates[i];
+    const c = list[i];
     try {
       const r = await deps.isotp(c.req, c.resp, "3E00");
       if (r && r.response) {
@@ -181,7 +248,13 @@ export async function discoverModules(deps: DiscoverDeps, candidates = ADDRESS_C
         found.push({ name: c.name, requestId: c.req, responseId: c.resp, firstBytes: r.response, negative: !!r.negative, ident });
       }
     } catch { /* no answer on this address */ }
-    deps.onProgress?.(i + 1, candidates.length, found.length);
+    // End of the generic pass: a Daimler VIN from any responder adds the Mercedes block.
+    if (i === list.length - 1 && !makerBlockAdded && found.some((f) => isDaimlerVin(f.ident?.vin))) {
+      makerBlockAdded = true;
+      const have = new Set(list.map((x) => `${x.req}>${x.resp}`));
+      list.push(...MERCEDES_CANDIDATES.filter((x) => !have.has(`${x.req}>${x.resp}`)));
+    }
+    deps.onProgress?.(i + 1, list.length, found.length);
   }
   return found;
 }
@@ -205,6 +278,7 @@ export interface MapTarget {
 
 export type VehicleExplorerEvent =
   | { type: "discover"; done: number; total: number; found: number }
+  | { type: "sweep"; ok: boolean; found: number; seconds?: number }
   | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
   | { type: "module-event"; moduleId: string; event: ExplorerEvent }
   | { type: "module-done"; moduleId: string; result: ExplorerResult }

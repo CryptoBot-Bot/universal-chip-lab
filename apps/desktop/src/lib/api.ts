@@ -284,6 +284,7 @@ export interface VehicleExplorerTarget {
 }
 export type VehicleExplorerEvent =
   | { type: "discover"; done: number; total: number; found: number }
+  | { type: "sweep"; ok: boolean; found: number; seconds?: number }
   | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
   | { type: "module-event"; moduleId: string; event: ExplorerEvent }
   | { type: "module-done"; moduleId: string; result: ExplorerResult }
@@ -491,7 +492,8 @@ export const Api = {
       unwrap<{ removed: boolean }>(api.benchModules.deleteAsset(input) as never),
   },
   vehicleExplorer: {
-    discover: (payload: { host?: string; iface: string; ident?: boolean }) =>
+    /** `known`: the profile's own addresses (always re-probed); `deep`: run the device's address sweep first. */
+    discover: (payload: { host?: string; iface: string; ident?: boolean; known?: { name: string; req: string; resp: string }[]; deep?: boolean }) =>
       unwrap<DiscoveredModule[]>(api.vehicleExplorer.discover(payload) as never),
     commitDiscovery: (payload: { profile: VehicleProfile; discovered: DiscoveredModule[] }) =>
       unwrap<VehicleProfile>(api.vehicleExplorer.commitDiscovery(payload) as never),

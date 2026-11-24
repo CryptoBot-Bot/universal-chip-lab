@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { CAPABILITY_CATALOG, type VehicleProfile, type VehicleModule, type ModuleCapability, type VehicleSystemCategory } from "@ecu/vehicle-db";
+import { CAPABILITY_CATALOG, applyCensus, censusInputFor, type VehicleProfile, type VehicleModule, type ModuleCapability } from "@ecu/vehicle-db";
 
 import {
   Api,
@@ -23,11 +23,6 @@ import { LiveModuleOps } from "./LiveModuleOps";
  */
 
 type Busy = null | "discover" | "census" | "all" | string; // string = a module id being mapped
-
-const LOCATION_FOR: Record<string, VehicleModule["location"]> = {
-  powertrain: "engine", transmission: "engine", chassis: "underbody", body: "dash", infotainment: "dash",
-  safety: "cabin_front", network: "dash", hvac: "dash", other: "cabin_front",
-};
 
 const CAP_STATUS_TONE: Record<string, string> = { supported: "ok", gated: "warn", unsupported: "", unknown: "" };
 const CAP_STATUS_LABEL: Record<string, string> = { supported: "yes", gated: "gated", unsupported: "no", unknown: "?" };
@@ -100,27 +95,10 @@ export function VehicleDeepMap({ host, iface, profile, onProfileUpdate }: {
       if (found.length) {
         setBusy("census");
         try {
-          const census = await Api.vehicleExplorer.census({
-            vehicle: { year: updated.year, make: updated.make, model: updated.model, trim: updated.trim, engine: updated.decoded?.engine },
-            ecus: found.map((f) => ({ responseId: f.responseId.toUpperCase(), requestId: f.requestId, label: f.name, ...(f.ident ?? {}) })),
-            known: updated.modules.filter((m) => m.addressing?.response && !m.id.startsWith("resp-")).map((m) => ({ responseId: norm(m.addressing!.response), label: m.label, category: m.category })),
-          });
-          const byResp = new Map(census.modules.map((c) => [norm(c.responseId), c]));
-          const now = new Date().toISOString();
-          const modules = updated.modules.map((m) => {
-            const c = byResp.get(norm(m.addressing?.response));
-            if (!c) return m;
-            const stub = m.id.startsWith("resp-") || !m.summary;
-            return {
-              ...m,
-              label: stub ? c.label : m.label,
-              category: (stub ? c.category : m.category) as VehicleSystemCategory,
-              location: stub ? (LOCATION_FOR[c.category] ?? m.location) : m.location,
-              summary: c.summary, protocol: c.protocol, memoryRead: c.memoryRead, censusAt: now,
-              identity: m.identity ? { ...m.identity, supplier: m.identity.supplier || c.supplier || "" } : (c.supplier ? { supplier: c.supplier, partNo: "" } : m.identity),
-            };
-          });
-          updated = { ...updated, modules };
+          // censusInputFor / applyCensus are shared with the command-line runner
+          // (@ecu/vehicle-db), so both name and merge modules the same way.
+          const census = await Api.vehicleExplorer.census(censusInputFor(updated, found));
+          updated = applyCensus(updated, census.modules, new Date().toISOString());
           const list = await Api.vehicleLib.save(updated);
           onProfileUpdate(list.find((p) => p.id === updated.id) ?? updated);
         } catch (e) { setErr(`Census failed — ${(e as Error).message} (modules are saved; you can still map them).`); }

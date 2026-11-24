@@ -23,8 +23,26 @@ import { getApiKey } from "../settings";
 const MODEL = "claude-opus-4-8";
 const MAX_STEPS = 30;
 // Read-only diagnostic SIDs. Incl. OBD mode 02 (freeze-frame data) and 06 (on-board
-// monitor test results) — both pure reads. Writes/clears/security/reset stay refused.
-const ALLOWED_SIDS = new Set(["10", "3e", "22", "19", "21", "1a", "01", "02", "03", "06", "07", "09", "0a", "23", "17"]);
+// monitor test results) — both pure reads; 18 = KWP2000 readDTCsByStatus (Mercedes
+// KWP-on-CAN modules refuse UDS 19). Writes/clears/security/reset stay refused.
+const ALLOWED_SIDS = new Set(["10", "3e", "22", "19", "18", "21", "1a", "01", "02", "03", "06", "07", "09", "0a", "23", "17", "24"]); // 24 = UDS ReadScalingDataByIdentifier (read)
+// Session sub-functions the agent may NEVER enter on a real module: UDS 02 programming
+// (and 82 = 02 with suppress-positive-response), KWP 85 programming (bootloader — an ECU
+// left there can stop working until power-cycled), UDS 04 safetySystem (the airbag
+// scrapping / deployment path). Everything else in 10 is a harmless diagnostic session.
+const FORBIDDEN_SESSIONS = new Set([0x02, 0x82, 0x85, 0x04, 0x84]);
+
+/** The one gate every request the autonomous agent sends goes through. */
+export function isReadOnlyRequest(raw: string): boolean {
+  const r = raw.replace(/\s+/g, "").toLowerCase();
+  if (!/^[0-9a-f]{2,}$/.test(r) || r.length % 2) return false;
+  const sid = r.slice(0, 2);
+  // SecurityAccess only as a seed request (odd sub-function): it changes nothing and shows
+  // whether security exists / which session it needs. A key (even sub-function) is never sent.
+  if (sid === "27") { const sub = parseInt(r.slice(2, 4), 16); return Number.isFinite(sub) && sub % 2 === 1 && r.length === 4; }
+  if (sid === "10") { const sub = parseInt(r.slice(2, 4), 16); return r.length === 4 && Number.isFinite(sub) && !FORBIDDEN_SESSIONS.has(sub); }
+  return ALLOWED_SIDS.has(sid);
+}
 
 export interface SeqItem { request: string; response?: string; ok?: boolean; negative?: boolean; nrc?: number; error?: string }
 export interface BusFrame { id: string; dlc: number; bytes: string; count: number; hz: number }
@@ -127,7 +145,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "probe",
-    description: "Send one or more diagnostic requests over ONE ISO-TP socket (so a session persists across them). Each request is a hex payload string, e.g. '1081' or '22F190' or '1902FF'. READ-ONLY: only session control (10), tester-present (3E), ReadDataByIdentifier (22), ReadDTCInformation (19), KWP read (21), OBD modes (01/03/07/09/0A), ReadMemoryByAddress (23), ReadScalingData (17), and SecurityAccess SEED REQUESTS only (27 01 / 27 03 — never a key). Writes/clear/routines/reset/keys are refused.",
+    description: "Send one or more diagnostic requests over ONE ISO-TP socket (so a session persists across them). Each request is a hex payload string, e.g. '1081' or '22F190' or '1902FF'. READ-ONLY: only session control (10), tester-present (3E), ReadDataByIdentifier (22), ReadDTCInformation (19), KWP readDTCsByStatus (18), KWP read (21), KWP identification (1A), OBD modes (01/03/07/09/0A), ReadMemoryByAddress (23), ReadScalingData (17), and SecurityAccess SEED REQUESTS only (27 01 / 27 03 — never a key). Writes/clear/routines/reset/keys are refused.",
     input_schema: { type: "object", properties: { requests: { type: "array", items: { type: "string" } }, purpose: { type: "string" } }, required: ["requests", "purpose"] },
   },
   {
@@ -320,11 +338,11 @@ Spend the run discovering things NOT already on the skeleton so these tabs grow.
 Method (be systematic and efficient — you have ~${MAX_STEPS} steps):
 0. Read the MODULE SKELETON above (if present). Your mission is to VERIFY each field it holds against the live bus and FILL every essential field still empty or unknown — the stored record must match ground truth when you conclude. Skip re-deriving nothing; confirm and extend.
 1. scan_bus to see the broadcast map (call it twice to spot changing live bytes).
-2. Enumerate SESSIONS with service 10. Try KWP sub-functions 81, 85, 86, 87, C0 and UDS 03; record which are accepted (50 xx). CRITICAL: KWP modules (Nissan/JATCO, Bosch-KWP) usually expose their richest data ONLY in a NON-STANDARD session — most often 0xC0, sometimes 0x86 — not the default 0x81.
-3. Identification: 21 F0/F1/FA/FB/FC/FD/FE/FF (KWP) and 22 F190/F187/F18C/F191/F195/F18A (UDS). Decode ASCII part numbers.
+2. Enumerate SESSIONS with service 10. Try KWP sub-functions 81, 86, 87, 89, 92, C0 and UDS 01, 03; record which are accepted (50 xx). NEVER request a programming session (10 02 / 10 82 / 10 85) or the safety-system session (10 04) — this may be a customer's car; they are refused. CRITICAL: KWP modules (Nissan/JATCO, Bosch-KWP) usually expose their richest data ONLY in a NON-STANDARD session — most often 0xC0, sometimes 0x86 — not the default 0x81.
+3. Identification: 21 F0/F1/FA/FB/FC/FD/FE/FF and 1A 86/87/8A/90 (KWP) and 22 F190/F187/F18C/F191/F195/F18A (UDS). Mercedes-Benz UDS modules answer 22 F111 (hardware part no.), F121 (software part nos.), F150/F151 (HW/SW version), F154/F155 (supplier), F100 (diagnostic variant) instead of F187/F195; Mercedes KWP-on-CAN modules answer 1A 86 (BCD part no. + versions), 1A 87 (ASCII part no.), 1A 90 (VIN). Decode ASCII part numbers.
 3b. DID SWEEP (UDS modules): scan_dids 0100-03FF and F180-F1FF in the extended session (F400-F4FF too on ECM/TCM). Every DID that answers is a deliverable: decode what it holds (ASCII → identification; 1-4 byte values that change between two reads → live measurement, name the physical quantity from its range/behaviour and the module's role; static small values → coding/configuration; F186 = active session; F198/F199 = tester serial / programming date). A DID that is GATED with NRC 0x33 is a security-protected read/write — record it as such.
 4. LIVE DATA — the highest-value target: reads (21 xx) are SESSION-GATED — the SAME id returns different blocks in different sessions, and a 0x7F NRC means "not in THIS session" (try another), NOT "unsupported". For EACH accepted session, re-try data LIDs 21 00, 21 01, 21 02, 21 03, 21 04, 21 10, 21 20. On Nissan/JATCO the live measurement block (temps/pressures/solenoid currents) is typically 21 02 in the rich session 0xC0. Do NOT conclude "no live data" until you have tried the data LIDs in every accepted session — especially 0xC0.
-5. Read DTCs (19 02 FF), decode the P/C/B/U codes and status bytes; also try snapshot/freeze blocks (21 13/16/17/18/19/1A/1B) in the rich session.
+5. Read DTCs (19 02 FF; a KWP module that answers 7F 19 11 keeps them behind 18 02 FF 00 → 58 <count> {hi lo status}…), decode the P/C/B/U codes and status bytes — in UDS only records with status bits 0x01/0x04/0x08/0x80 are faults, 0x40/0x10 alone mean 'test not completed'; also try snapshot/freeze blocks (21 13/16/17/18/19/1A/1B) in the rich session.
 6. Probe which services answer vs return 7F, to map the real capability surface. Interpret NRCs (0x11 service not supported, 0x12 sub-function/LID not supported, 0x7F not in active session → switch sessions, 0x31 out of range).
 7. record findings as you confirm them; verify by re-reading where useful.
 8. conclude with a confident, honest summary — do this BEFORE you run out of steps. In conclude, FILL the structured arrays so the module's cockpit grows: sessions (every accepted 50 xx), identification (each ID record with its request + session + decoded value), liveData (each measurement block + the session it needs), broadcastFrames (each broadcast id + rate + what the bytes carry).
@@ -341,6 +359,7 @@ async function execScanDids(input: Record<string, unknown>, deps: ExplorerDeps):
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > 0xffff || end < start) return "scan_dids: bad range (need 4-hex start ≤ end)";
   const count = Math.min(end - start + 1, 1024);
   const session = String(input.session ?? "").replace(/\s+/g, "");
+  if (session && (!session.toLowerCase().startsWith("10") || !isReadOnlyRequest(session))) return `scan_dids: session opener ${session} refused (read-only agent; programming / safety-system sessions are never entered)`;
   const BATCH = 20;
   const positives: string[] = [];
   const gated: string[] = [];
@@ -374,14 +393,7 @@ async function execScanDids(input: Record<string, unknown>, deps: ExplorerDeps):
 
 async function execProbe(requests: string[], deps: ExplorerDeps): Promise<string> {
   const cleaned = requests.map((r) => r.replace(/\s+/g, "")).filter(Boolean).slice(0, 12);
-  // SecurityAccess is allowed ONLY as a seed request (odd sub-function, e.g. 27 01):
-  // it changes nothing in the module and reveals whether security exists / which
-  // session it needs — a key (27 02) is never sent by the autonomous agent.
-  const isAllowed = (r: string) => {
-    const sid = r.slice(0, 2).toLowerCase();
-    if (sid === "27") { const sub = parseInt(r.slice(2, 4), 16); return Number.isFinite(sub) && sub % 2 === 1 && r.length === 4; }
-    return ALLOWED_SIDS.has(sid);
-  };
+  const isAllowed = isReadOnlyRequest;
   const refused = cleaned.filter((r) => !isAllowed(r));
   const runnable = cleaned.filter(isAllowed);
   if (runnable.length === 0) return `All requests refused (read-only agent): ${refused.join(", ")}. Only session/read services are permitted.`;
