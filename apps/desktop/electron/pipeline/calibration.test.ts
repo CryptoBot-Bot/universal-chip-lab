@@ -54,6 +54,11 @@ test("sessions in any spelling; readable coding values are not inventions", asyn
   assert.deepEqual(s.invented, []);
   assert.equal(s.sessions.found, 1);
   assert.deepEqual(s.refusedRequests, ["2702"]);
+  // a write attempt counts as forbidden; a read with an odd number of hex digits only as malformed
+  const t2 = scoreModule(truth, result({}), { model: "m", run: 1, refused: 3, refusedRequests: ["14FFFFFF", "190607000FF", "2300000000010"], seconds: 1 });
+  assert.equal(t2.refused, 1);
+  assert.deepEqual(t2.refusedRequests, ["14FFFFFF"]);
+  assert.equal(t2.malformed, 2);
 });
 
 test("a failed run scores zero, and the summary averages per model", () => {
