@@ -1,0 +1,122 @@
+/*
+ * Pi Devices page (B1 Classic). Page-local layout only — every colour comes from
+ * the tokens in shell/theme.css. Prefixed dv- so nothing leaks into other pages.
+ * Selectors start with .ual where they must beat the kit's base button/input/label rules.
+ */
+
+/* ---------- base elements on this page ---------- */
+.ual .dv-page label {
+  display: inline; margin: 0; font-size: inherit; color: inherit;
+  text-transform: none; letter-spacing: 0;
+}
+.ual .dv-page code { font-family: var(--ual-code); font-size: 12.5px; }
+.dv-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.dv-ink { color: var(--ual-ink); }
+.dv-small { font-size: 12.5px; }
+.dv-good { color: var(--ual-clean-ink); font-weight: 600; }
+.dv-bad { color: var(--ual-fault-ink); font-weight: 700; }
+.dv-inline { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; }
+.dv-h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ual-ink); text-transform: none; letter-spacing: 0; }
+.ual .dv-page button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+
+/* ---------- page header ---------- */
+.dv-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.dv-head .ual-h1 { font-size: 26px; }
+.dv-head .dv-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 10px; }
+.ual .dv-head .dv-actions button { min-height: 44px; padding: 0 18px; border-radius: 12px; font-size: 14px; }
+.ual .dv-head .dv-actions button.primary { font-weight: 700; }
+
+/* ---------- pairing panel ---------- */
+.dv-pair-head { display: flex; align-items: center; gap: 10px; }
+.dv-pair-head .ghost { margin-left: auto; }
+.dv-block { display: flex; flex-direction: column; gap: 8px; padding-top: 14px; border-top: 1px solid #eeefea; }
+.dv-block-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.dv-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ual .dv-form input { width: auto; flex: 1 1 200px; min-width: 0; padding: 7px 10px; font-size: 13.5px; }
+.dv-list { display: flex; flex-direction: column; }
+.dv-list > div {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 0; border-top: 1px solid #eeefea;
+}
+.dv-list > div:first-child { border-top: none; }
+.dv-secure { display: inline-flex; vertical-align: -2px; margin-left: 6px; color: var(--ual-muted); }
+
+/* ---------- device cards ---------- */
+.dv-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 14px; }
+.ual .dv-page .dv-card {
+  display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 14px;
+  min-height: 0; padding: 20px; text-align: left;
+  background: var(--ual-surface); border: 1px solid var(--ual-line); border-radius: 18px;
+  color: var(--ual-ink); font-size: 14px; font-weight: 400;
+}
+.ual button.dv-card:hover:not(:disabled) { background: var(--ual-surface); border-color: var(--ual-blue-line); box-shadow: 0 2px 10px rgba(20, 23, 26, .06); }
+.ual .dv-page .dv-card.sel, .ual button.dv-card.sel:hover:not(:disabled) { border: 2px solid var(--ual-blue); padding: 19px; }
+.dv-card-top { display: flex; align-items: center; gap: 10px; }
+.dv-card-top .ual-chip { margin-left: auto; }
+.dv-name { font-family: var(--ual-display); font-size: 22px; font-weight: 700; line-height: 1.15; overflow-wrap: anywhere; }
+.dv-card-lines { display: flex; flex-direction: column; gap: 2px; }
+.dv-card-lines .ual-mono { color: var(--ual-neutral-ink); overflow-wrap: anywhere; }
+.dv-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.dv-stats .ual-stat, .dv-sim .ual-stat { padding: 10px; border-radius: 10px; }
+.dv-stats .ual-stat b, .dv-sim .ual-stat b { font-size: 16px; }
+.dv-soft-line { padding: 10px 12px; font-size: 13px; color: var(--ual-neutral-ink); }
+.dv-card-note { display: block; font-size: 12.5px; color: var(--ual-fault-ink); font-weight: 600; }
+.dv-card .dv-inline { justify-content: flex-start; }
+.dv-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+.dv-empty { justify-content: center; }
+
+/* battery gauge */
+.dv-batt { display: inline-flex; align-items: center; gap: 6px; }
+.dv-batt-frame { display: inline-block; width: 46px; height: 12px; padding: 1px; border: 1px solid var(--ual-line-strong); border-radius: 3px; }
+.dv-batt-fill { display: block; height: 100%; border-radius: 2px; }
+
+/* ---------- OBD-II connector ---------- */
+.dv-obd-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.dv-obd-head .ual-h2 { font-size: 18px; }
+.ual ol.ual-pins { list-style: none; margin: 0; padding: 0; }
+.dv-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--ual-muted); }
+.dv-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.dv-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.dv-swatch.can { background: var(--ual-blue-tint); border: 1px solid var(--ual-blue); }
+.dv-swatch.kline { background: var(--ual-prot-tint); border: 1px solid #d97706; }
+@media (max-width: 760px) {
+  .dv-obd .ual-pins { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* ---------- selected device: header + settings sections ---------- */
+.dv-settings { display: flex; flex-direction: column; gap: 14px; }
+.dv-sel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.dv-sel-title { display: flex; flex-direction: column; gap: 2px; }
+.dv-sel-head .dv-actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ual a.dv-linkbtn {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 14px;
+  background: var(--ual-surface); border: 1px solid var(--ual-line-strong); border-radius: 10px;
+  font-size: 13.5px; font-weight: 600;
+}
+.ual a.dv-linkbtn:hover { background: var(--ual-soft); }
+
+.dv-sections {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr));
+  gap: 14px; align-items: start;
+}
+.ual .dv-section { overflow: hidden; border-radius: 16px; }
+.ual .dv-section > .ual-section-head { color: var(--ual-muted); }
+.dv-section .ual-rowline { flex-wrap: wrap; }
+.dv-section .ual-rowline > .dv-k { flex: 0 1 auto; min-width: 0; color: var(--ual-ink); }
+.dv-section .ual-rowline > .dv-val {
+  flex: 1 1 160px; min-width: 0; display: inline-flex; flex-wrap: wrap; align-items: center;
+  justify-content: flex-end; gap: 6px 10px; overflow-wrap: anywhere;
+}
+.dv-section .ual-rowline.dv-fault > :last-child { color: var(--ual-fault-ink); font-weight: 600; }
+.dv-section .ual-rowline.dv-stack { flex-direction: column; align-items: stretch; gap: 8px; }
+.dv-section .ual-rowline.dv-stack > :last-child { text-align: left; }
+.dv-detail { display: block; font-size: 12px; font-weight: 400; color: var(--ual-muted); }
+.dv-rec-id { font-size: 12.5px; overflow-wrap: anywhere; }
+.dv-chips { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: 1px; }
+.dv-chip-sm { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
+.dv-chips .dv-chip-sm { margin-left: 0; }
+.dv-foot { margin: 0; padding: 10px 20px 14px; border-top: 1px solid #eeefea; font-size: 12.5px; color: var(--ual-muted); }
+.dv-sub { display: flex; flex-direction: column; gap: 10px; padding: 14px 20px 16px; border-top: 1px solid #eeefea; }

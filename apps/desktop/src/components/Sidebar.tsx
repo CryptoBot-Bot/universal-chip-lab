@@ -3,18 +3,16 @@ import { NavLink } from "react-router-dom";
 import { usePico } from "../lib/pico-connection";
 import { UpdateWidget } from "./UpdateWidget";
 
+/** The archive — earlier tools, kept working in their own layout. The three main
+ * tabs (Auto Diagnostic, Vehicles Database, Pi Devices) live in the Universal Auto Lab shell. */
 const ITEMS: { to: string; label: string; icon: string }[] = [
   { to: "/read",  label: "Read",          icon: "▼" },
   { to: "/write", label: "Write",         icon: "▲" },
   { to: "/chips", label: "Chip Database", icon: "◇" },
   { to: "/dumps", label: "Dumps",         icon: "▤" },
   { to: "/bench", label: "Bench Module Master", icon: "🔩" },
-  { to: "/diag", label: "Diagnostics", icon: "🚘" },
   { to: "/cockpit", label: "Vehicle Cockpit (3D)", icon: "🧭" },
-  { to: "/vehicles", label: "Vehicle Database", icon: "🗂" },
   { to: "/training", label: "AI Training Room", icon: "🧠" },
-  { to: "/devices", label: "Pi Devices",  icon: "📡" },
-  { to: "/settings", label: "Settings",   icon: "⚙" },
 ];
 
 const DOT: Record<string, string> = {
@@ -38,9 +36,12 @@ export function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        PicoForge
-        <small>Universal Chip Lab</small>
+        Archive
+        <small>Universal Auto Lab</small>
       </div>
+      <NavLink to="/diag" className="tiny" style={{ display: "block", padding: "8px 16px", color: "var(--info)" }}>
+        ← Back to Universal Auto Lab
+      </NavLink>
       <nav>
         {ITEMS.map((item) => (
           <NavLink

@@ -7,7 +7,8 @@ the virtual vehicle's responder (virtual_vehicle.respond — the same code that
 plays a car on can1 on the Pi). So the app and the command-line runner can be
 developed, demonstrated and tested with the Pi switched off or left at the shop.
 
-    python desk_sim.py                     # 2020 Corolla on http://127.0.0.1:8765
+    python desk_sim.py                     # the golden 2015 Sprinter on http://127.0.0.1:8765
+    python desk_sim.py --vehicle corolla   # 2020 Corolla (built in)
     python desk_sim.py --vehicle f150      # 2018 F-150
     python desk_sim.py --port 8770
     python desk_sim.py --replay 20261123-auto     # a car the Pi recorded, played back
@@ -360,16 +361,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not available on the desk simulator"}, 404)
 
 
+# Played by default: the first real car read end to end (2015 Sprinter 3500 diesel).
+GOLDEN = ["20261123-183159-2015-Sprinter-3500-diesel", "20261123-auto"]
+
+
 def main():
     ap = argparse.ArgumentParser(description="Desk simulator: the Super Device's HTTP API with a virtual vehicle behind it, no hardware.")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--vehicle", default="corolla", choices=list(vv.VEHICLES))
+    ap.add_argument("--vehicle", default=None, choices=list(vv.VEHICLES), help="a built-in car instead of the golden Sprinter")
     ap.add_argument("--replay", nargs="+", metavar="RECORDING", help="play back recording id(s) or path(s) instead of a built-in car")
     args = ap.parse_args()
     if args.replay:
         load_replay(args.replay)
-    else:
+    elif args.vehicle:
         load(args.vehicle)
+    else:
+        # The golden simulator: the 2015 Sprinter 3500 recorded on a real car (Nov 23).
+        # The recordings live in .runtime/recordings (not in git); without them, the Corolla.
+        try:
+            load_replay(GOLDEN)
+        except (ValueError, OSError) as ex:
+            print(f"Golden Sprinter recordings not found ({ex}) — using the built-in Corolla.", flush=True)
+            load("corolla")
     v = STATE["vehicle"]
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"Desk simulator on http://127.0.0.1:{args.port} — {v['name']}, VIN {v['vin'] or '(none recorded)'}, {len(v['ecus'])} ECUs. Ctrl+C to stop.", flush=True)

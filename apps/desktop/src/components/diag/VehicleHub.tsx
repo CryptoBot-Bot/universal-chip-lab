@@ -1,18 +1,19 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 
-import { applyCensus, censusInputFor, lastScanFor, recordScan } from "@ecu/vehicle-db";
+import { applyCensus, censusInputFor, lastScanFor, protectedModule, recordScan } from "@ecu/vehicle-db";
 import type { SystemScanResult, VehicleModule, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
 
 import { Api, type DiscoveredModule, type VehicleExplorerEvent } from "../../lib/api";
 import { CATEGORY_LABEL, CATEGORY_ORDER, addressedSystems, clean, clearDtcs, readDtcs, scanResult, ymmLabel } from "../../lib/diag";
 import type { PendingWrite } from "../../lib/writeActions";
 import { WriteConfirmModal } from "../WriteConfirmModal";
+import { Icon } from "./icons";
 
 /**
- * The vehicle page — what a scan tool shows once the car is identified:
- *   Auto Scan      every system with its state (Pass / Fault | n / No response),
- *                  the systems themselves discovered and saved on the way;
- *   Control Units  the same systems by area, to enter one directly;
+ * The vehicle page (B1 layout) — what a scan tool shows once the car is identified:
+ *   left column    the vehicle, its VIN and spec, Auto Scan / Fault Scan, its scans;
+ *   Systems        counters that double as filters, a tile per system grouped by
+ *                  area (faults show their count), then the faults grouped by system;
  *   Service        whole-vehicle actions (read all, erase all, learn all);
  *   History        this car's earlier scans.
  * A car that has been here before opens with its systems and its last scan
@@ -38,11 +39,35 @@ interface Props {
   onEnter: (moduleId: string) => void;
 }
 
-const PILL: Record<string, { cls: string; text: (r: SystemScanResult) => string }> = {
-  ok: { cls: "ok", text: () => "Pass | No fault" },
-  fault: { cls: "fault", text: (r) => `Fault | ${r.dtcs.length}` },
-  no_response: { cls: "none", text: () => "No response" },
-  unknown: { cls: "unk", text: () => "Not readable" },
+type Filter = "all" | "fault" | "clean" | "unread" | "protected";
+type Kind = "fault" | "clean" | "unread" | "scanning";
+
+/** "EZS — Electronic Ignition Switch / …" → { short: "EZS", name: "Electronic Ignition Switch / …" };
+ *  "CDI Engine Control Unit (ECM, OM642 …)" → { short: "ECM", name: "CDI Engine Control Unit" }. */
+export function splitLabel(label: string): { short: string; name: string } {
+  const dash = /^([A-Z][A-Za-z0-9-]{1,8})\s+[—–-]\s+(.+)$/.exec(label);
+  if (dash) return { short: dash[1], name: dash[2].replace(/\s*\(.*$/, "") };
+  const before = label.replace(/\s*\(.*$/, "").replace(/\s+[—–]\s+.*$/, "").trim();
+  const paren = /\(([A-Z]{2,5})(?:[,)\s])/.exec(label);
+  if (paren) return { short: paren[1], name: before || label };
+  const lead = /^([A-Z]{2,6})\b/.exec(label);
+  if (lead) return { short: lead[1], name: before.replace(/^[A-Z]{2,6}\s*(\/\s*)?/, "") || before };
+  const first = label.split(/[\s/(]+/)[0] || label;
+  return { short: first.length > 10 ? first.slice(0, 10) : first, name: before };
+}
+
+function kindOf(r: RowState | undefined): Kind {
+  if (r === "scanning") return "scanning";
+  if (!r) return "unread";
+  if (r.status === "fault") return "fault";
+  if (r.status === "ok") return "clean";
+  return "unread";
+}
+
+const CHIP: Record<string, { cls: string; text: string }> = {
+  ok: { cls: "clean", text: "No faults" },
+  no_response: { cls: "unread", text: "No response" },
+  unknown: { cls: "warn", text: "Not readable" },
 };
 
 function summary(systems: SystemScanResult[]): string {
@@ -64,6 +89,7 @@ export function VehicleHub(p: Props) {
   const [note, setNote] = useState<string | null>(null);
   const [write, setWrite] = useState<{ pending: PendingWrite; commit: () => void } | null>(null);
   const [learnAsk, setLearnAsk] = useState(false);
+  const [filter, setFilter] = useState<Filter>("all");
   const stop = useRef(false);
 
   const systems = addressedSystems(profile);
@@ -75,7 +101,7 @@ export function VehicleHub(p: Props) {
   const learned = systems.filter((m) => m.explored).length;
 
   async function scan(kind: "auto" | "fault") {
-    if (!online) { setErr("Not connected to the vehicle — connect the device (top right), then scan."); return; }
+    if (!online) { setErr("Not connected to the vehicle — connect a device with the pill at the top right, then scan."); return; }
     stop.current = false; setBusy(kind); setErr(null); setNote(null); setRows({});
     const t0 = Date.now();
     try {
@@ -197,133 +223,232 @@ export function VehicleHub(p: Props) {
     finally { off(); setBusy(null); setPhase(""); setProg(null); }
   }
 
-  const sysRow = (m: VehicleModule, i: number) => {
+  const scans = (profile.knownVins?.find((o) => o.vin === vin)?.scans ?? []).slice().reverse();
+  const unit = profile.knownVins?.find((o) => o.vin === vin);
+  const prot = (m: VehicleModule) => !!protectedModule({ category: m.category, label: m.label });
+
+  const kinds = new Map(systems.map((m) => [m.id, kindOf(stateOf(m))]));
+  const count = (k: Kind) => systems.filter((m) => kinds.get(m.id) === k).length;
+  const faultSystems = systems.filter((m) => kinds.get(m.id) === "fault");
+  const codeCount = faultSystems.reduce((n, m) => n + (stateOf(m) as SystemScanResult).dtcs.length, 0);
+  const protCount = systems.filter(prot).length;
+  const visible = (m: VehicleModule) =>
+    filter === "all" ? true
+    : filter === "protected" ? prot(m)
+    : filter === "unread" ? kinds.get(m.id) === "unread" || kinds.get(m.id) === "scanning"
+    : kinds.get(m.id) === filter;
+  const bus = profile.buses[0];
+  const view = tab === "units" ? "scan" : tab;
+  const scanning = !!busy && busy !== "erase";
+
+  const tile = (m: VehicleModule) => {
     const r = stateOf(m);
-    const pill = r === "scanning" ? { cls: "run", text: "Scanning…" } : r ? { cls: PILL[r.status].cls, text: PILL[r.status].text(r) } : { cls: "", text: "Not scanned" };
-    const tags = [m.identity?.partNo, m.identity?.supplier, m.explored ? `learned ${m.explored.runCount}×` : "not learned yet"].filter(Boolean).join(" · ");
+    const k = kinds.get(m.id)!;
+    const { short, name } = splitLabel(m.label);
+    const chip = r === "scanning" ? { cls: "info", text: "Reading…" }
+      : !r ? { cls: "unread", text: "Not scanned" }
+      : r.status === "fault" ? { cls: "fault", text: "Faults" }
+      : CHIP[r.status] ?? { cls: "unread", text: r.status };
+    const guard = protectedModule({ category: m.category, label: m.label });
     return (
-      <div key={m.id}>
-        <button className={`dg-sys ${r && r !== "scanning" && r.status === "no_response" ? "quiet" : ""}`} onClick={() => p.onEnter(m.id)} title="Enter this system">
-          <span className="n">{String(i + 1).padStart(2, "0")}</span>
-          <span className="nm"><b>{m.label}</b><small>{tags}</small></span>
-          <span className="ad">{m.addressing?.request ?? "?"} → {m.addressing?.response}</span>
-          <span className={`dg-st ${pill.cls}`}>{pill.text}</span>
-          <span className="dim">›</span>
-        </button>
-        {r && r !== "scanning" && r.dtcs.length > 0 && (
-          <div className="dg-dtcs">
-            {r.dtcs.map((d, k) => <div className="dg-dtc" key={k}><span className="c">{d.code}</span><span>{d.description || <span className="dim">no description on file</span>}</span><span className="s">{d.status}</span></div>)}
-          </div>
-        )}
-      </div>
+      <button key={m.id} className={`ual-tile ${k === "fault" ? "fault" : ""} ${r && r !== "scanning" && r.status === "no_response" ? "quiet" : ""}`}
+        onClick={() => p.onEnter(m.id)} title={`${m.label} — open this system`}>
+        <span className="top">
+          <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <span className="short">{short}</span>
+            <span className="name" style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{name}</span>
+          </span>
+          {k === "fault" && r && r !== "scanning" && <span className="big">{r.dtcs.length}</span>}
+        </span>
+        <span className="foot">
+          <span className={`ual-chip ${chip.cls}`}>{chip.text}</span>
+          {guard && <span className="dg-tile-lock" title={guard.reason}><Icon name="shield" size={13} />protected</span>}
+          <span className="addr">{m.addressing?.request ?? "?"}</span>
+        </span>
+      </button>
     );
   };
 
-  const scans = (profile.knownVins?.find((o) => o.vin === vin)?.scans ?? []).slice().reverse();
-  const unit = profile.knownVins?.find((o) => o.vin === vin);
+  const counter = (f: Filter, n: number, label: string, cls: string) => (
+    <button key={f} className={`ual-counter ${cls} ${filter === f ? "on" : ""}`} aria-pressed={filter === f}
+      onClick={() => setFilter(filter === f && f !== "all" ? "all" : f)}>
+      <b>{n}</b><span>{label}</span>
+    </button>
+  );
 
   return (
-    <>
-      <div className="dg-veh">
-        <div style={{ flex: 1, minWidth: 260 }}>
-          <div className="name">{ymmLabel(profile)}{profile.trim ? <span className="dim" style={{ fontWeight: 500, fontSize: 15 }}> · {profile.trim}</span> : null}</div>
-          <div className="meta">{[profile.decoded?.engine, profile.decoded?.bodyClass, profile.decoded?.driveType].filter(Boolean).join(" · ") || "No decode on file yet"}{unit ? ` · seen ${unit.reads}× since ${new Date(unit.firstReadAt).toLocaleDateString()}` : ""}</div>
+    <div className="dg-hub">
+      <aside className="dg-hub-aside">
+        <section className="ual-card pad">
+          <span className="ual-eyebrow">{p.demo ? "Simulated vehicle" : "Vehicle on the bus"}</span>
+          <h1 className="ual-h1">{ymmLabel(profile)}</h1>
+          {profile.trim && <span className="ual-muted" style={{ marginTop: -8 }}>{profile.trim}</span>}
+          <span className="ual-vin">{vin || "VIN not read yet"}</span>
+          <dl className="ual-dl">
+            {profile.decoded?.engine && <><dt>Engine</dt><dd>{profile.decoded.engine}</dd></>}
+            {profile.decoded?.bodyClass && <><dt>Body</dt><dd>{profile.decoded.bodyClass}</dd></>}
+            {profile.decoded?.driveType && <><dt>Drive</dt><dd>{profile.decoded.driveType}</dd></>}
+            {bus && <><dt>Bus</dt><dd>{bus.label}{bus.bitrate ? ` ${Math.round(bus.bitrate / 1000)}k` : ""}{bus.obdPins ? ` · pins ${bus.obdPins}` : ""}</dd></>}
+            <dt>Systems</dt><dd>{systems.length} · {learned} learned</dd>
+            {unit && <><dt>Seen</dt><dd>{unit.reads}× since {new Date(unit.firstReadAt).toLocaleDateString()}</dd></>}
+          </dl>
+          <button className="primary big" disabled={!!busy} onClick={() => { p.onTab("scan"); void scan("auto"); }}>Auto Scan</button>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+            <button disabled={!!busy || systems.length === 0} onClick={() => { p.onTab("scan"); void scan("fault"); }}>Fault Scan</button>
+            <button disabled={!!busy} onClick={() => { p.onTab("scan"); quickErase(); }} title="Clears fault memory — the device refuses it while it is read-only">Erase codes…</button>
+          </div>
+          {scanning && <button className="danger" onClick={() => { stop.current = true; void Api.vehicleExplorer.stop(); }}>Stop</button>}
+          <span className="ual-muted" style={{ fontSize: 12 }}>{online ? `${p.demo ? "Desk simulator" : "Device"} · ${iface}` : "No device connected — showing what is on file"}</span>
+        </section>
+
+        <section className="ual-card pad" style={{ gap: 8 }}>
+          <span className="ual-eyebrow">This car’s scans</span>
+          {!vin && <span className="ual-muted" style={{ fontSize: 13 }}>Kept per car — read the VIN first.</span>}
+          {vin && scans.length === 0 && <span className="ual-muted" style={{ fontSize: 13 }}>No scan on file yet.</span>}
+          {scans.slice(0, 5).map((s, i) => {
+            const n = s.systems.filter((x) => x.status === "fault").reduce((k, x) => k + x.dtcs.length, 0);
+            return (
+              <button key={s.at + i} className="ghost" onClick={() => p.onTab("history")}
+                style={{ display: "flex", justifyContent: "space-between", width: "100%", color: "var(--ual-ink)", fontWeight: 500, padding: "6px 4px", minHeight: 0 }}>
+                <span>{new Date(s.at).toLocaleDateString()} · {s.sim ? "simulator" : "real car"}</span>
+                <span style={{ color: n ? "var(--ual-fault)" : "var(--ual-muted)", fontWeight: 600 }}>{n ? `${n} fault${n === 1 ? "" : "s"}` : "no faults"}</span>
+              </button>
+            );
+          })}
+        </section>
+      </aside>
+
+      <div className="dg-hub-main">
+        <div className="dg-seg" role="tablist" aria-label="Vehicle sections">
+          {([["scan", "Systems"], ["service", "Service"], ["history", `History${scans.length ? ` (${scans.length})` : ""}`]] as [HubTab, string][]).map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={view === id} className={view === id ? "on" : ""} onClick={() => p.onTab(id)}>{label}</button>
+          ))}
         </div>
-        <div className="kv">VIN<b>{vin || "not read"}</b></div>
-        <div className="kv">Systems<b>{systems.length}</b></div>
-        <div className="kv">Learned<b>{learned}/{systems.length}</b></div>
-        <div className="kv">Last scan<b style={{ fontFamily: "var(--sans)", fontSize: 13 }}>{last ? new Date(last.at).toLocaleString() : "never"}</b></div>
-      </div>
 
-      <div className="dg-tabs">
-        {([["scan", "Auto Scan"], ["units", "Control Units"], ["service", "Service"], ["history", `History${scans.length ? ` (${scans.length})` : ""}`]] as [HubTab, string][]).map(([id, label]) => (
-          <button key={id} className={tab === id ? "on" : ""} onClick={() => p.onTab(id)}>{label}</button>
-        ))}
-      </div>
+        {!vin && <div className="dg-note warn" style={{ margin: 0 }}>VIN not read yet. Auto Scan reads it first and checks it against this selection — if the car turns out to be a different model, it switches.</div>}
+        {err && <div className="dg-note err" style={{ margin: 0 }}>{err}</div>}
+        {note && <div className="dg-note" style={{ margin: 0 }}>{note}</div>}
+        {busy && (
+          <div className="ual-card pad" style={{ gap: 10 }}>
+            <span style={{ fontWeight: 600 }}>{phase || "Working…"}</span>
+            {prog && <div className="ual-progress"><i style={{ width: `${prog.total ? Math.round((prog.done / prog.total) * 100) : 0}%` }} /></div>}
+          </div>
+        )}
 
-      {!vin && <div className="dg-note warn">VIN not read yet. Auto Scan reads it first and checks it against this selection — if the car turns out to be a different model, it switches.</div>}
-      {err && <div className="dg-note err">{err}</div>}
-      {note && <div className="dg-note">{note}</div>}
-      {busy && <><div className="dg-note">● {phase || "Working…"}</div>{prog && <div className="dg-prog"><i style={{ width: `${prog.total ? Math.round((prog.done / prog.total) * 100) : 0}%` }} /></div>}</>}
-
-      {tab === "scan" && (
-        <>
-          <div className="dg-scanhead">
-            <span className="muted" style={{ fontSize: 13 }}>
-              {systems.length === 0 ? "No systems known for this vehicle yet." : fresh ? `This scan: ${summary(shown)}` : last ? `Showing this car’s last scan (${new Date(last.at).toLocaleString()}): ${summary(last.systems)}` : `${systems.length} systems on file for this model — not scanned on this car yet.`}
+        {view === "scan" && (
+          <>
+            {systems.length > 0 && (
+              <div className="ual-counters" role="group" aria-label="Filter systems">
+                {counter("all", systems.length, "all systems", "")}
+                {counter("fault", codeCount, `fault${codeCount === 1 ? "" : "s"} in ${faultSystems.length} system${faultSystems.length === 1 ? "" : "s"}`, codeCount ? "fault" : "")}
+                {counter("clean", count("clean"), "clean", "clean")}
+                {counter("unread", count("unread") + count("scanning"), "not read yet", "unread")}
+                {protCount > 0 && counter("protected", protCount, "protected", "protected")}
+              </div>
+            )}
+            <span className="ual-muted" style={{ fontSize: 13 }}>
+              {systems.length === 0 ? "No systems known for this vehicle yet."
+                : fresh ? `This scan: ${summary(shown)}`
+                : last ? `Showing this car’s last scan (${new Date(last.at).toLocaleString()}): ${summary(last.systems)}`
+                : `${systems.length} systems on file for this model — not scanned on this car yet.`}
             </span>
-          </div>
-          {systems.length === 0 && <div className="dg-empty">Press <b>Auto Scan</b>: it probes every diagnostic address, reads what each system says it is, names them, and reads their fault memory. The result is saved — the next {ymmLabel(profile)} opens with all of it.</div>}
-          {systems.map(sysRow)}
-        </>
-      )}
+            {systems.length === 0 && <div className="dg-empty">Press <b>Auto Scan</b>: it probes every diagnostic address, reads what each system says it is, names them, and reads their fault memory. The result is saved — the next {ymmLabel(profile)} opens with all of it.</div>}
+            {CATEGORY_ORDER.filter((c) => systems.some((m) => m.category === c && visible(m))).map((c) => {
+              const list = systems.filter((m) => m.category === c && visible(m));
+              return (
+                <section key={c} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <h2 className="ual-group-title">{CATEGORY_LABEL[c]} <span style={{ fontWeight: 500 }}>· {list.length}</span></h2>
+                  <div className="ual-grid-auto">{list.map(tile)}</div>
+                </section>
+              );
+            })}
 
-      {tab === "units" && (
-        <>
-          {systems.length === 0 && <div className="dg-empty">No systems known yet — run Auto Scan first.</div>}
-          {CATEGORY_ORDER.filter((c) => systems.some((m) => m.category === c)).map((c) => (
-            <div key={c}>
-              <div className="dg-cat">{CATEGORY_LABEL[c]}</div>
-              {systems.filter((m) => m.category === c).map((m) => sysRow(m, systems.indexOf(m)))}
-            </div>
-          ))}
-        </>
-      )}
-
-      {tab === "service" && (
-        <>
-          <div className="dg-tiles">
-            <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("scan"); void scan("fault"); }}>
-              <span className="ico">⚠️</span><span className="t">Read all codes</span><span className="d">Ask every known system for its fault codes (no re-detection — fast).</span>
-            </button>
-            <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("scan"); quickErase(); }}>
-              <span className="ico">🧹</span><span className="t">Erase all codes</span><span className="d">Clear the fault memory of every system that reports a fault. Confirms first.</span>
-            </button>
-            <button className="dg-tile" disabled={!!busy} onClick={() => setLearnAsk(true)}>
-              <span className="ico">🧠</span><span className="t">Learn all systems</span><span className="d">The AI explores every system not learned yet, read-only, and saves what each can do.</span>
-              <span className="cnt">{learned}/{systems.length} learned</span>
-            </button>
-          </div>
-          {learnAsk && (
-            <div className="dg-note warn">
-              Learn {systems.filter((m) => !m.explored).length} system(s) now? Each takes 3–5 minutes and one AI session on your API key; the car must stay connected with the ignition on.
-              <span style={{ marginLeft: 10 }}><button className="primary" onClick={() => void learnAll()}>Start</button> <button onClick={() => setLearnAsk(false)}>Cancel</button></span>
-            </div>
-          )}
-          <div className="dg-note">Service resets (oil life, electronic parking brake, steering-angle calibration, battery registration…) are maker-specific routines. None is mapped for this vehicle yet, so none is offered here — a routine you know can be started from a system’s <b>Special Functions</b>.</div>
-        </>
-      )}
-
-      {tab === "history" && (
-        <>
-          {!vin && <div className="dg-empty">History is kept per car (VIN). Read the VIN first.</div>}
-          {vin && scans.length === 0 && <div className="dg-empty">No scan on file for this car yet.</div>}
-          {scans.map((s, i) => (
-            <div className="dg-panel" key={s.at + i} style={{ marginBottom: 10 }}>
-              <div className="row spread"><b>{new Date(s.at).toLocaleString()}</b><span className="dim tiny">{s.sim ? <span className="dg-chip demo" style={{ marginRight: 8 }}>VIRTUAL VEHICLE</span> : null}{s.kind === "auto" ? "Auto Scan" : "Fault scan"}{s.durationMs ? ` · ${Math.round(s.durationMs / 1000)} s` : ""}{s.iface ? ` · ${s.iface}` : ""}</span></div>
-              <div className="muted" style={{ fontSize: 13, margin: "4px 0 6px" }}>{summary(s.systems)}</div>
-              {s.systems.filter((x) => x.status === "fault").map((x) => (
-                <div key={x.moduleId} style={{ fontSize: 12.5, marginTop: 4 }}>
-                  <b>{x.label}</b> <span className="dim mono tiny">{x.responseId}</span>
-                  <div className="dg-dtcs" style={{ marginLeft: 0 }}>{x.dtcs.map((d, k) => <div className="dg-dtc" key={k}><span className="c">{d.code}</span><span>{d.description}</span><span className="s">{d.status}</span></div>)}</div>
+            {faultSystems.length > 0 && (filter === "all" || filter === "fault") && (
+              <section className="ual-card dg-faults">
+                <div className="dg-faults-head">
+                  <h2 className="ual-h2">Faults</h2>
+                  <span className="ual-muted" style={{ fontSize: 13 }}>confirmed or pending · history-only records are not counted</span>
                 </div>
-              ))}
-            </div>
-          ))}
-        </>
-      )}
+                {faultSystems.map((m) => {
+                  const r = stateOf(m) as SystemScanResult;
+                  const { short, name } = splitLabel(m.label);
+                  return (
+                    <div key={m.id}>
+                      <button className="dg-fgroup ghost" onClick={() => p.onEnter(m.id)}
+                        style={{ width: "100%", borderRadius: 0, border: "none", borderTop: "1px solid #eeefea", color: "var(--ual-ink)", fontWeight: 400, minHeight: 0, padding: "10px 20px" }}>
+                        <b>{short}</b>
+                        <span className="ual-muted">{[name, m.identity?.supplier].filter(Boolean).join(" · ")}</span>
+                        <span className="ual-chip fault" style={{ marginLeft: "auto", fontWeight: 700 }}>{r.dtcs.length}</span>
+                      </button>
+                      {r.dtcs.map((d, k) => (
+                        <div className="dg-fline" key={k}>
+                          <span className="c">{d.code}</span>
+                          <span style={{ color: d.description ? "var(--ual-ink)" : "var(--ual-muted)" }}>{d.description || "No description on file yet — maker-specific code"}</span>
+                          <span className="s">{d.status}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </section>
+            )}
+          </>
+        )}
 
-      <div style={{ height: 24 }} />
-      <div className="dg-foot stick">
-        <button className="primary" disabled={!!busy} onClick={() => { p.onTab("scan"); void scan("auto"); }}>Auto Scan</button>
-        <button disabled={!!busy || systems.length === 0} onClick={() => { p.onTab("scan"); void scan("fault"); }}>Fault Scan</button>
-        <button disabled={!!busy} onClick={() => { p.onTab("scan"); quickErase(); }}>Quick Erase…</button>
-        {busy && busy !== "erase" && <button className="danger" onClick={() => { stop.current = true; void Api.vehicleExplorer.stop(); }}>Stop</button>}
-        <span className="dg-spacer" />
-        <span className="tiny dim">{online ? `on ${iface}` : "device not connected — showing what is on file"}</span>
+        {view === "service" && (
+          <>
+            <div className="dg-tiles" style={{ margin: 0 }}>
+              <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("scan"); void scan("fault"); }}>
+                <span className="ico"><Icon name="alert" size={22} /></span><span className="t">Read all codes</span><span className="d">Ask every known system for its fault codes (no re-detection — fast).</span>
+              </button>
+              <button className="dg-tile" disabled={!!busy} onClick={() => { p.onTab("scan"); quickErase(); }}>
+                <span className="ico"><Icon name="broom" size={22} /></span><span className="t">Erase all codes</span><span className="d">Clear the fault memory of every system that reports a fault. Confirms first; the device refuses it while it is read-only.</span>
+              </button>
+              <button className="dg-tile" disabled={!!busy} onClick={() => setLearnAsk(true)}>
+                <span className="ico"><Icon name="spark" size={22} /></span><span className="t">Learn all systems</span><span className="d">The AI explores every system not learned yet, read-only, and saves what each can do. Airbag and immobiliser are left out.</span>
+                <span className="cnt">{learned}/{systems.length} learned</span>
+              </button>
+            </div>
+            {learnAsk && (
+              <div className="dg-note warn" style={{ margin: 0 }}>
+                Learn {systems.filter((m) => !m.explored).length} system(s) now? Each takes 3–5 minutes and one AI session on your API key; the car must stay connected with the ignition on.
+                <span style={{ marginLeft: 10, display: "inline-flex", gap: 8 }}><button className="primary tiny" onClick={() => void learnAll()}>Start</button><button className="tiny" onClick={() => setLearnAsk(false)}>Cancel</button></span>
+              </div>
+            )}
+            <div className="dg-note" style={{ margin: 0 }}>Service resets (oil life, electronic parking brake, steering-angle calibration, battery registration…) are maker-specific routines. None is mapped for this vehicle yet, so none is offered here — a routine you know can be started from a system’s <b>Special Functions</b>.</div>
+          </>
+        )}
+
+        {view === "history" && (
+          <div className="dg-history">
+            {!vin && <div className="dg-empty">History is kept per car (VIN). Read the VIN first.</div>}
+            {vin && scans.length === 0 && <div className="dg-empty">No scan on file for this car yet.</div>}
+            {scans.map((s, i) => (
+              <div className="dg-panel" key={s.at + i}>
+                <div className="row spread">
+                  <b>{new Date(s.at).toLocaleString()}</b>
+                  <span className="ual-muted" style={{ fontSize: 12 }}>{s.sim ? <span className="dg-chip demo" style={{ marginRight: 8 }}>SIMULATOR</span> : null}{s.kind === "auto" ? "Auto Scan" : "Fault scan"}{s.durationMs ? ` · ${Math.round(s.durationMs / 1000)} s` : ""}{s.iface ? ` · ${s.iface}` : ""}</span>
+                </div>
+                <div className="ual-muted" style={{ fontSize: 13, margin: "4px 0 6px" }}>{summary(s.systems)}</div>
+                {s.systems.filter((x) => x.status === "fault").map((x) => (
+                  <div key={x.moduleId} style={{ marginTop: 6 }}>
+                    <b>{splitLabel(x.label).short}</b> <span className="ual-muted" style={{ fontSize: 12 }}>{splitLabel(x.label).name} · {x.responseId}</span>
+                    {x.dtcs.map((d, k) => (
+                      <div className="dg-fline" key={k} style={{ padding: "6px 0" }}>
+                        <span className="c">{d.code}</span>
+                        <span>{d.description || <span className="ual-muted">no description on file</span>}</span>
+                        <span className="s">{d.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <WriteConfirmModal target={p.demo ? "demo" : "vehicle"} pending={write?.pending ?? null} onCancel={() => setWrite(null)} onConfirm={() => { const c = write?.commit; setWrite(null); c?.(); }} />
-    </>
+    </div>
   );
 }

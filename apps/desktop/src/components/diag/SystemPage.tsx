@@ -10,6 +10,7 @@ import {
 import type { PendingWrite } from "../../lib/writeActions";
 import { LiveModuleOps } from "../LiveModuleOps";
 import { WriteConfirmModal } from "../WriteConfirmModal";
+import { Icon } from "./icons";
 
 /**
  * One system (control unit) of the vehicle — the function menu a scan tool shows
@@ -34,15 +35,15 @@ interface Props {
 }
 
 const FNS: { id: FnId; ico: string; title: string; blurb: string; op?: string; write?: boolean }[] = [
-  { id: "info", ico: "🪪", title: "ECU Information", blurb: "Part number, software, hardware, serial, VIN as this unit holds them.", op: "read_identification" },
-  { id: "codes", ico: "⚠️", title: "Read Codes", blurb: "Stored, pending and permanent fault codes.", op: "read_dtcs" },
-  { id: "erase", ico: "🧹", title: "Erase Codes", blurb: "Clear this system's fault memory.", op: "clear_dtcs", write: true },
-  { id: "live", ico: "📈", title: "Live Data", blurb: "Measured values, read continuously.", op: "read_live_data" },
-  { id: "active", ico: "🔧", title: "Active Test", blurb: "Drive an output to check it (relay, valve, motor).", op: "actuator_test", write: true },
-  { id: "special", ico: "⭐", title: "Special Functions", blurb: "Resets, calibrations and service routines.", op: "routine_control", write: true },
-  { id: "coding", ico: "🧬", title: "Coding", blurb: "Configuration and adaptation values.", op: "coding_adaptation", write: true },
-  { id: "learn", ico: "🧠", title: "Learn this system", blurb: "The AI explores it live, read-only, and saves everything it finds." },
-  { id: "expert", ico: "⌨️", title: "Expert console", blurb: "Raw requests, sessions, security access." },
+  { id: "info", ico: "id", title: "ECU Information", blurb: "Part number, software, hardware, serial, VIN as this unit holds them.", op: "read_identification" },
+  { id: "codes", ico: "alert", title: "Read Codes", blurb: "Stored, pending and permanent fault codes.", op: "read_dtcs" },
+  { id: "erase", ico: "eraser", title: "Erase Codes", blurb: "Clear this system's fault memory.", op: "clear_dtcs", write: true },
+  { id: "live", ico: "chart", title: "Live Data", blurb: "Measured values, read continuously.", op: "read_live_data" },
+  { id: "active", ico: "wrench", title: "Active Test", blurb: "Drive an output to check it (relay, valve, motor).", op: "actuator_test", write: true },
+  { id: "special", ico: "star", title: "Special Functions", blurb: "Resets, calibrations and service routines.", op: "routine_control", write: true },
+  { id: "coding", ico: "sliders", title: "Coding", blurb: "Configuration and adaptation values.", op: "coding_adaptation", write: true },
+  { id: "learn", ico: "spark", title: "Learn this system", blurb: "The AI explores it live, read-only, and saves everything it finds." },
+  { id: "expert", ico: "terminal", title: "Expert console", blurb: "Raw requests, sessions, security access." },
 ];
 
 const TAG: Record<string, { cls: string; text: string }> = {
@@ -197,7 +198,7 @@ export function SystemPage(p: Props) {
           const t = f.op ? tag(f.op) : null;
           return (
             <button key={f.id} className={`dg-fn ${fn === f.id ? "on" : ""}`} onClick={() => p.onFn(fn === f.id ? null : f.id)}>
-              <span className="ico">{f.ico}</span>
+              <span className="ico"><Icon name={f.ico} size={22} /></span>
               <span className="t">{f.title}</span>
               <span className="d">{f.blurb}</span>
               {t && <span className={`tag ${t.cls}`}>{t.text}</span>}

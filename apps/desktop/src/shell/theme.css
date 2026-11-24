@@ -1,0 +1,292 @@
+/*
+ * Universal Auto Lab — the B1 "Classic" look (light, warm white, one blue).
+ *
+ * Everything is scoped under .ual so the archived tools (chip, bench, 3D cockpit,
+ * training) keep their own dark styling untouched. Inside .ual the old global
+ * tokens (--bg-*, --fg-*, --accent…) are re-pointed at the light palette, so any
+ * older component mounted inside the new shell reads correctly without edits.
+ *
+ * Kit classes (use these in pages instead of inline colours):
+ *   layout     ual-page · ual-cols · ual-aside · ual-grow · ual-grid-auto
+ *   surfaces   ual-card · ual-card.pad · ual-card.dark · ual-soft
+ *   text       ual-eyebrow · ual-h1 · ual-h2 · ual-sub · ual-mono · ual-muted
+ *   chips      ual-chip + .fault .clean .unread .protected .info .warn .dark
+ *   buttons    <button> (secondary) · .primary · .big · .ghost · .danger
+ *   stats      ual-stat (b = number, span = label) · ual-counter (filter buttons)
+ *   tiles      ual-tile (+ .fault .protected .selected)
+ *   lists      ual-rows > ual-rowline (key/value settings rows)
+ *   bars       ual-bars > i (+ .on) — three-segment knowledge bars
+ *   pins       ual-pins > ual-pin (+ .can .kline) — OBD-II connector map
+ *   notes      ual-note (+ .ok .warn .err)
+ */
+
+.ual {
+  /* B1 palette */
+  --ual-bg: #f4f4f0;
+  --ual-surface: #ffffff;
+  --ual-soft: #f7f7f4;
+  --ual-soft-2: #efefeb;
+  --ual-ink: #14171a;
+  --ual-text: #2c3138;
+  --ual-muted: #5a6370;
+  --ual-line: #e3e4df;
+  --ual-line-strong: #d4d6cf;
+  --ual-blue: #1d4ed8;
+  --ual-blue-hover: #1e40af;
+  --ual-blue-ink: #1e3a8a;
+  --ual-blue-tint: #eef2ff;
+  --ual-blue-line: #c7d2fe;
+  --ual-fault: #c2410c;
+  --ual-fault-ink: #9a3412;
+  --ual-fault-tint: #ffedd5;
+  --ual-fault-soft: #fff4ec;
+  --ual-fault-line: #fdba74;
+  --ual-clean-ink: #115e59;
+  --ual-clean-tint: #ccfbf1;
+  --ual-prot-ink: #92400e;
+  --ual-prot-tint: #fef3c7;
+  --ual-prot-line: #fcd34d;
+  --ual-neutral-ink: #4b5563;
+  --ual-neutral-tint: #f1f2ee;
+  --ual-display: "Space Grotesk Variable", "Space Grotesk", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --ual-sans: "Inter Variable", "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --ual-code: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  --ual-radius: 16px;
+
+  /* the old dark tokens, re-pointed for anything legacy rendered in here */
+  --bg-0: var(--ual-bg);
+  --bg-1: var(--ual-surface);
+  --bg-2: var(--ual-soft);
+  --bg-3: var(--ual-soft-2);
+  --border: var(--ual-line);
+  --border-strong: var(--ual-line-strong);
+  --fg-0: var(--ual-ink);
+  --fg-1: var(--ual-neutral-ink);
+  --fg-2: var(--ual-muted);
+  --accent: #0f766e;
+  --accent-dim: var(--ual-clean-tint);
+  --warn: var(--ual-prot-ink);
+  --warn-dim: var(--ual-prot-tint);
+  --danger: var(--ual-fault);
+  --danger-dim: var(--ual-fault-tint);
+  --info: var(--ual-blue);
+  --info-dim: var(--ual-blue-tint);
+  --mono: var(--ual-code);
+  --sans: var(--ual-sans);
+
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ual-bg);
+  color: var(--ual-ink);
+  font-family: var(--ual-sans);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* ---------- base elements inside the new shell ---------- */
+.ual a { color: var(--ual-blue); text-decoration: none; }
+.ual a:hover { color: var(--ual-blue-ink); }
+.ual h1, .ual h2, .ual h3, .ual h4 { color: var(--ual-ink); }
+.ual h3 { text-transform: none; letter-spacing: 0; }
+.ual button {
+  font-family: inherit; font-size: 13.5px; font-weight: 600;
+  background: var(--ual-surface); color: var(--ual-ink);
+  border: 1px solid var(--ual-line-strong); border-radius: 10px;
+  padding: 9px 16px; min-height: 38px; cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.ual button:hover:not(:disabled) { background: var(--ual-soft); border-color: #c4c7bf; }
+.ual button:focus-visible, .ual a:focus-visible, .ual input:focus-visible, .ual select:focus-visible {
+  outline: 2px solid var(--ual-blue); outline-offset: 2px;
+}
+.ual button:disabled { opacity: 0.5; cursor: not-allowed; }
+.ual button.primary { background: var(--ual-blue); border-color: var(--ual-blue); color: #fff; }
+.ual button.primary:hover:not(:disabled) { background: var(--ual-blue-hover); border-color: var(--ual-blue-hover); }
+.ual button.big { min-height: 54px; font-size: 16px; font-weight: 700; border-radius: 12px; }
+.ual button.ghost { background: transparent; border-color: transparent; color: var(--ual-blue); padding-left: 8px; padding-right: 8px; }
+.ual button.ghost:hover:not(:disabled) { background: var(--ual-blue-tint); }
+.ual button.danger { background: var(--ual-fault-soft); border-color: var(--ual-fault-line); color: var(--ual-fault-ink); }
+.ual button.tiny { min-height: 30px; padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+.ual input, .ual select, .ual textarea {
+  background: var(--ual-surface); color: var(--ual-ink);
+  border: 1px solid var(--ual-line-strong); border-radius: 10px; padding: 9px 12px; font-size: 14px;
+}
+.ual input:focus, .ual select:focus, .ual textarea:focus { border-color: var(--ual-blue); }
+.ual label { color: var(--ual-muted); }
+.ual .card { background: var(--ual-surface); border: 1px solid var(--ual-line); border-radius: var(--ual-radius); }
+.ual .seg { border-color: var(--ual-line-strong); background: var(--ual-soft-2); }
+.ual .seg button { min-height: 0; border: none; border-radius: 0; background: transparent; }
+.ual .seg button.active { background: var(--ual-surface); color: var(--ual-ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.ual .badge.ok { color: var(--ual-clean-ink); border-color: transparent; background: var(--ual-clean-tint); }
+.ual .badge.warn { color: var(--ual-prot-ink); border-color: transparent; background: var(--ual-prot-tint); }
+.ual .badge.danger { color: var(--ual-fault-ink); border-color: transparent; background: var(--ual-fault-tint); }
+.ual .badge.info { color: var(--ual-blue-ink); border-color: transparent; background: var(--ual-blue-tint); }
+
+/* ---------- shell: header, main, footer ---------- */
+.ual-header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+  padding: 10px 28px; background: var(--ual-surface); border-bottom: 1px solid var(--ual-line);
+  position: relative; z-index: 20;
+}
+.ual .ual-brand { display: flex; align-items: center; gap: 10px; color: var(--ual-ink); }
+.ual .ual-brand:hover { color: var(--ual-ink); }
+/* the archive layout's global .main (flex column, page background) must not leak into rows */
+.ual .main:not(.ual-main) { display: block; overflow: visible; background: none; min-height: 0; }
+.ual-brand b { font-family: var(--ual-display); font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+.ual-nav { display: flex; gap: 4px; padding: 4px; background: #eff0eb; border-radius: 12px; margin: 0 auto; }
+.ual-nav a {
+  display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 20px; border-radius: 9px;
+  color: var(--ual-neutral-ink); font-weight: 500; font-size: 14px;
+}
+.ual-nav a:hover { color: var(--ual-ink); background: rgba(255,255,255,.6); }
+.ual-nav a.active { background: var(--ual-surface); color: var(--ual-ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.ual-nav a.active svg { stroke: var(--ual-blue); }
+.ual-status { display: flex; align-items: center; gap: 8px; position: relative; }
+.ual-main { flex: 1; min-height: 0; overflow-y: auto; }
+.ual-footer {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  padding: 10px 28px; background: var(--ual-surface); border-top: 1px solid var(--ual-line);
+  font-size: 13px; color: var(--ual-muted);
+}
+.ual-footer b { color: var(--ual-ink); font-weight: 600; }
+.ual-footer .spacer { flex: 1; }
+
+/* connection pill + popover */
+.ual-conn {
+  display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px;
+  background: var(--ual-blue-tint); color: var(--ual-blue-ink); border: 1px solid var(--ual-blue-line);
+  border-radius: 999px; font-weight: 600; font-size: 13px; min-height: 0;
+}
+.ual .ual-conn:hover:not(:disabled) { background: #e2e8ff; border-color: var(--ual-blue-line); }
+.ual-conn.off { background: var(--ual-neutral-tint); color: var(--ual-neutral-ink); border-color: var(--ual-line-strong); }
+.ual-conn.err { background: var(--ual-fault-soft); color: var(--ual-fault-ink); border-color: var(--ual-fault-line); }
+.ual-dot { width: 8px; height: 8px; border-radius: 4px; background: var(--ual-blue); flex: 0 0 8px; }
+.ual-conn.off .ual-dot { background: #9ca3af; }
+.ual-conn.err .ual-dot { background: var(--ual-fault); }
+.ual-conn.live .ual-dot { background: #0f766e; }
+.ual-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); width: 400px; z-index: 40;
+  background: var(--ual-surface); border: 1px solid var(--ual-line); border-radius: 16px;
+  padding: 14px; box-shadow: 0 18px 48px rgba(20, 23, 26, .16);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ual-pop h4 { margin: 0; font-size: 12px; letter-spacing: .06em; color: var(--ual-muted); font-weight: 600; text-transform: uppercase; }
+.ual .ual-pick {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left;
+  padding: 10px 12px; border-radius: 12px; background: var(--ual-soft); border: 1px solid var(--ual-line); font-weight: 600;
+}
+.ual .ual-pick small { font-weight: 400; color: var(--ual-muted); font-size: 12px; }
+.ual .ual-pick.sel { border: 2px solid var(--ual-blue); background: var(--ual-surface); }
+
+/* ---------- page layout ---------- */
+.ual-page { display: flex; flex-direction: column; gap: 18px; padding: 24px 28px 32px; max-width: 1600px; margin: 0 auto; }
+.ual-cols { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+.ual-aside { flex: 1 1 320px; max-width: 360px; display: flex; flex-direction: column; gap: 16px; }
+.ual-aside.right { max-width: 420px; flex-basis: 340px; }
+.ual-grow { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.ual-grid-auto { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+
+/* ---------- surfaces ---------- */
+.ual-card { background: var(--ual-surface); border: 1px solid var(--ual-line); border-radius: 18px; }
+.ual-card.pad { padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+.ual-card.dark { background: var(--ual-ink); border-color: var(--ual-ink); color: #f4f4f0; }
+.ual-card.dark h2, .ual-card.dark h3 { color: #fff; }
+.ual-card.dark p, .ual-card.dark .ual-muted { color: #c7ccd1; }
+.ual-soft { background: var(--ual-soft); border-radius: 12px; }
+
+/* ---------- type ---------- */
+.ual-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .06em; color: var(--ual-muted); text-transform: uppercase; }
+.ual-card.dark .ual-eyebrow { color: #a5b4fc; }
+.ual-h1 { margin: 0; font-family: var(--ual-display); font-size: 28px; line-height: 1.15; font-weight: 700; letter-spacing: -0.01em; }
+.ual-h2 { margin: 0; font-family: var(--ual-display); font-size: 20px; line-height: 1.2; font-weight: 700; }
+.ual-sub { margin: 0; color: var(--ual-muted); }
+.ual-mono { font-family: var(--ual-code); }
+.ual-muted { color: var(--ual-muted); }
+.ual-vin { font-family: var(--ual-code); font-size: 15px; background: var(--ual-bg); border-radius: 8px; padding: 8px 12px; letter-spacing: .04em; }
+.ual-dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
+.ual-dl dt { color: var(--ual-muted); }
+.ual-dl dd { margin: 0; }
+
+/* ---------- chips ---------- */
+.ual-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
+  padding: 3px 10px; border-radius: 999px; background: var(--ual-neutral-tint); color: var(--ual-neutral-ink); white-space: nowrap;
+}
+.ual-chip.fault { background: var(--ual-fault-tint); color: var(--ual-fault-ink); }
+.ual-chip.clean { background: var(--ual-clean-tint); color: var(--ual-clean-ink); }
+.ual-chip.unread { background: var(--ual-neutral-tint); color: var(--ual-neutral-ink); }
+.ual-chip.protected, .ual-chip.warn { background: var(--ual-prot-tint); color: var(--ual-prot-ink); }
+.ual-chip.info { background: var(--ual-blue-tint); color: var(--ual-blue-ink); }
+.ual-chip.dark { background: var(--ual-ink); color: #fff; }
+.ual-chip.strong { font-weight: 700; letter-spacing: .02em; }
+
+/* ---------- stats & counters ---------- */
+.ual-stat { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; background: var(--ual-soft); border-radius: 12px; }
+.ual-stat b { font-family: var(--ual-display); font-size: 24px; font-weight: 700; line-height: 1.1; }
+.ual-stat span { font-size: 12px; color: var(--ual-muted); }
+.ual-stat.fault { background: var(--ual-fault-soft); } .ual-stat.fault b { color: var(--ual-fault); }
+.ual-stat.protected { background: var(--ual-prot-tint); } .ual-stat.protected b { color: var(--ual-prot-ink); }
+.ual-counters { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.ual .ual-counter {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 12px 14px; min-height: 0;
+  background: var(--ual-surface); border: 1px solid var(--ual-line); border-radius: 14px; text-align: left; font-weight: 500;
+}
+.ual-counter b { font-family: var(--ual-display); font-size: 24px; font-weight: 700; line-height: 1.1; }
+.ual-counter span { font-size: 12px; }
+.ual .ual-counter.on { background: var(--ual-ink); color: #fff; border-color: var(--ual-ink); }
+.ual .ual-counter.on:hover:not(:disabled) { background: #2a2f35; }
+.ual .ual-counter.fault { background: var(--ual-fault-soft); color: var(--ual-fault-ink); border-color: var(--ual-fault-line); }
+.ual .ual-counter.fault.on { background: var(--ual-fault-ink); color: #fff; }
+.ual-counter.clean { color: var(--ual-clean-ink); }
+.ual-counter.unread { color: var(--ual-neutral-ink); }
+.ual-counter.protected { color: var(--ual-prot-ink); }
+
+/* ---------- system tiles ---------- */
+.ual .ual-tile {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-height: 116px; padding: 14px 16px; text-align: left;
+  background: var(--ual-surface); border: 1px solid var(--ual-line); border-radius: 16px; color: var(--ual-ink); font-weight: 400;
+}
+.ual .ual-tile:hover:not(:disabled) { border-color: var(--ual-blue-line); background: var(--ual-surface); box-shadow: 0 2px 10px rgba(20,23,26,.06); }
+.ual .ual-tile.fault { border-color: var(--ual-fault-line); }
+.ual .ual-tile.selected { border: 2px solid var(--ual-blue); }
+.ual .ual-tile.quiet { opacity: .6; }
+.ual-tile .top { display: flex; align-items: flex-start; gap: 8px; }
+.ual-tile .short { font-family: var(--ual-display); font-size: 20px; font-weight: 700; line-height: 1.1; }
+.ual-tile .name { font-size: 13px; color: var(--ual-neutral-ink); }
+.ual-tile .big { margin-left: auto; font-family: var(--ual-display); font-size: 28px; font-weight: 700; color: var(--ual-fault); line-height: 1; }
+.ual-tile .foot { margin-top: auto; display: flex; align-items: center; gap: 8px; }
+.ual-tile .addr { margin-left: auto; font-family: var(--ual-code); font-size: 11px; color: var(--ual-muted); }
+.ual-group-title { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .08em; color: var(--ual-muted); text-transform: uppercase; }
+
+/* ---------- key/value rows (settings) ---------- */
+.ual-rows { display: flex; flex-direction: column; }
+.ual-rowline { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid #eeefea; }
+.ual-rowline > :last-child { text-align: right; color: var(--ual-muted); }
+.ual-rowline.good > :last-child { color: var(--ual-clean-ink); font-weight: 600; }
+.ual-rowline.warn > :last-child { color: var(--ual-prot-ink); font-weight: 600; }
+.ual-section-head { margin: 0; padding: 16px 20px 10px; font-size: 12px; letter-spacing: .08em; color: var(--ual-muted); font-weight: 600; text-transform: uppercase; }
+
+/* ---------- three-segment knowledge bars ---------- */
+.ual-bars { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; font-size: 10px; color: var(--ual-muted); }
+.ual-bars > span { display: flex; flex-direction: column; gap: 3px; }
+.ual-bars i { display: block; height: 5px; border-radius: 3px; background: var(--ual-line); }
+.ual-bars i.on { background: var(--ual-blue); }
+
+/* ---------- OBD-II pin map ---------- */
+.ual-pins { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
+.ual-pin { display: flex; flex-direction: column; gap: 2px; min-height: 54px; padding: 8px 10px; border-radius: 10px; background: var(--ual-soft); border: 1px solid #eeefea; }
+.ual-pin .n { font-family: var(--ual-code); font-size: 11px; color: var(--ual-muted); }
+.ual-pin .l { font-size: 12px; font-weight: 600; color: var(--ual-neutral-ink); }
+.ual-pin.can { background: var(--ual-blue-tint); border-color: var(--ual-blue); }
+.ual-pin.can .l { color: var(--ual-blue-ink); }
+.ual-pin.kline { background: var(--ual-prot-tint); border-color: #d97706; }
+.ual-pin.kline .l { color: var(--ual-prot-ink); }
+
+/* ---------- notes ---------- */
+.ual-note { padding: 10px 14px; border-radius: 12px; background: var(--ual-surface); border: 1px solid var(--ual-line); font-size: 13.5px; }
+.ual-note.ok { background: #effcf8; border-color: #99e6d8; }
+.ual-note.warn { background: #fffbeb; border-color: var(--ual-prot-line); }
+.ual-note.err { background: var(--ual-fault-soft); border-color: var(--ual-fault-line); }
+.ual-progress { height: 6px; border-radius: 3px; background: var(--ual-soft-2); overflow: hidden; }
+.ual-progress > i { display: block; height: 100%; background: var(--ual-blue); transition: width .25s; }

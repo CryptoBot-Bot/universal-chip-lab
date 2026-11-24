@@ -16,7 +16,7 @@ export function UpdateWidget() {
 
   return (
     <div className="tiny dim" style={{ marginTop: 10 }}>
-      <div>Universal Chip Lab v{version || "?"}</div>
+      <div>Universal Auto Lab v{version || "?"}</div>
       {state?.state === "ready" ? (
         <button className="tiny primary" style={{ marginTop: 6, width: "100%" }} onClick={() => Api.updates.install()}>
           Install v{state?.version} &amp; restart

@@ -6,9 +6,11 @@ import type { SystemScanResult, VehicleModule, VehicleProfile } from "@ecu/vehic
 import { diagStyles } from "../components/diag/styles";
 import { SystemPage, type FnId } from "../components/diag/SystemPage";
 import { VehicleHub, type HubTab, type RowState } from "../components/diag/VehicleHub";
-import { Api, type PairedDevice } from "../lib/api";
+import { Icon } from "../components/diag/icons";
+import { Api } from "../lib/api";
 import { COMMON_MAKES, addressedSystems, manualProfile, ymmLabel } from "../lib/diag";
 import { useSuperDevice } from "../lib/superdevice-connection";
+import { useWorkbench } from "../lib/workbench";
 
 /**
  * Diagnostics — the scan-tool flow.
@@ -28,9 +30,7 @@ type Step =
   | { s: "home" } | { s: "vin" } | { s: "make" } | { s: "model"; make: string } | { s: "history" }
   | { s: "vehicle"; tab: HubTab } | { s: "system"; moduleId: string; fn: FnId | null };
 
-const DESK_SIM = "127.0.0.1:8765";
 const KEY = "diag.session.v1";
-const IFACE_KEY = "diag.iface";
 
 interface Saved { profileId: string | null; vin: string; step: Step }
 function loadSaved(): Saved {
@@ -40,6 +40,8 @@ function loadSaved(): Saved {
 
 export function DiagnosticsTab() {
   const sd = useSuperDevice();
+  const wb = useWorkbench();
+  const { iface, sim } = wb;
   const online = sd.link === "online";
   const host = sd.host;
   const saved = useRef(loadSaved()).current;
@@ -51,22 +53,14 @@ export function DiagnosticsTab() {
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [note, setNote] = useState<{ kind: "" | "ok" | "warn" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [iface, setIface] = useState(() => localStorage.getItem(IFACE_KEY) || "can0");
   const [pendingVin, setPendingVin] = useState("");            // a VIN read but not yet tied to a model
   const [vinInput, setVinInput] = useState("");
   const [newYear, setNewYear] = useState(""); const [newModel, setNewModel] = useState(""); const [otherMake, setOtherMake] = useState("");
-  const [pop, setPop] = useState(false);
-  const [paired, setPaired] = useState<PairedDevice[]>([]);
-  const [hostInput, setHostInput] = useState("");
-  const [sim, setSim] = useState<{ running: boolean; vehicle?: string | null; name?: string | null } | null>(null);
-  // The device's write gate: "read-only" (writes disabled on the Pi), "disarmed" or "armed".
-  const [gate, setGate] = useState<string | null>(null);
 
   const profile = useMemo(() => profiles.find((x) => x.id === profileId) ?? null, [profiles, profileId]);
   const profilesRef = useRef(profiles); profilesRef.current = profiles;
 
   useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify({ profileId, vin, step })); } catch { /* private mode */ } }, [profileId, vin, step]);
-  useEffect(() => { localStorage.setItem(IFACE_KEY, iface); }, [iface]);
 
   // The library — re-read every few seconds, so work done elsewhere (the command line,
   // another window) shows up here as it is saved.
@@ -83,21 +77,6 @@ export function DiagnosticsTab() {
     const iv = window.setInterval(() => void load(), 4000);
     return () => window.clearInterval(iv);
   }, []);
-
-  // Is a virtual vehicle answering instead of a car? Shown loudly in the bar.
-  useEffect(() => {
-    if (!online) { setSim(null); return; }
-    let stop = false;
-    const poll = () => {
-      void Api.superDevice.get<{ running: boolean; vehicle?: string | null; name?: string | null }>(host, "/api/sim/status")
-        .then((s) => { if (!stop) setSim(s); }).catch(() => { if (!stop) setSim(null); });
-      void Api.superDevice.get<{ mode?: string }>(host, "/api/write-gate")
-        .then((g) => { if (!stop) setGate(g?.mode ?? null); }).catch(() => { if (!stop) setGate(null); });
-    };
-    void poll();
-    const iv = window.setInterval(() => void poll(), 8000);
-    return () => { stop = true; window.clearInterval(iv); };
-  }, [online, host]);
 
   // a step that points at something no longer there falls back to a sane place
   useEffect(() => {
@@ -135,7 +114,7 @@ export function DiagnosticsTab() {
   }
 
   async function autoVin(picked: VehicleProfile | null): Promise<{ profile: VehicleProfile; vin: string } | null> {
-    if (!online) { setNote({ kind: "warn", text: "Connect the device first (top right) — AutoVIN reads the VIN from the car." }); setPop(true); return null; }
+    if (!online) { setNote({ kind: "warn", text: "Connect a device first — use the connection pill at the top right. AutoVIN reads the VIN from the car (or from the desk simulator)." }); return null; }
     setBusy("Reading the VIN from the vehicle…"); setNote(null);
     try {
       const r = await Api.superDevice.readVin(host, iface);
@@ -185,14 +164,6 @@ export function DiagnosticsTab() {
     await pickModel(stored);
   }
 
-  const connect = async (h: string) => {
-    setNote(null);
-    const r = await sd.connect(h);
-    if (r.ok) setPop(false);
-    else setNote({ kind: "err", text: `Could not connect to ${h}: ${r.error}${h === DESK_SIM ? " — start it with START-CHIP-LAB.bat, or: python hardware\\super-device\\webui\\desk_sim.py" : ""}` });
-  };
-  useEffect(() => { if (pop) Api.devices.list().then((r) => setPaired(r.devices)).catch(() => setPaired([])); }, [pop]);
-
   // ---- derived for the pickers ----
   const makes = useMemo(() => {
     const m = new Map<string, { label: string; models: number; cars: number }>();
@@ -209,7 +180,7 @@ export function DiagnosticsTab() {
     .sort((a, b) => (a.unit.lastReadAt < b.unit.lastReadAt ? 1 : -1)), [profiles]);
 
   const mod: VehicleModule | null = step.s === "system" && profile ? profile.modules.find((m) => m.id === step.moduleId) ?? null : null;
-  const demo = online && host === DESK_SIM;
+  const demo = wb.demo;
   const last = lastScanFor(profile, vin);
 
   const back = () => {
@@ -222,10 +193,10 @@ export function DiagnosticsTab() {
     <div className="dg">
       <style>{diagStyles}</style>
       <div className="dg-bar">
-        <button className="dg-nav" disabled={step.s === "home"} onClick={back} title="Back">◀</button>
-        <button className="dg-nav" disabled={step.s === "home"} onClick={() => setStep({ s: "home" })} title="Vehicle selection">⌂</button>
+        <button className="dg-nav" disabled={step.s === "home"} onClick={back} title="Back" aria-label="Back"><Icon name="back" size={18} /></button>
+        <button className="dg-nav" disabled={step.s === "home"} onClick={() => setStep({ s: "home" })} title="Vehicle selection" aria-label="Vehicle selection"><Icon name="home" size={18} /></button>
         <div className="dg-path">
-          <button onClick={() => setStep({ s: "home" })}>Diagnostics</button>
+          <button onClick={() => setStep({ s: "home" })}>Auto Diagnostic</button>
           {(step.s === "make" || step.s === "model") && <><span className="sep">›</span><button onClick={() => setStep({ s: "make" })}>Select vehicle</button></>}
           {step.s === "model" && <><span className="sep">›</span><b>{step.make}</b></>}
           {step.s === "vin" && <><span className="sep">›</span><b>Manual VIN</b></>}
@@ -234,40 +205,7 @@ export function DiagnosticsTab() {
           {step.s === "system" && mod && <><span className="sep">›</span><b>{mod.label}</b></>}
         </div>
         <span className="dg-spacer" />
-        {demo && <span className="dg-chip demo" title="Answers come from the desk simulator on this PC, not from a car.">DEMO VEHICLE{sim?.name ? ` · ${sim.name}` : ""}</span>}
-        {!demo && gate === "read-only" && <span className="dg-chip" title="The device refuses every write (erase codes, coding, resets, routines) before it reaches the car. Writes can only be enabled on the Pi itself.">READ-ONLY</span>}
-        {!demo && gate === "armed" && <span className="dg-chip" title="The device's write gate is armed for one module right now.">WRITE GATE ARMED</span>}
-        {!demo && sim?.running && <span className="dg-chip" title="A virtual vehicle is running on the device. With the can1↔can0 jumper in, it answers instead of a car.">VIRTUAL VEHICLE RUNNING · {sim.vehicle}</span>}
-        <div className={`dg-vci ${online ? "on" : sd.link === "error" ? "err" : sd.link === "connecting" ? "busy" : ""}`}>
-          <span className="dot" />
-          <span>{online ? `${sd.info?.hostname ?? "device"} · ${iface}` : sd.link === "connecting" ? "connecting…" : sd.link === "error" ? "device not reachable" : "no device"}</span>
-          <button className="tiny" onClick={() => setPop((v) => !v)}>{online ? "Change" : "Connect"}</button>
-          {pop && (
-            <div className="dg-pop">
-              <h4>Device</h4>
-              {paired.map((d) => (
-                <button key={d.id} className={`dg-dev ${host === d.host && online ? "sel" : ""}`} onClick={() => void connect(d.host)}>
-                  <span style={{ flex: 1 }}>{d.nickname || d.hostname || d.host}<small>{d.host}</small></span>
-                </button>
-              ))}
-              <button className={`dg-dev ${demo ? "sel" : ""}`} onClick={() => void connect(DESK_SIM)}>
-                <span style={{ flex: 1 }}>Desk simulator — demo vehicle<small>{DESK_SIM} · no hardware, a full virtual car on this PC</small></span>
-              </button>
-              <div className="row" style={{ marginTop: 4 }}>
-                <input className="dg-in" style={{ flex: 1 }} placeholder="address, e.g. 100.91.185.100" value={hostInput} onChange={(e) => setHostInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && hostInput.trim()) void connect(hostInput.trim()); }} />
-                <button disabled={!hostInput.trim()} onClick={() => void connect(hostInput.trim())}>Connect</button>
-              </div>
-              <div className="row spread" style={{ marginTop: 10 }}>
-                <label className="tiny dim">Vehicle bus{" "}
-                  <select className="dg-in" style={{ padding: "4px 6px" }} value={iface} onChange={(e) => setIface(e.target.value)}>
-                    <option value="can0">can0 — HS-CAN (OBD pins 6/14)</option><option value="can1">can1 — MS-CAN</option><option value="vcan0">vcan0 — virtual</option>
-                  </select>
-                </label>
-                {online && <button className="tiny" onClick={() => { void sd.disconnect(); setPop(false); }}>Disconnect</button>}
-              </div>
-            </div>
-          )}
-        </div>
+        {demo && <span className="dg-chip demo" title="Answers come from the desk simulator on this PC, not from a car.">SIMULATOR{wb.simCar ? ` · ${wb.simCar}` : ""}</span>}
       </div>
 
       <div className="dg-body">
@@ -276,22 +214,22 @@ export function DiagnosticsTab() {
 
         {step.s === "home" && (
           <>
-            <h1 className="dg-h">Vehicle diagnostics</h1>
+            <h1 className="dg-h">Auto Diagnostic</h1>
             <p className="dg-sub">Identify the vehicle, scan every system, work inside any of them. Whatever is found is kept — the next car of the same model opens already mapped.</p>
             <div className="dg-tiles">
               <button className="dg-tile hot" disabled={!!busy} onClick={() => void autoVin(null).then((b) => { if (b) open(b.profile, b.vin); })}>
-                <span className="ico">🚗</span><span className="t">AUTO VIN</span><span className="d">Read the VIN from the connected car and identify it.</span>
+                <span className="ico"><Icon name="car" size={24} /></span><span className="t">AUTO VIN</span><span className="d">Read the VIN from the connected car and identify it.</span>
                 <span className="cnt">{online ? `via ${sd.info?.hostname ?? host}` : "needs the device connected"}</span>
               </button>
               <button className="dg-tile" onClick={() => { setNote(null); setStep({ s: "vin" }); }}>
-                <span className="ico">⌨️</span><span className="t">MANUAL VIN</span><span className="d">Type a VIN — works without the car, for looking up what is on file.</span>
+                <span className="ico"><Icon name="keyboard" size={24} /></span><span className="t">MANUAL VIN</span><span className="d">Type a VIN — works without the car, for looking up what is on file.</span>
               </button>
               <button className="dg-tile" onClick={() => { setNote(null); setStep({ s: "make" }); }}>
-                <span className="ico">🗂️</span><span className="t">SELECT VEHICLE</span><span className="d">Pick the make and model, then read the VIN to confirm.</span>
+                <span className="ico"><Icon name="folder" size={24} /></span><span className="t">SELECT VEHICLE</span><span className="d">Pick the make and model, then read the VIN to confirm.</span>
                 <span className="cnt">{profiles.length} model{profiles.length === 1 ? "" : "s"} in the library</span>
               </button>
               <button className="dg-tile" onClick={() => { setNote(null); setStep({ s: "history" }); }}>
-                <span className="ico">🕘</span><span className="t">VEHICLE HISTORY</span><span className="d">Cars that have been connected before, with their last scan.</span>
+                <span className="ico"><Icon name="clock" size={24} /></span><span className="t">VEHICLE HISTORY</span><span className="d">Cars that have been connected before, with their last scan.</span>
                 <span className="cnt">{history.length} car{history.length === 1 ? "" : "s"}</span>
               </button>
             </div>
@@ -299,7 +237,7 @@ export function DiagnosticsTab() {
               <>
                 <div className="dg-cat">Continue</div>
                 <button className="dg-item" onClick={() => setStep({ s: "vehicle", tab: "scan" })}>
-                  <span className="main"><b>{ymmLabel(profile)}</b><small>{vin ? `VIN ${vin}` : "VIN not read"} · {addressedSystems(profile).length} systems{last ? ` · last scan ${new Date(last.at).toLocaleString()}` : ""}</small></span><span className="chev">›</span>
+                  <span className="main"><b>{ymmLabel(profile)}</b><small>{vin ? `VIN ${vin}` : "VIN not read"} · {addressedSystems(profile).length} systems{last ? ` · last scan ${new Date(last.at).toLocaleString()}` : ""}</small></span><span className="chev"><Icon name="chevron" size={18} /></span>
                 </button>
               </>
             )}
@@ -351,7 +289,7 @@ export function DiagnosticsTab() {
                     <button key={x.id} className="dg-item" onClick={() => void pickModel(x)}>
                       <span className="main"><b>{x.year ?? "—"} {x.model}{x.trim ? <span className="dim" style={{ fontWeight: 400 }}> · {x.trim}</span> : null}</b>
                         <small>{sys.length} system{sys.length === 1 ? "" : "s"} known · {learned} learned · {x.knownVins?.length ?? 0} car{(x.knownVins?.length ?? 0) === 1 ? "" : "s"} seen{x.provenance?.source === "seed" && !(x.knownVins?.length) ? " · built-in starting map" : ""}</small></span>
-                      <span className="chev">›</span>
+                      <span className="chev"><Icon name="chevron" size={18} /></span>
                     </button>
                   );
                 })}
@@ -379,9 +317,9 @@ export function DiagnosticsTab() {
                   <button key={x.id + unit.vin} className="dg-item" onClick={() => { setNote(null); open(x, unit.vin); }}>
                     <span className="main"><b>{ymmLabel(x)} <span className="mono dim" style={{ fontWeight: 400, fontSize: 12.5 }}>{unit.vin}</span></b>
                       <small>last connected {new Date(unit.lastReadAt).toLocaleString()} · {unit.reads} visit{unit.reads === 1 ? "" : "s"} · {ls ? (faults.length ? `last scan: ${faults.reduce((n, s) => n + s.dtcs.length, 0)} code(s) in ${faults.length} system(s)` : "last scan: no faults") : "never scanned"}</small></span>
-                    {ls?.sim && <span className="dg-chip demo">VIRTUAL</span>}
-                    {ls && <span className={`dg-st ${faults.length ? "fault" : "ok"}`}>{faults.length ? `Fault | ${faults.reduce((n, s) => n + s.dtcs.length, 0)}` : "No fault"}</span>}
-                    <span className="chev">›</span>
+                    {ls?.sim && <span className="dg-chip demo">SIMULATOR</span>}
+                    {ls && <span className={`ual-chip ${faults.length ? "fault" : "clean"}`}>{faults.length ? `${faults.reduce((n, s) => n + s.dtcs.length, 0)} faults` : "No faults"}</span>}
+                    <span className="chev"><Icon name="chevron" size={18} /></span>
                   </button>
                 );
               })}
