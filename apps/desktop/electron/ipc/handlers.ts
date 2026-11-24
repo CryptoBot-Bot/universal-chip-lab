@@ -742,12 +742,14 @@ export async function registerIpcHandlers(
   // ---- vehicle library (Year/Make/Model profiles for the 3D cockpit)
   // Seed profiles ship in @ecu/vehicle-db (travel with publishes); learned ones
   // persist to disk here and merge on top; "bake" folds them into the bundle.
-  register("vehicleLib:list", async () => {
+  // The library: vehicles actually read. `builtIn` adds the hand-written starter maps
+  // (only the archived 3D cockpit / training room ask for them).
+  register("vehicleLib:list", async (_e, p?: { builtIn?: boolean }) => {
     const { records, errors } = await loadStoredVehicleProfiles(vehicleLibDir);
     if (errors.length > 0) {
       console.warn(`[ECL] Skipped ${errors.length} invalid vehicle profile(s):`, errors.join("; "));
     }
-    return mergeVehicleProfiles(records);
+    return mergeVehicleProfiles(records, { builtIn: !!p?.builtIn });
   });
   register("vehicleLib:save", async (_e, record: VehicleProfile) => {
     await saveStoredVehicleProfile(vehicleLibDir, record, new Date().toISOString());

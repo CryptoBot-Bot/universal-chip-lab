@@ -35,7 +35,7 @@ export function TrainingRoom() {
 
   // Load the whole gold library once.
   useEffect(() => {
-    Api.vehicleLib.list().then((list) => {
+    Api.vehicleLib.list({ builtIn: true }).then((list) => {
       setProfiles(list);
       setSelectedId((cur) => list.find((p) => p.id === cur)?.id ?? list[0]?.id ?? "");
     }).catch((e) => setError((e as Error).message));

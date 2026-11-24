@@ -73,7 +73,7 @@ const api = {
     bake:    () => invoke("busIntel:bake"),
   },
   vehicleLib: {
-    list:    () => invoke("vehicleLib:list"),
+    list:    (payload?: { builtIn?: boolean }) => invoke("vehicleLib:list", payload),
     save:    (record: unknown) => invoke("vehicleLib:save", record),
     delete:  (id: string) => invoke("vehicleLib:delete", { id }),
     bake:    () => invoke("vehicleLib:bake"),

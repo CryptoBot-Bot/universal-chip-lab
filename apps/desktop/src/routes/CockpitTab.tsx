@@ -117,7 +117,7 @@ export function CockpitTab() {
     let last = "";
     const iv = setInterval(async () => {
       try {
-        const list = await Api.vehicleLib.list();
+        const list = await Api.vehicleLib.list({ builtIn: true });
         const sig = stamp(list);
         if (sig === last) return;
         last = sig;
@@ -141,7 +141,7 @@ export function CockpitTab() {
   }, []);
 
   async function refreshLibrary() {
-    try { setProfiles(await Api.vehicleLib.list()); } catch (e) { setMsg((e as Error).message); }
+    try { setProfiles(await Api.vehicleLib.list({ builtIn: true })); } catch (e) { setMsg((e as Error).message); }
   }
 
   /**

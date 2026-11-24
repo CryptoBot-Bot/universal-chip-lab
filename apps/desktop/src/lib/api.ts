@@ -488,7 +488,8 @@ export const Api = {
     bake:    () => unwrap<{ path: string; count: number }>(api.busIntel.bake() as never),
   },
   vehicleLib: {
-    list:   () => unwrap<VehicleProfile[]>(api.vehicleLib.list() as never),
+    /** Vehicles actually read. `{ builtIn: true }` adds the hand-written starter maps (archive tools only). */
+    list:   (payload?: { builtIn?: boolean }) => unwrap<VehicleProfile[]>(api.vehicleLib.list(payload) as never),
     save:   (record: VehicleProfile) => unwrap<VehicleProfile[]>(api.vehicleLib.save(record) as never),
     delete: (id: string) =>
       unwrap<{ removed: boolean; records: VehicleProfile[] }>(api.vehicleLib.delete(id) as never),

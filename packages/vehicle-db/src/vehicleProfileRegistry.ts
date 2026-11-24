@@ -16,10 +16,18 @@ const COMMUNITY_VEHICLE_PROFILES: VehicleProfile[] = (communityCatalog as Vehicl
   (p) => validateVehicleProfile(p).length === 0,
 );
 
-export function mergeVehicleProfiles(learned: VehicleProfile[]): VehicleProfile[] {
+/**
+ * The vehicle library as the app shows it. Since 2026-11-24 the library holds only
+ * vehicles actually read (the stored profiles); the hand-written starter maps (seed +
+ * community) are added only when `builtIn` is asked for — the archived 3D cockpit and
+ * training room use them, the shop screens and the pipeline do not.
+ */
+export function mergeVehicleProfiles(learned: VehicleProfile[], opts: { builtIn?: boolean } = {}): VehicleProfile[] {
   const byId = new Map<string, VehicleProfile>();
-  for (const p of SEED_VEHICLE_PROFILES) byId.set(p.id, p);
-  for (const p of COMMUNITY_VEHICLE_PROFILES) byId.set(p.id, p);
+  if (opts.builtIn) {
+    for (const p of SEED_VEHICLE_PROFILES) byId.set(p.id, p);
+    for (const p of COMMUNITY_VEHICLE_PROFILES) byId.set(p.id, p);
+  }
   for (const p of learned) byId.set(p.id, p);
   return [...byId.values()].sort((a, b) => `${a.make} ${a.model}`.localeCompare(`${b.make} ${b.model}`));
 }
