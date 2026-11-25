@@ -102,7 +102,7 @@ function VoltageChip() {
   return (
     <button type="button" className={`ual-chip strong ual-volts ${cls}`} title={tip} onClick={() => void v.readNow()} disabled={v.reading_now} aria-live="polite">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="12" rx="2" /><path d="M7 4v3M17 4v3M6.5 13h3M14.5 13h3M16 11.5v3" /></svg>
-      {text}{view && v.status ? " ·  old" : ""}
+      {text}{view && v.status && !v.reading_now ? " · old" : ""}
     </button>
   );
 }

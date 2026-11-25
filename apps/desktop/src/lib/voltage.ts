@@ -21,5 +21,15 @@ export function voltageView(volts: number, rpm: number | null): VoltageView {
   return { level: "ok", what: "battery", hint: "Engine off, ignition on: the battery is well charged." };
 }
 
+/** A reading older than this is not "now" any more (background reads come every 10 s). */
+export const FRESH_MS = 25_000;
+
+/** "" while the reading is current, else how old it is, in words. */
+export function ageText(at: string, now: number): string {
+  const s = Math.round((now - Date.parse(at)) / 1000);
+  if (!Number.isFinite(s) || s * 1000 <= FRESH_MS) return "";
+  return s < 90 ? `read ${s} s ago` : `read ${Math.round(s / 60)} min ago`;
+}
+
 /** "12.04 V" */
 export const voltsText = (v: number) => `${v.toFixed(2)} V`;

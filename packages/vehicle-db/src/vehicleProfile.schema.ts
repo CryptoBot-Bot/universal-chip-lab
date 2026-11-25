@@ -283,7 +283,7 @@ export function foldExploration(
     identification: mergeBy(base.identification, incoming.identification, (i) => i.id.toUpperCase()),
     liveData: mergeBy(base.liveData, incoming.liveData, (l) => `${l.id}|${l.session ?? ""}`.toUpperCase()),
     broadcastFrames: mergeBy(base.broadcastFrames, incoming.broadcastFrames, (f) => f.canId.toUpperCase()),
-    dtcs: mergeBy(base.dtcs, incoming.dtcs, (d) => d.code.toUpperCase()),
+    dtcs: mergeBy(base.dtcs, incoming.dtcs, (d) => d.code.toUpperCase()).filter((d) => isDtcCode(d.code)),
     operations: [...ops.values()],
   };
 }
@@ -412,6 +412,16 @@ export function lastScanFor(profile: VehicleProfile | null | undefined, vin: str
   const v = (vin || "").trim().toUpperCase();
   const scans = profile?.knownVins?.find((o) => o.vin === v)?.scans;
   return scans?.length ? scans[scans.length - 1] : null;
+}
+
+/** Is this a trouble code (P0740, B170B, U0019-88, 0x9F12, 5 digits…) and not a sentence like "No stored DTCs"? */
+export function isDtcCode(code: string): boolean {
+  return /^([PCBU][0-9A-F]{4}|(0x)?[0-9A-F]{4,6})(-[0-9A-F]{1,2})?$/i.test((code || "").trim());
+}
+
+/** Entries of an AI map that are faults: a real code that the map does not itself call untested or inactive. */
+export function explorationFaults<T extends { code: string; desc?: string }>(dtcs: T[] | undefined): T[] {
+  return (dtcs ?? []).filter((d) => isDtcCode(d.code) && !/not (active|completed|present)|no fault|untested|supported[ -]list/i.test(d.desc ?? ""));
 }
 
 export interface VehicleProfile {

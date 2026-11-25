@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { checkRequest, coverageOf, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { checkRequest, coverageOf, explorationFaults, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
 import type { ProtectedKind } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
@@ -591,7 +591,7 @@ async function runMap(ctx: Ctx, profile: VehicleProfile, mod: VehicleModule) {
   say(`= ${mod.label}: ${r.outcome}, confidence ${r.confidence}, ${r.steps} step(s), tokens in ${r.tokensIn} / out ${r.tokensOut}`);
   say(`  identity: ${oneLine(r.identity, 160)}`);
   for (const o of r.operations ?? []) say(`  ${pad(o.op, 20)} ${pad(o.status, 12)} ${o.request ? `${o.request}${o.session ? ` in ${o.session}` : ""}` : ""}${o.nrc ? ` nrc ${o.nrc}` : ""}`);
-  say(`  ${r.identification?.length ?? 0} identification record(s), ${r.liveData?.length ?? 0} live-data item(s), ${r.dtcs.length} DTC(s), ${r.broadcastFrames?.length ?? 0} broadcast frame(s)${r.newFindings.length ? `, ${r.newFindings.length} new vs the last run` : ""}`);
+  say(`  ${r.identification?.length ?? 0} identification record(s), ${r.liveData?.length ?? 0} live-data item(s), ${explorationFaults(r.dtcs).length} fault code(s), ${r.broadcastFrames?.length ?? 0} broadcast frame(s)${r.newFindings.length ? `, ${r.newFindings.length} new vs the last run` : ""}`);
   say(`Saved to ${updated.id}; transcript: ${file}`);
   return { ok: true, result: r, transcript: file, profile: updated };
 }

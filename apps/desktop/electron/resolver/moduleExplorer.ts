@@ -324,7 +324,7 @@ You have READ-ONLY tools:
 
 YOUR DELIVERABLES map 1:1 to the operator's cockpit tabs — every run should ENRICH each of these five, and you conclude by filling their structured arrays:
   🪪 ECU Information → identification[] + sessions[] : part numbers, VIN, hardware/software versions, calibration ID, serial — each with the request and session it came from, decoded to readable text.
-  ⚠️ Trouble Codes → dtcs[] : stored, pending AND permanent codes, with the failure they describe.
+  ⚠️ Trouble Codes → dtcs[] : stored, pending AND permanent codes, with the failure they describe. Only codes that are faults NOW or were stored: leave out codes whose status says "test not completed" (e.g. UDS 0x40 / 0x50) and lists of supported codes, and leave dtcs[] EMPTY when there are none — never an entry such as "No stored DTCs".
   📈 Live Data → liveData[] : every measurement block/PID the module exposes, the session it needs, and what its bytes carry (decode where you can).
   📡 Bus Monitor → broadcastFrames[] : every id the module broadcasts, its rate, and which bytes are live counters/signals.
   🧩 Capabilities → operations[] : a status for ALL ${ESSENTIAL_OP_COUNT} canonical ops (the read/write map). This is the single most important output.

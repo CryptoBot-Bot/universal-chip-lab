@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { CAPABILITY_CATALOG, applyCensus, censusInputFor, type VehicleProfile, type VehicleModule, type ModuleCapability } from "@ecu/vehicle-db";
+import { CAPABILITY_CATALOG, applyCensus, censusInputFor, explorationFaults, type VehicleProfile, type VehicleModule, type ModuleCapability } from "@ecu/vehicle-db";
 
 import {
   Api,
@@ -255,7 +255,7 @@ function CapBoard({ explored }: { explored: NonNullable<VehicleProfile["modules"
         })}
       </div>
       {((explored.liveData?.length ?? 0) > 0 || (explored.identification?.length ?? 0) > 0 || (explored.dtcs?.length ?? 0) > 0) && (
-        <div className="tiny dim">{explored.liveData?.length ?? 0} live-data block(s) · {explored.identification?.length ?? 0} ID record(s) · {explored.dtcs?.length ?? 0} DTC(s)</div>
+        <div className="tiny dim">{explored.liveData?.length ?? 0} live-data block(s) · {explored.identification?.length ?? 0} ID record(s) · {explorationFaults(explored.dtcs).length} fault code(s)</div>
       )}
     </div>
   );

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { addSweep, recordScan } from "@ecu/vehicle-db";
+import { addSweep, explorationFaults, isDtcCode, recordScan } from "@ecu/vehicle-db";
 import type { ModuleSweep, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
 import { loadStoredVehicleProfiles, saveStoredVehicleProfile } from "@ecu/vehicle-db/vehicleStore";
 
@@ -71,4 +71,11 @@ test("a current copy may still remove things; a healed duplicate does not come b
   await saveStoredVehicleProfile(dir, { ...dup, modules: [...dup.modules, mod("resp-7e8", "7E8")] } as unknown as VehicleProfile, "2026-11-25T01:02:00Z");
   await saveStoredVehicleProfile(dir, { ...dup, modules: [...dup.modules, mod("ecm", "7E8")] } as unknown as VehicleProfile, "2026-11-25T01:03:00Z");   // stale copy, same address under its proper id
   assert.deepEqual((await load(dir)).modules.map((m) => m.id), ["esp", "ecm"]);
+});
+
+test("a sentence is not a fault code, and an untested code is not a fault (the real Sprinter maps)", () => {
+  for (const c of ["P0740", "B170B", "U0019-88", "B210D-16", "0x9F12", "9F12", "0001"]) assert.ok(isDtcCode(c), c);
+  for (const c of ["No stored DTCs", "None", "", "no faults", "P07"]) assert.ok(!isDtcCode(c), c);
+  const list = [{ code: "B210A-00", desc: "Logged, status 0x40 test not completed (not active)" }, { code: "No stored DTCs", desc: "KWP 18 02 FF 00" }, { code: "B170B", desc: "stored, validated" }];
+  assert.deepEqual(explorationFaults(list).map((d) => d.code), ["B170B"]);
 });

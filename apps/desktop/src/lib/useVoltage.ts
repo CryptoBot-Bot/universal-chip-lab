@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Api, type VoltageReading, type VoltageSource } from "./api";
+import { ageText } from "./voltage";
 
 /** Seconds between background reads. */
 const EVERY_MS = 10_000;
@@ -75,6 +76,18 @@ export function useVoltage(o: { host: string; iface: string; online: boolean; rx
     return () => window.clearInterval(iv);
   }, [o.online, run]);
 
+  // the window comes back to the front: read at once instead of showing what was true before
+  useEffect(() => {
+    const back = () => { if (!document.hidden && o.online && !st.current.paused) void run(false); };
+    document.addEventListener("visibilitychange", back);
+    return () => document.removeEventListener("visibilitychange", back);
+  }, [o.online, run]);
+
+  // age of the reading, so an old number is never shown as current (hidden window, a long scan)
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const iv = window.setInterval(() => setNow(Date.now()), 5000); return () => window.clearInterval(iv); }, []);
+  const age = reading ? ageText(reading.at, Math.max(now, Date.parse(reading.at))) : "";
+
   // traffic on the bus after a silent pause (somebody switched the ignition on and scanned) resumes it
   useEffect(() => {
     const s = st.current;
@@ -88,5 +101,5 @@ export function useVoltage(o: { host: string; iface: string; online: boolean; rx
     if (modulesOf.current !== of) { modulesOf.current = of; setByModule({}); }
     modules.current = list;
   }, []);
-  return { reading, status, reading_now: busyNow, byModule, readNow, setModules };
+  return { reading, status: status || age, reading_now: busyNow, byModule, readNow, setModules };
 }
