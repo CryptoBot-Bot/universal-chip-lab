@@ -290,6 +290,7 @@ export type VehicleExplorerEvent =
   | { type: "ident-module"; moduleId: string; label: string; index: number; total: number; phase: "start" | "done"; protectedKind?: string; entry?: ModuleInventoryEntry }
   | { type: "ident-record"; moduleId: string; record: IdentRecord }
   | { type: "ident-done"; inventory: CarInventory }
+  | { type: "label-module"; moduleId: string; done: number; of: number }
   | { type: "sweep-module"; moduleId: string; label: string; index: number; total: number; phase: "start" | "progress" | "done"; asked: number; of: number; answered: number; sweep?: ModuleSweep }
   | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
   | { type: "module-event"; moduleId: string; event: ExplorerEvent }

@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { checkRequest, coverageOf, explorationFaults, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { checkRequest, coverageOf, explorationFaults, labelSummary, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
 import type { ProtectedKind } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
@@ -29,7 +29,8 @@ import {
 import type { DiscoveredModule, VehicleExplorerEvent } from "../electron/resolver/vehicleExplorer";
 import { identifyAndSave } from "../electron/pipeline/identityPipeline";
 import { sweepAndSave } from "../electron/pipeline/sweepPipeline";
-import { benchModules, runBench, summarise, type TruthVehicle } from "../electron/pipeline/calibration";
+import { benchModules, PRICES, runBench, summarise, type TruthVehicle } from "../electron/pipeline/calibration";
+import { labelAndSave, labelPrompts, labelSweeps, recheckAndSave } from "../electron/pipeline/labelPipeline";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../electron/pipeline/simLibrary";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { getApiKey } from "./settings";
@@ -63,6 +64,11 @@ Commands
                               --condition says what the car was doing ("engine off", "idling"); --wide adds 0400-0FFF
   coverage [<module>]         what the AI map knows of what each module answers (needs a sweep): coverage %,
                               moving values the map does not list as live data, identifiers it never mentions
+  label <module> [--dry [--show]] [--recheck | --missing]
+                              AI names for every swept identifier of one module, then checked by code against the
+                              car's own readings (which the AI is not shown). Offline: no device, no car. Costs API
+                              tokens; --dry only shows how much would be asked; --recheck checks stored labels again without AI;
+                              --missing asks only about identifiers without a label
   bench [--vehicle corolla] [--modules ecm,tcm,abs] [--models M1,M2] [--runs N] [--port 8771]
                               calibration: run the AI deep map on a virtual car whose every identifier is known
                               (desk simulator, started if needed) and score it — data IDs found, labels right,
@@ -91,7 +97,7 @@ AI steps (census, map) need ANTHROPIC_API_KEY in the environment or in <repo>/.e
 // ---- small plumbing -------------------------------------------------------------
 
 interface Args { _: string[]; flags: Record<string, string | boolean> }
-const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide"]);
+const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide", "dry", "show", "recheck", "missing"]);
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {} };
@@ -468,6 +474,40 @@ async function cmdCoverage(ctx: Ctx) {
   return { ok: true, profile: profile.id, modules: rows };
 }
 
+/** 5b + 5c: AI names for a module's swept identifiers, checked by code. Offline: no device, no car. */
+async function cmdLabel(ctx: Ctx) {
+  const profile = await currentProfile(ctx);
+  const q = ctx.args._[1];
+  if (!q) throw new Error("label <module>: which module?");
+  const m = findModule(profile, q);
+  const prompts = labelPrompts(profile, m);
+  if (ctx.args.flags.dry) {
+    say(`${m.label}: ${prompts.length} question(s), ${prompts.reduce((n, p) => n + p.length, 0)} characters. Nothing was sent.`);
+    if (ctx.args.flags.show) say(prompts[0]);
+    return { ok: true, module: m.id, prompts: prompts.length };
+  }
+  const recheck = !!ctx.args.flags.recheck;
+  const missing = !!ctx.args.flags.missing;
+  if (!recheck) needKey("Labelling");
+  const t0 = Date.now();
+  say(recheck ? `Checking the stored labels of ${m.label} again — no AI…` : missing ? `Asking only about the identifiers of ${m.label} without a label…` : `Labelling ${m.label} from its sweeps on file: offline, ${prompts.length} question(s) to the model…`);
+  const { labels, profile: saved } = recheck ? await recheckAndSave(ctx.vehicleLibDir, { profileId: profile.id, moduleId: m.id }) : await labelAndSave(ctx.vehicleLibDir, { profileId: profile.id, moduleId: m.id, keepStored: missing, onProgress: (d, n) => say(`  ${d}/${n} answered`) });
+  const s = labelSummary(labels, labelSweeps(m));
+  const price = PRICES[labels.model] ?? { in: 5, out: 25 };
+  say(`${m.label}: ${s.named} of ${s.answered} identifiers named (${s.specific} of them with a value or an identity), ${s.unknown} "unknown", ${s.missing} without an answer, ${labels.invented.length} invented (dropped).`);
+  say(`  check: ${s.confirmed} confirmed · ${s.consistent} consistent · ${s.unchecked} unchecked · ${s.contradicted} contradicted`);
+  const tr = labels.tracks ?? [];
+  say(`  code alone: ${tr.filter((x) => x.quantity === "supply voltage").length} field(s) follow the supply voltage (luck would give ${labels.luck?.volts ?? 0}), ${tr.filter((x) => x.quantity === "engine speed").length} follow the engine speed (luck ${labels.luck?.rpm ?? 0})`);
+  for (const x of tr.slice(0, 12)) say(`    ${x.id} byte ${x.offset} ×${Math.round(x.factor * 10000) / 10000}: ${x.quantity} ${x.at.map((a) => `${a.condition} ${a.values.map((v) => Math.round(v * 100) / 100).join("/")}`).join(" · ")}`);
+  for (const st of ["confirmed", "contradicted"] as const) {
+    for (const l of labels.labels.filter((x) => x.kind !== "unknown" && x.check.status === st)) {
+      say(`  ${st === "confirmed" ? "+" : "!"} ${l.id}  ${oneLine(l.name, 60)} [${l.confidence}]: ${oneLine(l.check.notes.join("; "), 150)}`);
+    }
+  }
+  say(`  ${labels.model}, ${Math.round((Date.now() - t0) / 1000)} s, tokens in ${labels.tokensIn} / out ${labels.tokensOut} (about $${((labels.tokensIn * price.in + labels.tokensOut * price.out) / 1e6).toFixed(2)}). Saved to ${saved.id}.`);
+  return { ok: true, module: m.id, summary: s, invented: labels.invented };
+}
+
 /** Calibration bench on a virtual car (desk simulator). */
 async function cmdBench(ctx: Ctx) {
   needKey("The bench");
@@ -823,7 +863,7 @@ async function main(): Promise<number> {
 
   const root = findProjectRoot();
   loadEnvFile(root);
-  if (cmd === "audit" || cmd === "coverage" || cmd === "bench") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
+  if (cmd === "audit" || cmd === "coverage" || cmd === "bench" || cmd === "label") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
   const hostRaw = (typeof args.flags.host === "string" ? args.flags.host : process.env.SD_HOST ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!hostRaw) { process.stderr.write("Which device? Pass --host <address[:port]> (or set SD_HOST). Example: --host 100.91.185.100\n"); return 2; }
   const host = /:\d+$/.test(hostRaw) ? hostRaw : `${hostRaw}:8080`;
@@ -841,7 +881,7 @@ async function main(): Promise<number> {
 
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
-    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
+    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, label: cmdLabel, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
   };
   const fn = commands[cmd];
   if (!fn) { process.stderr.write(`Unknown command "${cmd}".\n\n${HELP}\n`); return 2; }

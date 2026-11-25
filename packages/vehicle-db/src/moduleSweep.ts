@@ -26,6 +26,12 @@ export interface SweepHit {
   gated?: boolean;
 }
 
+/** The car's state while a module was swept, read from the engine module by standard OBD: [lowest, highest]. */
+export interface SweepRefs { volts?: [number, number]; rpm?: [number, number]; kmh?: [number, number]; coolant?: [number, number] }
+
+/** Data bytes kept per identifier (longer blocks exist; the recording has them whole). */
+export const SWEEP_BYTES = 256;
+
 export interface ModuleSweep {
   at: string;
   /** What the car was doing: "ignition on, engine off", "engine idling"… (operator's words). */
@@ -38,6 +44,8 @@ export interface ModuleSweep {
   /** The ranges read, e.g. "22 0100–03FF @03". */
   ranges: string[];
   hits: SweepHit[];
+  /** What the car itself measured meanwhile — the yardstick for labels (moduleLabels.ts). */
+  refs?: SweepRefs;
   counts: { asked: number; answered: number; moving: number; gated: number; ms: number };
 }
 

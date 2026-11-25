@@ -13,6 +13,7 @@
 
 import type { CarInventory, InventoryChange } from "./moduleIdentity.js";
 import type { ModuleSweep } from "./moduleSweep.js";
+import type { ModuleLabels } from "./moduleLabels.js";
 import type { RiskLevel } from "./busKnowledge.schema.js";
 import type { ModuleCapability } from "./benchModule.schema.js";
 
@@ -116,6 +117,8 @@ export interface VehicleModule {
   explored?: VehicleModuleExploration; // permanent live-verified capability memory
   /** Completeness sweeps: every identifier the module answers, per condition (moduleSweep.ts). */
   sweeps?: ModuleSweep[];
+  /** What each swept identifier is, proposed by an AI and checked by code (moduleLabels.ts). */
+  labels?: ModuleLabels;
   lastSeenAt?: string;        // ISO — last time this module answered on a discovery scan
   opsLog?: ModuleOpLog[];     // recent real-bus operations run against this module (capped)
   summary?: string;           // census: what this module is / controls on THIS vehicle (AI, from part numbers)

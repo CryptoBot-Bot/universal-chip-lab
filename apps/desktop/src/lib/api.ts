@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { BenchModuleProfile, BusModuleKnowledge, CarInventory, IdentRecord, ModuleInventoryEntry, ModuleProfile, ModuleSweep, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, CarInventory, IdentRecord, ModuleInventoryEntry, ModuleProfile, ModuleLabels, ModuleSweep, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -304,6 +304,7 @@ export type VehicleExplorerEvent =
   | { type: "ident-module"; moduleId: string; label: string; index: number; total: number; phase: "start" | "done"; protectedKind?: string; entry?: ModuleInventoryEntry }
   | { type: "ident-record"; moduleId: string; record: IdentRecord }
   | { type: "ident-done"; inventory: CarInventory }
+  | { type: "label-module"; moduleId: string; done: number; of: number }
   | { type: "sweep-module"; moduleId: string; label: string; index: number; total: number; phase: "start" | "progress" | "done"; asked: number; of: number; answered: number; sweep?: ModuleSweep }
   | { type: "module-start"; moduleId: string; displayName: string; index: number; total: number }
   | { type: "module-event"; moduleId: string; event: ExplorerEvent }
@@ -536,6 +537,9 @@ export const Api = {
     identifyModules: (payload: { host?: string; iface: string; profile: VehicleProfile; vin?: string; moduleIds?: string[]; sim?: string | null; extended?: boolean }) =>
       unwrap<{ profile: VehicleProfile; inventory: CarInventory }>(api.vehicleExplorer.identifyModules(payload) as never),
     /** Completeness sweep: read every identifier of each (non-protected) module, twice. Read-only, no AI. */
+    /** AI names for one module's swept identifiers, checked by code. Offline; costs API tokens. */
+    labelModule: (payload: { profileId: string; moduleId: string }) =>
+      unwrap<{ profile: VehicleProfile; labels: ModuleLabels }>(api.vehicleExplorer.labelModule(payload) as never),
     sweepModules: (payload: { host?: string; iface: string; profile: VehicleProfile; moduleIds?: string[]; condition: string; wide?: boolean; sim?: string | null }) =>
       unwrap<{ profile: VehicleProfile; sweeps: Record<string, ModuleSweep>; skipped: string[] }>(api.vehicleExplorer.sweepModules(payload) as never),
     identify: (payload: IdentifyInput) => unwrap<IdentifyResult>(api.vehicleExplorer.identify(payload) as never),

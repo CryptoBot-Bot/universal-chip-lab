@@ -239,5 +239,12 @@
 .ual .vdb-cov-bar > i { display: block; height: 100%; background: var(--ual-blue); }
 .ual .vdb-cov-ids { margin: 6px 0 0; font-size: 12px; line-height: 1.7; word-break: break-word; }
 .ual .vdb-cov-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+/* names and proof (AI labels, checked by code) */
+.ual .vdb-lab-counts { display: flex; flex-wrap: wrap; gap: 6px; }
+.ual .vdb-labs { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.ual .vdb-lab { display: flex; flex-direction: column; gap: 2px; padding-left: 10px; border-left: 2px solid var(--ual-line); }
+.ual .vdb-lab-head { display: flex; align-items: center; gap: 8px; }
+.ual .vdb-lab-val { font-size: 12.5px; color: var(--ual-muted); font-variant-numeric: tabular-nums; }
+.ual .vdb-lab-val.ok { color: var(--ual-clean-ink); }
 .ual .vdb-cov-cond { margin: 0; }
 .ual .vdb-cov-cond select { width: auto; }

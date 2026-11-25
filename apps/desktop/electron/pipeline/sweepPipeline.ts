@@ -7,8 +7,8 @@
  * Safety: airbag / immobiliser modules are never swept; every request goes through
  * the read-only policy (readSeq); a session opened is closed again (10 01).
  */
-import { addSweep, asciiOf, checkRequest, dataOf, protectedModule, rangeLabel, rangeRequests, requestId, sweepPlan } from "@ecu/vehicle-db";
-import type { ModuleSweep, SweepHit, VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
+import { addSweep, asciiOf, checkRequest, dataOf, protectedModule, rangeLabel, rangeRequests, requestId, sweepPlan, SWEEP_BYTES } from "@ecu/vehicle-db";
+import type { ModuleSweep, SweepRefs, SweepHit, VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 import { saveStoredVehicleProfile } from "@ecu/vehicle-db/vehicleStore";
 
 import type { SeqItem } from "../resolver/moduleExplorer";
@@ -28,6 +28,25 @@ export interface SweepOptions {
   sim?: string | null;
   onEvent?: (e: VehicleExplorerEvent) => void;
   shouldStop?: () => boolean;
+  /** false: do not read the car's own readings beside the sweep (tests, replays). */
+  refs?: boolean;
+}
+
+/** Hex characters kept per identifier. */
+const KEEP = SWEEP_BYTES * 2;
+
+/** The car's own readings at this moment (standard OBD, engine module), widening [lowest, highest]. */
+async function readRefs(o: SweepOptions, refs: SweepRefs): Promise<void> {
+  let items: SeqItem[];
+  try { items = await readSeq(o.host, o.iface, "7E0", "7E8", ["010C", "010D", "0142", "0105"], { timeout: TIMEOUT }); }
+  catch { return; }                                   // no engine module on this bus: labels simply stay unchecked
+  const raw = (k: number, want: string, n: number): number | null => {
+    const h = clean(items[k]?.response);
+    return h.startsWith(want) && h.length >= 4 + n * 2 ? parseInt(h.slice(4, 4 + n * 2), 16) : null;
+  };
+  const widen = (key: keyof SweepRefs, x: number | null) => { if (x !== null) refs[key] = refs[key] ? [Math.min(refs[key]![0], x), Math.max(refs[key]![1], x)] : [x, x]; };
+  const rpm = raw(0, "410C", 2), kmh = raw(1, "410D", 1), mv = raw(2, "4142", 2), t = raw(3, "4105", 1);
+  widen("rpm", rpm === null ? null : rpm / 4); widen("kmh", kmh); widen("volts", mv ? mv / 1000 : null); widen("coolant", t === null ? null : t - 40);
 }
 
 /** Requests per sequence (the device takes at most 24, one is the session opener). */
@@ -110,7 +129,10 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
   const plan = sweepPlan(protocol, m.category, { wide: o.wide });
   const all = plan.flatMap(rangeRequests);
   const hits: SweepHit[] = [];
+  const whole = new Map<string, string>();
   let asked = 0;
+  const refs: SweepRefs = {};
+  if (o.refs !== false) await readRefs(o, refs);
   emit({ type: "sweep-module", moduleId: m.id, label: m.label, index, total, phase: "start", asked: 0, of: all.length, answered: 0 });
   try {
     for (let i = 0; i < all.length; i += CHUNK) {
@@ -124,8 +146,9 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
         if (nrc === 0x33) { hits.push({ id: requestId(q), session, bytes: "", moving: false, gated: true }); return; }
         const data = dataOf(q, it?.response);
         if (data === null) return;
-        const ascii = asciiOf(data);
-        hits.push({ id: requestId(q), session, bytes: data.slice(0, 128), moving: false, ...(ascii ? { ascii } : {}) });
+        const ascii = asciiOf(data.slice(0, KEEP));
+        if (data.length > KEEP) whole.set(requestId(q), data);
+        hits.push({ id: requestId(q), session, bytes: data.slice(0, KEEP), moving: false, ...(ascii ? { ascii } : {}) });
       });
       asked += chunk.length;
       emit({ type: "sweep-module", moduleId: m.id, label: m.label, index, total, phase: "progress", asked, of: all.length, answered: hits.length });
@@ -142,7 +165,10 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
       const body = open.length ? items.slice(1) : items;
       chunk.forEach((h, k) => {
         const data = dataOf(reqs[k], body[k]?.response);
-        if (data !== null && data.slice(0, 128) !== h.bytes) { h.again = data.slice(0, 128); h.moving = true; }
+        if (data === null) return;
+        const cut = data.slice(0, KEEP);
+        if (cut !== h.bytes) { h.again = cut; h.moving = true; }
+        else if (data.length > KEEP && whole.get(h.id) !== data) { h.again = cut; h.moving = true; }   // the change is beyond what is kept
       });
     }
   } finally {
@@ -150,10 +176,12 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
     if (open.length) { try { await seq([protocol === "kwp2000" ? "1081" : "1001"]); } catch { /* it falls back to default on its own */ } }
   }
 
+  if (o.refs !== false) await readRefs(o, refs);
   const sweep: ModuleSweep = {
     at: new Date().toISOString(), condition: o.condition, protocol, sessions,
     ranges: plan.map((rg) => rangeLabel(rg, session)), hits,
     counts: { asked, answered: hits.filter((h) => !h.gated).length, moving: hits.filter((h) => h.moving).length, gated: hits.filter((h) => h.gated).length, ms: Date.now() - t0 },
+    ...(Object.keys(refs).length ? { refs } : {}),
     ...(o.sim ? { sim: o.sim } : {}),
   };
   emit({ type: "sweep-module", moduleId: m.id, label: m.label, index, total, phase: "done", asked, of: all.length, answered: sweep.counts.answered, sweep });

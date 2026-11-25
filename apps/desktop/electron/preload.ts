@@ -157,6 +157,7 @@ const api = {
       invoke("vehicleExplorer:identify", payload),
     sweepModules: (payload: { host?: string; iface: string; profile: unknown; moduleIds?: string[]; condition: string; wide?: boolean; sim?: string | null }) =>
       invoke("vehicleExplorer:sweep", payload),
+    labelModule: (payload: { profileId: string; moduleId: string }) => invoke("vehicleExplorer:label", payload),
     identify: (payload: unknown) => invoke("vehicleId:resolve", payload),
     decodeOnline: (vin: string) => invoke("vehicleId:decodeOnline", { vin }),
     census: (payload: unknown) => invoke("vehicleId:census", payload),

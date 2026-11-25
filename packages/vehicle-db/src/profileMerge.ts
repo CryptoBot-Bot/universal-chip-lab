@@ -22,10 +22,15 @@ function unionBy<T>(a: T[] | undefined, b: T[] | undefined, key: (x: T) => strin
   return [...m.values()].sort((x, y) => at(x).localeCompare(at(y)));
 }
 
-/** One sweep per condition (real and simulated kept apart), the newest of each. */
+/** How much a sweep holds — the same sweep may exist in a shorter, older form. */
+const weight = (s: ModuleSweep) => s.hits.reduce((n, h) => n + h.bytes.length + (h.again?.length ?? 0), 0) + (s.refs ? 1 : 0);
+
+/** One sweep per condition (real and simulated kept apart), the newest of each; of one sweep, its fuller form. */
 function mergeSweeps(a?: ModuleSweep[], b?: ModuleSweep[]): ModuleSweep[] | undefined {
-  const all = unionBy(a, b, (s) => `${s.condition}|${!!s.sim}|${s.at}`, (s) => s.at);
-  if (!all) return undefined;
+  const key = (s: ModuleSweep) => `${s.condition}|${!!s.sim}|${s.at}`;
+  const union = unionBy(a, b, key, (s) => s.at);
+  if (!union) return undefined;
+  const all = union.map((s) => [...(a ?? []), ...(b ?? [])].filter((x) => key(x) === key(s)).reduce((best, x) => (weight(x) > weight(best) ? x : best), s));
   const last = new Map<string, ModuleSweep>();
   for (const s of all) last.set(`${s.condition}|${!!s.sim}`, s);
   return all.filter((s) => last.get(`${s.condition}|${!!s.sim}`) === s);
@@ -36,6 +41,7 @@ function mergeModule(disk: VehicleModule, mine: VehicleModule): VehicleModule {
   const sweeps = mergeSweeps(disk.sweeps, mine.sweeps);
   if (sweeps?.length) out.sweeps = sweeps;
   if (disk.explored && (!mine.explored || newer(disk.explored.lastMappedAt, mine.explored.lastMappedAt))) out.explored = disk.explored;
+  if (disk.labels && (!mine.labels || newer(disk.labels.at, mine.labels.at))) out.labels = disk.labels;
   if (disk.identity && (!mine.identity || newer(disk.identity.observedAt, mine.identity.observedAt))) out.identity = disk.identity;
   if (newer(disk.lastSeenAt, mine.lastSeenAt)) out.lastSeenAt = disk.lastSeenAt;
   if (newer(disk.censusAt, mine.censusAt)) {

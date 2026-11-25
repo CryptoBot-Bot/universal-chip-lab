@@ -42,7 +42,7 @@ test("airbag / immobiliser modules are never sweep targets", () => {
 
 test("sweep: extended session, every identifier, a second read, back to default", async () => {
   const sent = fakeEcm();
-  const sw = await sweepModule({ host: "fake:8080", iface: "vcan0", profile, condition: "engine off" }, profile.modules[0], 0, 1);
+  const sw = await sweepModule({ host: "fake:8080", iface: "vcan0", profile, condition: "engine off", refs: false }, profile.modules[0], 0, 1);
   for (const q of sent) assert.ok(checkRequest(q).ok, q);
   assert.equal(sent[0], "1003");
   assert.equal(sent[sent.length - 1], "1001");
@@ -79,7 +79,7 @@ function fakeKwp(openSession: string) {
   return sent;
 }
 const kwpMod = (over: Record<string, unknown>) => ({ ...mod("esp", "Electronic Stability Program", "chassis", "726", "4E6", "kwp2000"), ...over }) as unknown as VehicleModule;
-const run = (m: VehicleModule) => sweepModule({ host: "fake:8080", iface: "vcan0", profile: { ...profile, modules: [m] } as VehicleProfile, condition: "x" }, m, 0, 1);
+const run = (m: VehicleModule) => sweepModule({ host: "fake:8080", iface: "vcan0", profile: { ...profile, modules: [m] } as VehicleProfile, condition: "x", refs: false }, m, 0, 1);
 
 test("sessions proven by an earlier real map come first; text like 'default' proves nothing", () => {
   const explored = { liveData: [{ id: "21 05", label: "x", session: "81 (also 92)" }], identification: [], sessions: [{ id: "default", label: "" }, { id: "85", label: "programming" }] };
@@ -106,4 +106,24 @@ test("another module may try the standard KWP sessions when the default gives no
   await run(mod("body", "Body module", "body", "72E", "4EE", "kwp2000") as VehicleModule);
   assert.ok(sent.includes("1092"));
   for (const q of sent) assert.ok(checkRequest(q).ok, q);      // never standby (89) or development (86)
+});
+
+test("the car's own readings are kept beside the sweep, and long data is compared whole", async () => {
+  let reads = 0; let rpm = 0x0aa0;
+  const long = "AB".repeat(300);
+  globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+    const b = JSON.parse(init?.body ?? "{}") as { tx: string; requests: string[] };
+    const results = b.requests.map((q) => {
+      if (b.tx === "7E0") { const a: Record<string, string> = { "010C": `410C${rpm.toString(16).padStart(4, "0")}`, "010D": "410D00", "0142": "414236D8", "0105": "41053D" }; if (q === "010C") rpm += 16; return { request: q, response: a[q] }; }
+      if (q === "2110") { reads += 1; return { request: q, response: `6110${long}${reads === 1 ? "01" : "02"}` }; }   // differs only at byte 300
+      return { request: q, response: "7F2112", negative: true, nrc: 0x12 };
+    });
+    return new Response(JSON.stringify({ ok: true, results }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const m = { ...mod("body", "Body module", "body", "72E", "4EE", "kwp2000") } as VehicleModule;
+  const sw = await sweepModule({ host: "fake:8080", iface: "can0", profile: { ...profile, modules: [m] } as VehicleProfile, condition: "idling" }, m, 0, 1);
+  assert.deepEqual(sw.refs, { rpm: [680, 684], kmh: [0, 0], volts: [14.04, 14.04], coolant: [21, 21] });
+  const h = sw.hits.find((x) => x.id === "21 10")!;
+  assert.equal(h.bytes.length, 512);
+  assert.equal(h.moving, true);
 });

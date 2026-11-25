@@ -5,6 +5,7 @@ import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 
 import { CATEGORY_LABEL } from "../../lib/diag";
 import { Completeness } from "./Completeness";
+import { Labels } from "./Labels";
 import { VIcon } from "./icons";
 import type { DeepMap } from "./useDeepMap";
 import { TAG_TEXT, fmtDate, knowledgeOf, plural, splitLabel } from "./vehicleFacts";
@@ -112,6 +113,7 @@ export function SystemDetail({ profile, m, deep, blocked, onClose }: {
       )}
 
       {!k.guard && <Completeness profile={profile} m={m} />}
+      {!k.guard && <Labels profile={profile} m={m} />}
 
       {x ? (
         <div className="vdb-learned-cols">

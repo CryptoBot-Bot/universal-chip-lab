@@ -18,5 +18,7 @@ export * from "./protectedModules.js";
 export * from "./readPolicy.js";
 export * from "./moduleIdentity.js";
 export * from "./moduleSweep.js";
+export { LABEL_KINDS, checkLabel, checkLabels, findTracks, labelSummary, luckOfTracks, readsOf, valueAt, varies } from "./moduleLabels.js";
+export type { CheckStatus, ConditionReads, IdentifierLabel, LabelCheck, LabelKind, LabelProposal, LabelSummary, LabelValue, ModuleLabels, Track, ValueReading } from "./moduleLabels.js";
 export * from "./obdPids.js";
 export * from "./moduleCatalog.js";

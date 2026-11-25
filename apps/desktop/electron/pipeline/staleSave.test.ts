@@ -79,3 +79,18 @@ test("a sentence is not a fault code, and an untested code is not a fault (the r
   const list = [{ code: "B210A-00", desc: "Logged, status 0x40 test not completed (not active)" }, { code: "No stored DTCs", desc: "KWP 18 02 FF 00" }, { code: "B170B", desc: "stored, validated" }];
   assert.deepEqual(explorationFaults(list).map((d) => d.code), ["B170B"]);
 });
+
+test("of one and the same sweep, the fuller form is kept whichever copy is saved last", async () => {
+  const dir = await dirOf();
+  const full = { ...sweep("idling", "2026-11-25T01:00:00Z"), refs: { volts: [14, 14.1] as [number, number] }, hits: [{ id: "21 10", session: "92", bytes: "AB".repeat(200), moving: false }] };
+  const p = base(); p.modules[0].sweeps = [{ ...full, refs: undefined, hits: [{ ...full.hits[0], bytes: "AB".repeat(64) }] } as ModuleSweep];
+  await saveStoredVehicleProfile(dir, p, "2026-11-25T01:00:01Z");
+  const old = await load(dir); const fresh = await load(dir);
+  fresh.modules[0].sweeps = [full];
+  await saveStoredVehicleProfile(dir, fresh, "2026-11-25T02:00:00Z");
+  await saveStoredVehicleProfile(dir, old, "2026-11-25T02:05:00Z");
+  const end = (await load(dir)).modules[0].sweeps!;
+  assert.equal(end.length, 1);
+  assert.equal(end[0].hits[0].bytes.length, 400);
+  assert.ok(end[0].refs);
+});

@@ -52,6 +52,7 @@ import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicle
 import { identifyAndSave } from "../pipeline/identityPipeline";
 import { sweepAndSave } from "../pipeline/sweepPipeline";
 import { readVoltage, type VoltageSource } from "../pipeline/voltage";
+import { labelAndSave } from "../pipeline/labelPipeline";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
 import {
   captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
@@ -297,6 +298,16 @@ export async function registerIpcHandlers(
     return sweepAndSave(await libFor(p.host, p.iface), {
       host: p.host, iface: p.iface, profile: p.profile, moduleIds: p.moduleIds, condition: p.condition || "ignition on", wide: p.wide, sim: p.sim,
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
+      shouldStop: () => vehicleExplorerStop,
+    });
+  });
+
+  // AI labels for one module's swept identifiers, checked by code. Offline: nothing goes to a car.
+  register("vehicleExplorer:label", async (event, p: { profileId: string; moduleId: string }) => {
+    vehicleExplorerStop = false;
+    return labelAndSave(libDir(), {
+      profileId: p.profileId, moduleId: p.moduleId,
+      onProgress: (done, of) => { try { event.sender.send("vehicleExplorer:event", { type: "label-module", moduleId: p.moduleId, done, of }); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
   });
