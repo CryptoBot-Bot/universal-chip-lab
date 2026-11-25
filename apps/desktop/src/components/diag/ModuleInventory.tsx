@@ -3,6 +3,7 @@ import { Fragment, useState } from "react";
 import type { CarInventory, InventoryChange, ModuleInventoryEntry } from "@ecu/vehicle-db";
 
 import { splitLabel } from "../../lib/diag";
+import { voltsText } from "../../lib/voltage";
 import { Icon } from "./icons";
 
 /**
@@ -16,13 +17,15 @@ function Cell({ v }: { v?: string }) {
   return <td className="ual-mono inv-v" title={v}>{v ?? "—"}</td>;
 }
 
-export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onRead }: {
+export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onRead, voltage = {} }: {
   inventory: CarInventory | null;
   changes: InventoryChange[];
   carVin?: string;
   busy: boolean;
   canRead: boolean;
   onRead: () => void;
+  /** Supply voltage each module measures itself, read from the car connected now (modules that report it). */
+  voltage?: Record<string, { volts: number; at: string }>;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const mods = inventory?.modules ?? [];
@@ -67,7 +70,7 @@ export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onR
         <div className="ual-card" style={{ overflowX: "auto" }}>
           <table className="inv-tbl">
             <thead>
-              <tr><th>System</th><th>Part no.</th><th>Serial</th><th>Software</th><th>Hardware</th><th>Supplier</th><th>Built</th><th>VIN in module</th><th aria-label="Details" /></tr>
+              <tr><th>System</th><th>Part no.</th><th>Serial</th><th title="Supply voltage the module measures itself, read from the car connected now. Not every module reports it.">Voltage</th><th>Software</th><th>Hardware</th><th>Supplier</th><th>Built</th><th>VIN in module</th><th aria-label="Details" /></tr>
             </thead>
             <tbody>
               {mods.map((m: ModuleInventoryEntry) => {
@@ -84,6 +87,7 @@ export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onR
                       </td>
                       <Cell v={s.partNo} />
                       <Cell v={s.serial} />
+                      <td className="ual-mono" title={voltage[m.moduleId] ? `Read at ${new Date(voltage[m.moduleId].at).toLocaleTimeString()}` : "This module has no known voltage reading"}>{voltage[m.moduleId] ? voltsText(voltage[m.moduleId].volts) : "—"}</td>
                       <Cell v={s.swPartNo ?? s.swVersion} />
                       <Cell v={s.hwVersion ?? (s.hwPartNo && s.hwPartNo !== s.partNo ? s.hwPartNo : undefined)} />
                       <Cell v={s.supplier} />
@@ -92,7 +96,7 @@ export function ModuleInventory({ inventory, changes, carVin, busy, canRead, onR
                       <td><button className="tiny ghost" aria-expanded={isOpen} aria-label={`${isOpen ? "Hide" : "Show"} every record of ${short}`} onClick={(e) => { e.stopPropagation(); setOpen(isOpen ? null : m.moduleId); }}>{isOpen ? "Hide" : `${m.records.length}`}</button></td>
                     </tr>
                     {isOpen && (
-                      <tr className="inv-detail"><td colSpan={9}>
+                      <tr className="inv-detail"><td colSpan={10}>
                         {m.records.length === 0 && <div className="ual-muted">No identification record answered{m.status === "no_response" ? " — the module was silent" : ""}.</div>}
                         {m.records.map((r, i) => (
                           <div key={i} className="inv-rec"><span className="ual-mono ual-muted">{r.id}{r.session === "03" ? " · ext" : ""}</span><span>{r.label}</span><b className="ual-mono">{r.value}</b></div>

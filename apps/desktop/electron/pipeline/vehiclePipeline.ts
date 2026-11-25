@@ -28,17 +28,22 @@ import {
 } from "../resolver/vehicleExplorer";
 import { censusModules, type CensusResult } from "../resolver/vehicleIdentifier";
 import { decodeVinOnline } from "../resolver/vinOnline";
+import { onBus } from "./busUse";
 
 // ---- Super Device HTTP client -------------------------------------------------
 
 /** Talk to the SuperDevice Pi's HTTP API (the renderer is behind CSP, the CLI has no browser). */
 export const DEFAULT_PI_HOST = "superdevice.local:8080";
 
-function piBase(host: string | undefined): string {
+export function piBase(host: string | undefined): string {
   return (host && host.trim()) || DEFAULT_PI_HOST;
 }
 
 export async function piGet(host: string | undefined, pathq: string, timeoutMs = 8000): Promise<unknown> {
+  return onBus(piBase(host), pathq, () => piGetRaw(host, pathq, timeoutMs));
+}
+
+async function piGetRaw(host: string | undefined, pathq: string, timeoutMs: number): Promise<unknown> {
   const h = piBase(host);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -55,6 +60,11 @@ export async function piGet(host: string | undefined, pathq: string, timeoutMs =
 }
 
 export async function piPost(host: string | undefined, pathq: string, body: unknown, timeoutMs = 8000): Promise<unknown> {
+  return onBus(piBase(host), pathq, () => piPostRaw(host, pathq, body, timeoutMs));
+}
+
+/** Without the bus bookkeeping — only for the voltage read, which takes the bus through quickRead. */
+export async function piPostRaw(host: string | undefined, pathq: string, body: unknown, timeoutMs = 8000): Promise<unknown> {
   const h = piBase(host);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

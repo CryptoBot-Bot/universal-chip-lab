@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 
 import { Api } from "./api";
 import { useSuperDevice } from "./superdevice-connection";
+import { useVoltage, type VoltageState } from "./useVoltage";
 
 /**
  * The workbench: what the whole app is talking to right now.
@@ -35,6 +36,8 @@ interface WorkbenchCtx {
   simCar: string | null;
   /** Which library the app works on: real cars, or the simulator's sandbox copy. Changes only once the switch is done. */
   library: "real" | "sim";
+  /** The connected car's supply voltage, kept current in the background. */
+  voltage: VoltageState;
 }
 
 const IFACE_KEY = "diag.iface";
@@ -80,6 +83,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   }, [online, sd.host]);
 
   const demo = online && sd.host === DESK_SIM;
+  const voltage = useVoltage({ host: sd.host, iface, online, rx: sd.status?.ifaces.find((i) => i.name === iface)?.rx ?? null });
 
   // Real data only in the real library: whenever a simulator answers — the desk simulator,
   // the virtual bus vcan0, a virtual vehicle running on the device — the main process works
@@ -95,7 +99,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   }, [simulated]);
 
   return (
-    <Ctx.Provider value={{ iface, setIface, gate, sim, demo, simCar: simCarName(sim), library }}>
+    <Ctx.Provider value={{ iface, setIface, gate, sim, demo, simCar: simCarName(sim), library, voltage }}>
       {children}
     </Ctx.Provider>
   );

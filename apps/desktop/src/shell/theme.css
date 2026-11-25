@@ -220,6 +220,8 @@
 .ual-chip.info { background: var(--ual-blue-tint); color: var(--ual-blue-ink); }
 .ual-chip.dark { background: var(--ual-ink); color: #fff; }
 .ual-chip.strong { font-weight: 700; letter-spacing: .02em; }
+.ual button.ual-chip.ual-volts { border: 0; min-height: 0; gap: 6px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.ual button.ual-chip.ual-volts:hover:not(:disabled) { filter: brightness(.96); }
 
 /* ---------- stats & counters ---------- */
 .ual-stat { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; background: var(--ual-soft); border-radius: 12px; }

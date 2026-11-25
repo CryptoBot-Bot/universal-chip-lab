@@ -51,6 +51,7 @@ import { exploreModule, type ExplorerEvent, type PriorKnowledge, type ExplorerSk
 import type { AddressCandidate, VehicleExplorerEvent } from "../resolver/vehicleExplorer";
 import { identifyAndSave } from "../pipeline/identityPipeline";
 import { sweepAndSave } from "../pipeline/sweepPipeline";
+import { readVoltage, type VoltageSource } from "../pipeline/voltage";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
 import {
   captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
@@ -207,6 +208,9 @@ export async function registerIpcHandlers(
     return piPost(p.host, p.path, p.body ?? {});
   });
   register("superDevice:discover", () => discoverDevices());
+  // Supply voltage as the modules measure it: standard OBD reads, and only while nothing else uses the bus.
+  register("voltage:read", (_e, p: { host?: string; iface: string; modules?: VoltageSource[]; asked?: boolean }) =>
+    readVoltage({ host: p.host, iface: p.iface, modules: p.modules, asked: !!p.asked }));
 
   // ---- Pi device fleet: pairing registry + occupancy claims.
   // "Pairing" is a local bookmark; the claim (who is driving the device right

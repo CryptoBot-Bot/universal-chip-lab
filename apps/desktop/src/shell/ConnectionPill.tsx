@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Api, type PairedDevice } from "../lib/api";
 import { useSuperDevice } from "../lib/superdevice-connection";
+import { voltageView, voltsText } from "../lib/voltage";
 import { DESK_SIM, useWorkbench } from "../lib/workbench";
 
 /**
@@ -45,6 +46,7 @@ export function ConnectionPill() {
         title={wb.demo ? "Answers come from the desk simulator on this PC, not from a car." : "The device this app talks to"}>
         <span className="ual-dot" />{label}
       </button>
+      {online && <VoltageChip />}
       {wb.gate === "read-only" && (
         <span className="ual-chip protected strong" title="The device refuses every write (erase codes, coding, resets, routines) before it reaches the car. Writes can only be enabled on the Pi itself.">READ-ONLY</span>
       )}
@@ -82,5 +84,25 @@ export function ConnectionPill() {
         </div>
       )}
     </div>
+  );
+}
+
+/** The car's supply voltage, next to the device: green / amber / red by what it means. Click to read now. */
+function VoltageChip() {
+  const { voltage: v, demo } = useWorkbench();
+  const r = v.reading;
+  const view = r && r.volts !== null ? voltageView(r.volts, r.rpm) : null;
+  const cls = !view || v.status ? "unread" : view.level === "ok" ? "clean" : view.level === "warn" ? "warn" : view.level === "low" ? "fault" : "info";
+  const text = v.reading_now ? "reading…" : view ? `${voltsText(r!.volts!)}${view.what === "supply" ? "" : ` ${view.what}`}` : "— V";
+  const tip = [
+    view ? view.hint : "Supply voltage, read from the engine module (OBD 01 42).",
+    r ? `Read from the engine module at ${new Date(r.at).toLocaleTimeString()}${demo ? " — from the desk simulator, not a car" : ""}.` : "",
+    v.status ? `Now: ${v.status}.` : "Updates every 10 s; waits while a scan runs.",
+  ].filter(Boolean).join(" ");
+  return (
+    <button type="button" className={`ual-chip strong ual-volts ${cls}`} title={tip} onClick={() => void v.readNow()} disabled={v.reading_now} aria-live="polite">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="12" rx="2" /><path d="M7 4v3M17 4v3M6.5 13h3M14.5 13h3M16 11.5v3" /></svg>
+      {text}{view && v.status ? " ·  old" : ""}
+    </button>
   );
 }

@@ -119,6 +119,9 @@ const api = {
     post: (host: string | undefined, path: string, body?: unknown) => invoke("superDevice:post", { host, path, body }),
     discover: () => invoke("superDevice:discover"),
   },
+  voltage: {
+    read: (payload: { host?: string; iface: string; modules?: { id: string; req: string; resp: string }[]; asked?: boolean }) => invoke("voltage:read", payload),
+  },
   devices: {
     list: () => invoke("devices:list"),
     pair: (input: { host: string; hostname?: string; model?: string; nickname?: string }) =>

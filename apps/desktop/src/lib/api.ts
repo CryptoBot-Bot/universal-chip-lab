@@ -329,6 +329,15 @@ export interface SuperDeviceStatus {
   ifaces: SuperDeviceIface[];
   sys: { temp: number | null; uptime: string; model: string; kernel: string; load: string };
 }
+/** A module that may report its own supply voltage (standard OBD addresses only). */
+export interface VoltageSource { id: string; req: string; resp: string }
+export interface VoltageReading {
+  at: string;
+  state: "ok" | "silent" | "busy" | "down";
+  volts: number | null;
+  rpm: number | null;
+  modules: { id: string; volts: number }[];
+}
 export interface VinReadResult {
   ok: boolean;
   vin?: string;
@@ -581,6 +590,11 @@ export const Api = {
     post: <T = unknown>(host: string | undefined, path: string, body?: unknown) =>
       unwrap<T>(api.superDevice.post(host, path, body) as never),
     discover: () => unwrap<DiscoveredDevice[]>(api.superDevice.discover() as never),
+  },
+  voltage: {
+    /** Supply voltage now. `asked` = the operator clicked (may bring the bus up). Gives way to any scan. */
+    read: (payload: { host?: string; iface: string; modules?: VoltageSource[]; asked?: boolean }) =>
+      unwrap<VoltageReading>(api.voltage.read(payload) as never),
   },
   devices: {
     list: () => unwrap<{ owner: string; devices: PairedDevice[] }>(api.devices.list() as never),

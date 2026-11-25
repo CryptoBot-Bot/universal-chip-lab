@@ -1,4 +1,4 @@
-import { useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { applyCensus, censusInputFor, inventoryFor, lastScanFor, protectedModule, recordScan } from "@ecu/vehicle-db";
 import type { SystemScanResult, VehicleModule, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
@@ -7,6 +7,8 @@ import { Api, type DiscoveredModule, type VehicleExplorerEvent } from "../../lib
 import { CATEGORY_LABEL, CATEGORY_ORDER, addressedSystems, clean, clearDtcs, readDtcs, scanResult, splitLabel, ymmLabel } from "../../lib/diag";
 
 export { splitLabel };
+import { voltageView, voltsText } from "../../lib/voltage";
+import { useWorkbench } from "../../lib/workbench";
 import type { PendingWrite } from "../../lib/writeActions";
 import { WriteConfirmModal } from "../WriteConfirmModal";
 import { Icon } from "./icons";
@@ -94,6 +96,12 @@ export function VehicleHub(p: Props) {
   const stateOf = (m: VehicleModule): RowState | undefined => rows[m.id] ?? lastBy.get(m.id);
   const shown = systems.map((m) => stateOf(m)).filter((r): r is SystemScanResult => !!r && r !== "scanning");
   const learned = systems.filter((m) => m.explored).length;
+  const volt = useWorkbench().voltage;
+  const { setModules } = volt;
+  // modules that may report their own supply voltage (the main process keeps only the standard OBD addresses)
+  const voltSources = systems.filter((m) => !protectedModule({ category: m.category, label: m.label })).map((m) => ({ id: m.id, req: clean(m.addressing?.request), resp: clean(m.addressing?.response) }));
+  const voltSig = JSON.stringify(voltSources);
+  useEffect(() => { setModules(JSON.parse(voltSig) as typeof voltSources, `${profile.id}|${vin}`); }, [voltSig, profile.id, vin, setModules]);
 
   async function scan(kind: "auto" | "fault", opts: { fullSearch?: boolean } = {}) {
     if (!online) { setErr("Not connected to the vehicle — connect a device with the pill at the top right, then scan."); return; }
@@ -179,7 +187,7 @@ export function VehicleHub(p: Props) {
       }
       setNote((n) => n ?? `Scan complete in ${Math.round((Date.now() - t0) / 1000)} s — ${summary(results)}.${v ? " Filed in this car’s history." : ""}`);
     } catch (e) { setErr((e as Error).message); }
-    finally { setBusy(null); setPhase(""); setProg(null); }
+    finally { setBusy(null); setPhase(""); setProg(null); void volt.readNow(); }
   }
 
   function quickErase() {
@@ -317,6 +325,9 @@ export function VehicleHub(p: Props) {
             {profile.decoded?.bodyClass && <><dt>Body</dt><dd>{profile.decoded.bodyClass}</dd></>}
             {profile.decoded?.driveType && <><dt>Drive</dt><dd>{profile.decoded.driveType}</dd></>}
             {bus && <><dt>Bus</dt><dd>{bus.label}{bus.bitrate ? ` ${Math.round(bus.bitrate / 1000)}k` : ""}{bus.obdPins ? ` · pins ${bus.obdPins}` : ""}</dd></>}
+            {online && volt.reading?.volts != null && (() => { const w = voltageView(volt.reading.volts, volt.reading.rpm); return (
+              <><dt>Voltage</dt><dd title={w.hint}><span className={`ual-chip strong ${w.level === "ok" ? "clean" : w.level === "warn" ? "warn" : w.level === "low" ? "fault" : "info"}`}>{voltsText(volt.reading.volts)}</span> {w.what}{volt.status ? " · not current" : ""}</dd></>
+            ); })()}
             <dt>Systems</dt><dd>{systems.length} · {learned} learned</dd>
             {unit && <><dt>Seen</dt><dd>{unit.reads}× since {new Date(unit.firstReadAt).toLocaleDateString()}</dd></>}
           </dl>
@@ -434,6 +445,7 @@ export function VehicleHub(p: Props) {
             busy={!!busy}
             canRead={online}
             onRead={() => void readIdentity()}
+            voltage={online ? volt.byModule : {}}
           />
         )}
 
