@@ -11,6 +11,7 @@ import path from "node:path";
 
 import type { VehicleProfile } from "./vehicleProfile.schema.js";
 import { validateVehicleProfile } from "./vehicleProfile.schema.js";
+import { keepMeasured } from "./profileMerge.js";
 
 const SUFFIX = ".vehicle.json";
 
@@ -61,11 +62,20 @@ export function simulatorContent(record: VehicleProfile): string[] {
 /** The library of real cars. Simulator sessions use a sandbox folder (see simLibrary.ts). */
 export const REAL_LIBRARY_NAME = "vehicle-library";
 
+/** What is on disk for this id right now, or null (missing or unreadable). */
+async function onDisk(dir: string, id: string): Promise<VehicleProfile | null> {
+  try { return JSON.parse(await readFile(storedVehiclePath(dir, id), "utf8")) as VehicleProfile; }
+  catch { return null; }
+}
+
 export async function saveStoredVehicleProfile(
   dir: string,
-  record: VehicleProfile,
+  recordIn: VehicleProfile,
   now: string,
 ): Promise<VehicleProfile> {
+  // A copy older than the file: keep what was measured since (see profileMerge.ts).
+  const disk = await onDisk(dir, recordIn.id);
+  const record = disk && disk.provenance?.updatedAt !== recordIn.provenance?.updatedAt ? keepMeasured(disk, recordIn) : recordIn;
   const problems = validateVehicleProfile(record);
   if (problems.length) throw new Error(`invalid vehicle profile: ${problems.join(", ")}`);
   // Backstop: real data only in the real library. Simulator sessions are redirected to a
