@@ -1,48 +1,71 @@
 # Shop-day checklist — first real vehicle with the SuperDevice
 
-## Start here — the next car with Universal Auto Lab (2026-11-24)
+## Start here — a car with Universal Auto Lab (updated 2026-11-26)
 
-The app is now **Universal Auto Lab** (three tabs: Auto Diagnostic · Vehicles Database ·
-Pi Devices). Real cars are **read-only**: nothing in the app or the command line sends a
-write, and the Pi refuses one anyway (§5). §1–§2 below describe the older screens; the
-safety notes and troubleshooting still apply.
+**What it does today** — read-only diagnostics on CAN cars (OBD pins 6/14, 500 kbit/s): the VIN
+and model, every module and its identity, every fault memory with the public meaning of the
+code, the standard live values, the supply voltage, a complete map of each module, and a
+mechanic assistant that can read but not act. All of it proven on the 2015 Sprinter (Nov 23–24)
+except the mechanic reading live, which so far ran only on the simulator.
 
-**Before you go (at home)**
-1. `pnpm test` — the read-only policy, the identity decoders and the identity reader
-   against a fake car must all pass.
-2. The Pi is on the latest daemon: `python hardware/super-device/webui/deploy.py --status`;
-   if `superdevice_ui.py` shows CHANGED, `python hardware/super-device/webui/deploy.py`
-   (on-Pi health check + automatic rollback). Without it everything still works — only
-   the live address-search grid shows no progress until the sweep is done.
-3. Rehearse on the desk: start the app (START-CHIP-LAB.bat starts the desk simulator with
-   the golden 2015 Sprinter) → connection pill → Desk simulator → Auto Diagnostic →
-   Vehicle history → the Sprinter → Service → **Full re-map**. Watch the live map.
+**What it does not do** — clear codes (the Pi refuses, the "Erase codes…" button included),
+active tests, coding, programming, keys / immobiliser, anything on the airbag beyond its
+identity and codes. It cannot talk to K-line or other pre-CAN cars (the Mini was one) or to
+cars that diagnose over Ethernet.
 
-**At the car**
-1. Ignition ON. OBD harness in (can0 = pins 6/14). Pi on outlet or battery power.
-2. Connection pill (top right) → the Pi. Check the READ-ONLY badge is there.
-3. Auto Diagnostic → **AUTO VIN** (reads the VIN, decodes it, opens or files the model).
-4. **Auto Scan**. On a model seen for the first time it searches every diagnostic address
-   (about a minute, tester-present only) — then identifies every module (part numbers,
-   software/hardware versions, **serial numbers**, supplier, build date, the VIN each
-   module holds), then reads every fault memory. The **live map** shows it happening.
-5. **Modules & serials** tab: the car's module inventory. A module whose VIN is not this
-   car's, or whose serial changed since the last visit, is flagged.
-6. Deeper, per module (AI, read-only): Vehicles Database → **Dig deeper**. Airbag and
-   immobiliser modules are never offered.
-7. Command-line equivalent (same code): `pnpm vehicle --host <pi> run --label "<car>"`
-   — VIN → discover → census → identify → capture, recorded on the Pi as one session.
+**Before you go (at home, ten minutes)**
+1. `pnpm test` — all pass.
+2. The Pi is current: `python hardware/super-device/webui/deploy.py --status`; only if
+   `superdevice_ui.py` shows CHANGED, run `python hardware/super-device/webui/deploy.py`
+   (it checks itself on the Pi and rolls back on failure).
+3. Once a month: Vehicles Database → any car → **What we know** → **Update sources**
+   (or `pnpm vehicle sources sync`) — community values and fault-code meanings.
+4. Pack: OBD harness (can0 = pins 6/14), Pi power, **battery charger**, exhaust extraction.
 
-**After**
-- Prove the session was read-only: `pnpm vehicle rec fetch <id>` then
-  `pnpm vehicle audit <id>` — every request checked against the policy; airbag /
-  immobiliser addresses with the stricter rule. It must say READ-ONLY.
+**At the car — in this order**
+1. Ignition ON (dash lit), engine off, parking brake on. Harness in. Pi on an outlet or its battery.
+2. Connection pill (top right) → the Pi. The **READ-ONLY** badge must be there.
+3. **Voltage chip** next to it: green ≥ 12.4 V, amber 12.0–12.4 V, red below 12.0 V — red, or
+   anything longer than a few minutes on amber: charger first. "— V" until the first VIN read;
+   "old" means not current (click it to read now).
+4. Auto Diagnostic → **AUTO VIN**. Check year / make / model.
+5. **Auto Scan** (about a minute; a model seen for the first time searches every address first,
+   about a minute more — the live map shows modules appearing). Then:
+   - **Systems** — faults per system. Generic codes show their public meaning; a maker-specific
+     code says so instead of guessing.
+   - **Modules & serials** — part numbers, serial numbers, the VIN each module holds. A module
+     from another car or a changed serial is flagged. Voltage for modules that report it.
+6. **Mechanic** tab — ask about the car (about $0.07–0.11 per question). It reads live values
+   and says how sure each one is (proven · standard · fits · AI guess). It cannot act.
+7. Mapping deeper (a model seen for the first time, or a module with gaps): Vehicles Database →
+   the model → its system → **Completeness** → what the car is doing → **Sweep this system**.
+   Every module with the engine off first, then idling. **The app does not check the
+   condition for you — choose the true one.** Idling only parked, brake on, with extraction,
+   nobody driving: a sweep keeps diagnostic sessions open on modules such as the gearbox.
+   Airbag and immobiliser modules are never offered.
+8. Before unplugging: **Fault Scan** once more — the same codes as at the start, nothing new.
 
-**For the 2015 Sprinter's next visit:** deep-map the seven systems that only have a part
-number (KLA, Radio, VG, ZUH, PSM, PTS, SAM-R). EZS (immobiliser) and SRS (airbag) stay
-identity + fault memory only. Note: the Nov 23 recording shows the first, partial AI map
-of the EZS used session changes and local-data reads on it (no writes) — that is why the
-protected rule now exists; `audit 20261123-auto` shows it.
+**After (no car needed)**
+- Prove it stayed read-only: `pnpm vehicle --host <pi> rec fetch`, then
+  `pnpm vehicle audit <recording id>` — it must say READ-ONLY.
+- Names for what was swept: system → **Names and proof** → **Name with AI** (about
+  $0.05–0.20 per module), or `pnpm vehicle --profile <id> label <module>`. Proven values come
+  from the car's own readings in two states; everything else is shown as a proposal.
+- **Dig deeper** (AI deep map, 1–4 min per module, engine off with a charger) when a module
+  needs its sessions and services explored — that one does need the car.
+- Vehicles Database → the model → **What we know**: what the day added.
+
+**A car of another make (the next real test)** — same order. **Models we know** tells you
+beforehand whether community values exist for it; after the sweeps, **What we know** shows
+which of them fit this car, which are wrong and which do not apply.
+
+**The 2015 Sprinter** — fully swept (engine off and idling), all 13 sweepable modules labelled
+(20 identifiers proven), 7 systems AI-mapped on Nov 24. Still to prove on the van itself: the
+Mechanic reading live, and a sweep with the new reference readings. EZS (immobiliser) and SRS
+(airbag) stay identity + fault memory only.
+
+The sections below are older: §1–§2 describe earlier screens; the troubleshooting (§3), remote
+work (§4) and the read-only rules (§5) still apply.
 
 ---
 
