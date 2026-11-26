@@ -136,6 +136,7 @@ const api = {
     sync: () => invoke("knowledge:sync"),
     card: (payload: { profileId: string }) => invoke("knowledge:card", payload),
     dtcs: (payload: { codes: string[] }) => invoke("knowledge:dtcs", payload),
+    models: () => invoke("knowledge:models"),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onEvent: (cb: (e: any) => void) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -328,6 +328,18 @@ export async function registerIpcHandlers(
     const k = await loadKnowledge(knowledgeDir);
     return knowledgeCard(profile, k?.kb ?? null, k?.dtcIndex);
   });
+  // every model the outside knowledge covers, and whether a real car of it is in the library
+  register("knowledge:models", async () => {
+    const k = await loadKnowledge(knowledgeDir);
+    if (!k) return [];
+    const norm = (s?: string) => (s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const real = (await loadLibrary(realLibDir)).filter((p) => p.knownVins?.length);
+    const rows = k.kb.vehicles.map((v) => ({ ...v, modules: v.modules ?? 0, onFile: real.some((p) => norm(p.make) === norm(v.make) && !!v.model && (norm(p.model) === norm(v.model) || norm(p.model).startsWith(norm(v.model)))) }));
+    // a model on file with no community set still belongs in the list
+    for (const p of real) if (!rows.some((r) => r.onFile && norm(r.make) === norm(p.make) && norm(r.model) === norm(p.model))) rows.push({ make: p.make, model: p.model, years: p.year ? [[p.year, p.year]] : undefined, source: "ours", set: `ours/${p.id}`, signals: vehicleCatalog(p, k.kb).length, modules: p.modules.filter((m) => m.addressing?.response).length, onFile: true });
+    // cars on file first, then models by how much is known, make-wide sets last
+    return rows.sort((a, b) => Number(b.onFile) - Number(a.onFile) || Number(!!b.model) - Number(!!a.model) || b.signals - a.signals);
+  });
   register("knowledge:dtcs", async (_e, p: { codes: string[] }) => {
     const k = await loadKnowledge(knowledgeDir);
     return (p.codes ?? []).slice(0, 200).map((c) => (k ? dtcMeaning(k.kb, c, k.dtcIndex) : { code: c.toUpperCase().slice(0, 5), makerSpecific: isMakerSpecificDtc(c) }));

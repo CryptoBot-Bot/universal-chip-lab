@@ -9,6 +9,7 @@ import { VIcon } from "../components/vehicles/icons";
 import { useDeepMap } from "../components/vehicles/useDeepMap";
 import { SystemDetail, VehicleMapTiles, unaddressedNote } from "../components/vehicles/VehicleMap";
 import { KnowledgeCard } from "../components/vehicles/KnowledgeCard";
+import { ModelCatalog } from "../components/vehicles/ModelCatalog";
 import { AboutCard, CarsOnFile, ModulesCard } from "../components/vehicles/VehicleRecords";
 import {
   buildBuckets, busSpec, carsSeenSpec, engineSpec, fmtDate, gearboxSpec, lastActivity, lastReplay, makeKeyOf, modelKeyOf,
@@ -85,6 +86,7 @@ export function VehicleDatabase() {
   const [note, setNote] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
+  const [view, setView] = useState<"cars" | "models">("cars");
   const [sel, setSel] = useState<Sel>(loadSel);
   const [systemId, setSystemId] = useState<string | null>(null);
 
@@ -281,9 +283,15 @@ export function VehicleDatabase() {
           <VIcon name="plus" size={16} />Add vehicle by VIN
         </button>
         <span className="ual-muted vdb-count">{plural(profiles.length, "model")} mapped · {plural(totalUnits, "car")} on file</span>
+        <div className="vdb-viewswitch" role="tablist" aria-label="What to show">
+          <button type="button" role="tab" aria-selected={view === "cars"} className={view === "cars" ? "on" : ""} onClick={() => setView("cars")}>Cars on file</button>
+          <button type="button" role="tab" aria-selected={view === "models"} className={view === "models" ? "on" : ""} onClick={() => setView("models")}>Models we know</button>
+        </div>
       </div>
 
-      {q && (
+      {view === "models" && <ModelCatalog onOpenCar={(mk, md) => { setView("cars"); setQuery(`${mk} ${md}`.trim()); }} />}
+
+      {view === "cars" && q && (
         <section className="ual-card vdb-results" aria-label="Search results">
           {matches.length === 0 ? <p className="ual-muted">Nothing on file matches “{query.trim()}”.</p> : matches.map(({ b, vin }) => (
             <button key={b.key} type="button" className="vdb-result" onClick={() => pick(b)}>
@@ -311,7 +319,7 @@ export function VehicleDatabase() {
         </div>
       )}
 
-      {loaded && !buckets.length && (
+      {view === "cars" && loaded && !buckets.length && (
         <section className="ual-card pad vdb-empty">
           <h2 className="ual-h2">No vehicles yet</h2>
           <p className="ual-sub">
@@ -329,7 +337,7 @@ export function VehicleDatabase() {
       )}
 
       {/* make cards + year / model chips */}
-      {buckets.length > 0 && resolved && (
+      {view === "cars" && buckets.length > 0 && resolved && (
         <div className="vdb-makes">
           <div className="vdb-makelist" role="group" aria-label="Make">
             {makes.map((mk) => (

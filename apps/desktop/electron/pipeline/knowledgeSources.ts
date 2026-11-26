@@ -141,7 +141,7 @@ export async function buildKnowledge(dir: string): Promise<KnowledgeBase> {
     const vehicle = { make: make.replace(/-/g, " ").replace(/^Mercedes Benz$/, "Mercedes-Benz"), ...(model ? { model } : {}), ...(years.length ? { years } : {}) };
     const defs = fromObdb(set, "obdb", vehicle, m.name);
     signals.push(...defs);
-    vehicles.push({ ...vehicle, source: "obdb", set: m.name, signals: defs.length });
+    vehicles.push({ ...vehicle, source: "obdb", set: m.name, signals: defs.length, modules: new Set(defs.map((d) => d.tx)).size });
   }
   const exDir = path.join(dir, "sources", "obdex");
   const exMeta = JSON.parse(await readFile(path.join(exDir, "meta.json"), "utf8").catch(() => "{}")) as { retrievedAt?: string; generated_at?: string };

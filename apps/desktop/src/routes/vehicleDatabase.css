@@ -239,6 +239,21 @@
 .ual .vdb-cov-bar > i { display: block; height: 100%; background: var(--ual-blue); }
 .ual .vdb-cov-ids { margin: 6px 0 0; font-size: 12px; line-height: 1.7; word-break: break-word; }
 .ual .vdb-cov-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+/* cars on file / models we know */
+.ual .vdb-viewswitch { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--ual-soft); margin-left: auto; }
+.ual .vdb-viewswitch button { min-height: 0; padding: 6px 12px; border: 0; background: transparent; font-weight: 600; color: var(--ual-muted); }
+.ual .vdb-viewswitch button.on { background: #fff; color: var(--ual-ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.ual .vdb-models { gap: 14px; }
+.ual .vdb-models-head { display: flex; align-items: baseline; gap: 12px; }
+.ual .vdb-models-levels { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; font-size: 13.5px; }
+.ual .vdb-models-levels dt { font-weight: 600; color: var(--ual-muted); }
+.ual .vdb-models-levels dd { margin: 0; }
+.ual .vdb-models-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.ual .vdb-models-tools input { flex: 1 1 260px; }
+.ual .vdb-models-tools select { width: auto; }
+.ual .vdb-models-list { display: flex; flex-direction: column; max-height: 60vh; overflow-y: auto; border-top: 1px solid var(--ual-line); }
+.ual .vdb-models-row { display: grid; grid-template-columns: minmax(200px, 2fr) 110px minmax(150px, 1fr) 140px; gap: 12px; align-items: center; padding: 8px 4px; border-bottom: 1px solid var(--ual-line); font-size: 13.5px; }
+
 /* what we know about a vehicle (knowledge card) */
 .ual .vdb-know { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; border-radius: 14px; background: var(--ual-soft); margin: 4px 0 14px; }
 .ual .vdb-know-head { display: flex; align-items: baseline; gap: 12px; }

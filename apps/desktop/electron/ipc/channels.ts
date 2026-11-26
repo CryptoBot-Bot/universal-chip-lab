@@ -62,6 +62,7 @@ export type IpcChannel =
   | "knowledge:sync"
   | "knowledge:card"
   | "knowledge:dtcs"
+  | "knowledge:models"
   | "mechanic:ask"
   | "mechanic:stop"
   | "mechanic:reset"

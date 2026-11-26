@@ -56,7 +56,7 @@ export interface SignalDef {
 
 export interface DtcDef { code: string; title: string; description?: string; category?: string; source: string }
 
-export interface KnowledgeVehicle { make: string; model?: string; years?: [number, number][]; source: string; set: string; signals: number }
+export interface KnowledgeVehicle { make: string; model?: string; years?: [number, number][]; source: string; set: string; signals: number; /** distinct module addresses the set covers */ modules?: number }
 
 export interface KnowledgeBase {
   builtAt: string;

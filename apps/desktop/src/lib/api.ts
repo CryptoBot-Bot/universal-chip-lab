@@ -339,6 +339,8 @@ export interface VoltageReading {
   rpm: number | null;
   modules: { id: string; volts: number }[];
 }
+/** A model the outside knowledge covers (or a real car on file that it does not). */
+export interface KnownModel { make: string; model?: string; years?: [number, number][]; source: string; set: string; signals: number; modules: number; onFile: boolean }
 /** What the mechanic assistant streams while it answers. */
 export type MechanicEvent =
   | { type: "text"; delta: string }
@@ -618,6 +620,8 @@ export const Api = {
     sync: async () => unwrap<{ repos: number; withSignals: number; failed: string[]; dtcs: number; ms: number; signals: number; vehicles: number }>(api.knowledge.sync() as never),
     card: async (payload: { profileId: string }) => unwrap<KnowledgeCard>(api.knowledge.card(payload) as never),
     dtcs: async (payload: { codes: string[] }) => unwrap<DtcMeaning[]>(api.knowledge.dtcs(payload) as never),
+    /** Every model the outside knowledge covers, with whether a real car of it is on file. */
+    models: async () => unwrap<KnownModel[]>(api.knowledge.models() as never),
     onEvent: (cb: (e: { done?: number; of?: number; text?: string }) => void): (() => void) => {
       try { return api.knowledge.onEvent(cb) as () => void; } catch { return () => undefined; }
     },
