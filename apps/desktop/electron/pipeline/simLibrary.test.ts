@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -44,4 +44,20 @@ test("the real library refuses simulator-tagged records; the sandbox takes them"
   // an inventory or a sweep from a simulator is refused too
   await assert.rejects(saveStoredVehicleProfile(realLibraryDir(ws), profile({ modules: [{ id: "m", label: "ECM", category: "powertrain", bus: "hs-can", location: "engine",
     sweeps: [{ at: "", condition: "x", sim: "desk", protocol: "uds", sessions: [], ranges: [], hits: [], counts: { asked: 0, answered: 0, moving: 0, gated: 0, ms: 0 } }] }] } as unknown as Partial<VehicleProfile>), "n"), /completeness sweep/);
+});
+
+test("the sandbox follows the real library when the real one learned more since", async () => {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "ual-lib-"));
+  const real = realLibraryDir(ws), sim = simLibraryDir(ws);
+  await mkdir(real, { recursive: true });
+  await writeFile(path.join(real, "a.vehicle.json"), "{\"v\":1}");
+  await ensureSimLibrary(real, sim);
+  await writeFile(path.join(real, "a.vehicle.json"), "{\"v\":2}");                      // a real visit adds knowledge
+  const later = new Date(Date.now() + 5000);
+  await utimes(path.join(real, "a.vehicle.json"), later, later);
+  await writeFile(path.join(real, "b.vehicle.json"), "{\"new\":1}");
+  await ensureSimLibrary(real, sim);
+  assert.equal(await readFile(path.join(sim, "a.vehicle.json"), "utf8"), "{\"v\":2}");
+  assert.equal(await readFile(path.join(sim, "b.vehicle.json"), "utf8"), "{\"new\":1}");
+  assert.equal(await readFile(path.join(real, "a.vehicle.json"), "utf8"), "{\"v\":2}");
 });

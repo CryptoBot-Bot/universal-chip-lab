@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { checkRequest, coverageOf, dtcMeaning, explorationFaults, knowledgeCard, labelSummary, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { checkRequest, coverageOf, dtcMeaning, explorationFaults, knowledgeCard, labelSummary, protectedModule, resolveVehicleIdentity, searchCatalog, vehicleCatalog } from "@ecu/vehicle-db";
 import type { ProtectedKind } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
@@ -32,6 +32,8 @@ import { sweepAndSave } from "../electron/pipeline/sweepPipeline";
 import { benchModules, PRICES, runBench, summarise, type TruthVehicle } from "../electron/pipeline/calibration";
 import { labelAndSave, labelPrompts, labelSweeps, recheckAndSave } from "../electron/pipeline/labelPipeline";
 import { buildKnowledge, loadKnowledge, syncSources } from "../electron/pipeline/knowledgeSources";
+import { readCatalogItems } from "../electron/pipeline/readCatalog";
+import { askMechanic } from "../electron/resolver/mechanic";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../electron/pipeline/simLibrary";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { getApiKey } from "./settings";
@@ -70,6 +72,8 @@ Commands
   knowledge [--all]           what is known about the bound vehicle: modules, standard values, fault-code meanings,
                               community definitions tested on this car's own recordings, our own mapping. Offline
   dtc <code> [<code>…]        the public meaning of fault codes (OBDex). Offline
+  ask "<question>" | --catalog the read-only mechanic assistant: it finds and reads values of the bound vehicle and
+                              explains its fault codes; --catalog lists what it may read. Costs API tokens
   label <module> [--dry [--show]] [--recheck | --missing]
                               AI names for every swept identifier of one module, then checked by code against the
                               car's own readings (which the AI is not shown). Offline: no device, no car. Costs API
@@ -103,7 +107,7 @@ AI steps (census, map) need ANTHROPIC_API_KEY in the environment or in <repo>/.e
 // ---- small plumbing -------------------------------------------------------------
 
 interface Args { _: string[]; flags: Record<string, string | boolean> }
-const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide", "dry", "show", "recheck", "missing"]);
+const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide", "dry", "show", "recheck", "missing", "catalog"]);
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {} };
@@ -564,6 +568,42 @@ async function cmdDtc(ctx: Ctx) {
   return { ok: true, codes: out };
 }
 
+/** The read-only mechanic assistant, one question at a time (or --catalog to list what it may read). */
+async function cmdAsk(ctx: Ctx) {
+  const profile = await currentProfile(ctx);
+  const k = await loadKnowledge(path.join(ctx.ws, "knowledge"));
+  const catalog = vehicleCatalog(profile, k?.kb ?? null);
+  if (ctx.args.flags.catalog) {
+    for (const it of catalog) say(`  ${it.trust.padEnd(8)} ${it.module.short.slice(0, 22).padEnd(22)} ${it.request.padEnd(8)} ${it.session ? `@${it.session}` : "   "} ${oneLine(it.name, 50)} ${it.unit}`);
+    say(`${catalog.length} readable values for ${ymm(profile)}.`);
+    return { ok: true, catalog: catalog.length };
+  }
+  const question = ctx.args._.slice(1).join(" ").trim();
+  if (!question) throw new Error('ask "<question>" — or ask --catalog');
+  needKey("The assistant");
+  const online = ctx.host !== "offline";
+  const unit = profile.knownVins?.[0];
+  const last = unit?.scans?.length ? unit.scans[unit.scans.length - 1] : null;
+  const faults = (last?.systems ?? []).flatMap((s) => s.dtcs.map((d) => { const m = k ? dtcMeaning(k.kb, d.code, k.dtcIndex) : null; return `${s.label.split(" (")[0]}: ${d.code} — ${m?.title ?? (m?.makerSpecific ? "maker-specific, no public meaning" : d.description ?? "no meaning found")}`; }));
+  const sim = isSimulatorTarget(ctx.host, ctx.iface);
+  const r = await askMechanic({
+    history: [], question,
+    context: { profile, catalog, faults, device: !online ? "no device connected — nothing can be read live" : sim ? "the desk simulator, replaying a recording of this van — values are replayed, not live" : `the device at ${ctx.host} on ${ctx.iface}, read-only` },
+    tools: {
+      find: (q) => searchCatalog(catalog, q),
+      read: async (ids) => { if (!online) throw new Error("no device connected"); return readCatalogItems({ host: ctx.host, iface: ctx.iface, profile, items: ids.map((id) => catalog.find((x) => x.id === id)).filter((x): x is NonNullable<typeof x> => !!x) }); },
+      explain: (code) => (k ? dtcMeaning(k.kb, code, k.dtcIndex) : { code, makerSpecific: true }),
+    },
+    onEvent: (e) => {
+      if (e.type === "text") process.stdout.write(e.delta);
+      else if (e.type === "found") say(`\n  [looked for "${e.query}": ${e.items.length}]`);
+      else if (e.type === "values") for (const v of e.values) say(`  [${v.name} (${v.module}) = ${v.value === null ? `— ${v.error ?? ""}` : `${v.value} ${v.unit}`} · ${v.trust}]`);
+      else if (e.type === "done") { const p = PRICES[e.model] ?? { in: 5, out: 25 }; say(`\n\n(${e.model}, ${e.tokensIn} in / ${e.tokensOut} out, about $${((e.tokensIn * p.in + e.tokensOut * p.out) / 1e6).toFixed(3)})`); }
+    },
+  });
+  return { ok: true, answer: r.answer };
+}
+
 /** Calibration bench on a virtual car (desk simulator). */
 async function cmdBench(ctx: Ctx) {
   needKey("The bench");
@@ -919,7 +959,7 @@ async function main(): Promise<number> {
 
   const root = findProjectRoot();
   loadEnvFile(root);
-  if (["audit", "coverage", "bench", "label", "sources", "knowledge", "dtc"].includes(cmd)) args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
+  if (["audit", "coverage", "bench", "label", "sources", "knowledge", "dtc", "ask"].includes(cmd)) args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
   const hostRaw = (typeof args.flags.host === "string" ? args.flags.host : process.env.SD_HOST ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!hostRaw) { process.stderr.write("Which device? Pass --host <address[:port]> (or set SD_HOST). Example: --host 100.91.185.100\n"); return 2; }
   const host = /:\d+$/.test(hostRaw) ? hostRaw : `${hostRaw}:8080`;
@@ -937,7 +977,7 @@ async function main(): Promise<number> {
 
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
-    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, label: cmdLabel, sources: cmdSources, knowledge: cmdKnowledge, dtc: cmdDtc, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
+    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, label: cmdLabel, sources: cmdSources, knowledge: cmdKnowledge, dtc: cmdDtc, ask: cmdAsk, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
   };
   const fn = commands[cmd];
   if (!fn) { process.stderr.write(`Unknown command "${cmd}".\n\n${HELP}\n`); return 2; }

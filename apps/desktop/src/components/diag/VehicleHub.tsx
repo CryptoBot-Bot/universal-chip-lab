@@ -9,11 +9,13 @@ import { CATEGORY_LABEL, CATEGORY_ORDER, addressedSystems, clean, clearDtcs, rea
 export { splitLabel };
 import { voltageView, voltsText } from "../../lib/voltage";
 import { dtcText, useDtcMeanings } from "../../lib/useDtcMeanings";
+import { useSuperDevice } from "../../lib/superdevice-connection";
 import { useWorkbench } from "../../lib/workbench";
 import type { PendingWrite } from "../../lib/writeActions";
 import { WriteConfirmModal } from "../WriteConfirmModal";
 import { Icon } from "./icons";
 import { LiveMap, useLiveRun } from "./LiveMap";
+import { MechanicChat } from "./MechanicChat";
 import { ModuleInventory } from "./ModuleInventory";
 
 /**
@@ -30,7 +32,7 @@ import { ModuleInventory } from "./ModuleInventory";
  * already on screen — nothing has to be re-discovered to start working.
  */
 
-export type HubTab = "scan" | "units" | "identity" | "service" | "history";
+export type HubTab = "scan" | "units" | "identity" | "service" | "history" | "mechanic";
 export type RowState = SystemScanResult | "scanning";
 
 interface Props {
@@ -98,6 +100,7 @@ export function VehicleHub(p: Props) {
   const shown = systems.map((m) => stateOf(m)).filter((r): r is SystemScanResult => !!r && r !== "scanning");
   const learned = systems.filter((m) => m.explored).length;
   const volt = useWorkbench().voltage;
+  const deviceName = useSuperDevice().info?.hostname ?? host;
   const meanings = useDtcMeanings([...Object.values(rows), ...(profile.knownVins?.find((o) => o.vin === vin)?.scans ?? []).flatMap((s) => s.systems)].flatMap((r) => (r && typeof r === "object" && "dtcs" in r ? r.dtcs.map((d) => d.code) : [])));
   const { setModules } = volt;
   // modules that may report their own supply voltage (the main process keeps only the standard OBD addresses)
@@ -361,7 +364,7 @@ export function VehicleHub(p: Props) {
 
       <div className="dg-hub-main">
         <div className="dg-seg" role="tablist" aria-label="Vehicle sections">
-          {([["scan", "Systems"], ["identity", "Modules & serials"], ["service", "Service"], ["history", `History${scans.length ? ` (${scans.length})` : ""}`]] as [HubTab, string][]).map(([id, label]) => (
+          {([["scan", "Systems"], ["identity", "Modules & serials"], ["service", "Service"], ["history", `History${scans.length ? ` (${scans.length})` : ""}`], ["mechanic", "Mechanic"]] as [HubTab, string][]).map(([id, label]) => (
             <button key={id} role="tab" aria-selected={view === id} className={view === id ? "on" : ""} onClick={() => p.onTab(id)}>{label}</button>
           ))}
         </div>
@@ -479,6 +482,10 @@ export function VehicleHub(p: Props) {
             )}
             <div className="dg-note" style={{ margin: 0 }}>Service resets (oil life, electronic parking brake, steering-angle calibration, battery registration…) are maker-specific routines. None is mapped for this vehicle yet, so none is offered here — a routine you know can be started from a system’s <b>Special Functions</b>.</div>
           </>
+        )}
+
+        {view === "mechanic" && (
+          <MechanicChat profile={profile} vin={vin} host={host} iface={iface} online={online} demo={p.demo} deviceName={deviceName} />
         )}
 
         {view === "history" && (

@@ -20,6 +20,7 @@ export * from "./moduleIdentity.js";
 export * from "./moduleSweep.js";
 export * from "./knowledge.js";
 export * from "./knowledgeCard.js";
+export * from "./valueCatalog.js";
 export { LABEL_KINDS, checkLabel, checkLabels, findTracks, stateCheck, labelSummary, luckOfTracks, readsOf, valueAt, varies } from "./moduleLabels.js";
 export type { CheckStatus, ConditionReads, IdentifierLabel, LabelCheck, LabelKind, LabelProposal, LabelSummary, LabelValue, ModuleLabels, Track, ValueReading } from "./moduleLabels.js";
 export * from "./obdPids.js";

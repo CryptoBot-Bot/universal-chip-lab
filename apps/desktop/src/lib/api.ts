@@ -339,6 +339,13 @@ export interface VoltageReading {
   rpm: number | null;
   modules: { id: string; volts: number }[];
 }
+/** What the mechanic assistant streams while it answers. */
+export type MechanicEvent =
+  | { type: "text"; delta: string }
+  | { type: "tool"; name: string; input: unknown }
+  | { type: "values"; values: { id: string; name: string; module: string; value: number | string | null; unit: string; trust: string; source: string; error?: string }[] }
+  | { type: "found"; query: string; items: { id: string; name: string; unit: string; module: string; trust: string }[] }
+  | { type: "done"; tokensIn: number; tokensOut: number; model: string; costUsd?: number };
 export interface VinReadResult {
   ok: boolean;
   vin?: string;
@@ -594,6 +601,16 @@ export const Api = {
     post: <T = unknown>(host: string | undefined, path: string, body?: unknown) =>
       unwrap<T>(api.superDevice.post(host, path, body) as never),
     discover: () => unwrap<DiscoveredDevice[]>(api.superDevice.discover() as never),
+  },
+  /** The read-only mechanic assistant: ask, stop, start over; answers stream through onEvent. */
+  mechanic: {
+    ask: async (payload: { sessionId: string; profileId: string; vin?: string; host?: string; iface: string; question: string; voltage?: string; device: string }) =>
+      unwrap<{ answer: string; tokensIn: number; tokensOut: number }>(api.mechanic.ask(payload) as never),
+    stop: async () => unwrap<{ ok: boolean }>(api.mechanic.stop() as never),
+    reset: async (payload: { sessionId: string }) => unwrap<{ ok: boolean }>(api.mechanic.reset(payload) as never),
+    onEvent: (cb: (e: { sessionId: string; event: MechanicEvent }) => void): (() => void) => {
+      try { return api.mechanic.onEvent(cb) as () => void; } catch { return () => undefined; }
+    },
   },
   /** Outside knowledge (OBDb, OBDex): status, download, what is known about a vehicle, fault-code meanings. */
   knowledge: {

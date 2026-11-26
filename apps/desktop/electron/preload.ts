@@ -119,6 +119,18 @@ const api = {
     post: (host: string | undefined, path: string, body?: unknown) => invoke("superDevice:post", { host, path, body }),
     discover: () => invoke("superDevice:discover"),
   },
+  mechanic: {
+    ask: (payload: { sessionId: string; profileId: string; vin?: string; host?: string; iface: string; question: string; voltage?: string; device: string }) => invoke("mechanic:ask", payload),
+    stop: () => invoke("mechanic:stop"),
+    reset: (payload: { sessionId: string }) => invoke("mechanic:reset", payload),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onEvent: (cb: (e: any) => void) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handler = (_e: unknown, ev: any) => cb(ev);
+      ipcRenderer.on("mechanic:event", handler);
+      return () => ipcRenderer.removeListener("mechanic:event", handler);
+    },
+  },
   knowledge: {
     status: () => invoke("knowledge:status"),
     sync: () => invoke("knowledge:sync"),

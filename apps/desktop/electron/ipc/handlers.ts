@@ -15,7 +15,7 @@ import {
 import { JobEngine, ModuleJobEngine, SafetyEngine } from "@ecu/core";
 import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump-tools";
 import {
-  createModuleRegistry, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles, dtcMeaning, isMakerSpecificDtc, knowledgeCard,
+  createModuleRegistry, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles, dtcMeaning, isMakerSpecificDtc, knowledgeCard, searchCatalog, vehicleCatalog,
 } from "@ecu/vehicle-db";
 import type { DiscoveredModuleInput } from "@ecu/vehicle-db";
 import type { BenchModuleProfile, BusModuleKnowledge, VehicleProfile } from "@ecu/vehicle-db";
@@ -55,6 +55,10 @@ import { identifyAndSave } from "../pipeline/identityPipeline";
 import { sweepAndSave } from "../pipeline/sweepPipeline";
 import { readVoltage, type VoltageSource } from "../pipeline/voltage";
 import { labelAndSave } from "../pipeline/labelPipeline";
+import { readCatalogItems } from "../pipeline/readCatalog";
+import { PRICES } from "../pipeline/calibration";
+import type Anthropic from "@anthropic-ai/sdk";
+import { askMechanic, type MechanicEvent } from "../resolver/mechanic";
 import { buildKnowledge, loadKnowledge, syncSources } from "../pipeline/knowledgeSources";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
 import {
@@ -328,6 +332,44 @@ export async function registerIpcHandlers(
     const k = await loadKnowledge(knowledgeDir);
     return (p.codes ?? []).slice(0, 200).map((c) => (k ? dtcMeaning(k.kb, c, k.dtcIndex) : { code: c.toUpperCase().slice(0, 5), makerSpecific: isMakerSpecificDtc(c) }));
   });
+
+  // The mechanic assistant (read-only): conversations live here, with the model's replies unchanged.
+  const mechanicSessions = new Map<string, { profileId: string; history: Anthropic.MessageParam[] }>();
+  let mechanicStop = false;
+  register("mechanic:ask", async (event, p: { sessionId: string; profileId: string; vin?: string; host?: string; iface: string; question: string; voltage?: string; device: string }) => {
+    mechanicStop = false;
+    const profile = (await loadLibrary(libDir())).find((x) => x.id === p.profileId);
+    if (!profile) throw new Error(`no vehicle "${p.profileId}" in the library`);
+    const k = await loadKnowledge(knowledgeDir);
+    const catalog = vehicleCatalog(profile, k?.kb ?? null);
+    const unit = profile.knownVins?.find((o) => o.vin === p.vin) ?? profile.knownVins?.[0];
+    const last = unit?.scans?.length ? unit.scans[unit.scans.length - 1] : null;
+    const faults = (last?.systems ?? []).flatMap((s) => s.dtcs.map((d) => {
+      const m = k ? dtcMeaning(k.kb, d.code, k.dtcIndex) : { title: undefined, makerSpecific: isMakerSpecificDtc(d.code) };
+      return `${s.label.split(" (")[0]}: ${d.code}${d.status ? ` (${d.status})` : ""} — ${m.title ?? (m.makerSpecific ? "maker-specific, no public meaning" : d.description ?? "no meaning found")}`;
+    }));
+    let s = mechanicSessions.get(p.sessionId);
+    if (!s || s.profileId !== p.profileId) { s = { profileId: p.profileId, history: [] }; mechanicSessions.set(p.sessionId, s); }
+    const send = (e: MechanicEvent) => { try { event.sender.send("mechanic:event", { sessionId: p.sessionId, event: e.type === "done" ? { ...e, costUsd: ((PRICES[e.model] ?? { in: 5, out: 25 }).in * e.tokensIn + (PRICES[e.model] ?? { in: 5, out: 25 }).out * e.tokensOut) / 1e6 } : e }); } catch { /* window gone */ } };
+    return askMechanic({
+      history: s.history, question: p.question,
+      context: { profile, vin: p.vin, catalog, faults, voltage: p.voltage, device: p.device },
+      tools: {
+        find: (q) => searchCatalog(catalog, q),
+        read: async (ids) => {
+          if (!p.host) throw new Error("no device connected — nothing can be read live");
+          const items = ids.map((id) => catalog.find((it) => it.id === id)).filter((x): x is NonNullable<typeof x> => !!x);
+          if (!items.length) throw new Error("none of these ids is in the catalog — use find_values first");
+          return readCatalogItems({ host: p.host, iface: p.iface, profile, items });
+        },
+        explain: (code) => (k ? dtcMeaning(k.kb, code, k.dtcIndex) : { code, makerSpecific: isMakerSpecificDtc(code) }),
+      },
+      onEvent: send,
+      shouldStop: () => mechanicStop,
+    });
+  });
+  register("mechanic:stop", () => { mechanicStop = true; return { ok: true }; });
+  register("mechanic:reset", (_e, p: { sessionId: string }) => { mechanicSessions.delete(p.sessionId); return { ok: true }; });
 
   // AI labels for one module's swept identifiers, checked by code. Offline: nothing goes to a car.
   register("vehicleExplorer:label", async (event, p: { profileId: string; moduleId: string }) => {

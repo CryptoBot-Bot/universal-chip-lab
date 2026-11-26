@@ -8,7 +8,7 @@
  *   <workspace>/vehicle-library       real cars
  *   <workspace>/vehicle-library-sim   the sandbox
  */
-import { copyFile, mkdir, readdir } from "node:fs/promises";
+import { copyFile, mkdir, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const REAL_LIBRARY = "vehicle-library";
@@ -25,12 +25,16 @@ export function isSimulatorTarget(host: string | undefined, iface: string | unde
   return (iface ?? "").trim().toLowerCase() === "vcan0";
 }
 
-/** Copy the real library into the sandbox when the sandbox is still empty. Never the other way. */
+/** Bring the sandbox up to the real library: a vehicle the real library learned more about since
+ *  replaces its sandbox copy (simulated work on it is throwaway); a sandbox copy changed later by a
+ *  simulator stays until then. Never the other way. */
 export async function ensureSimLibrary(realDir: string, simDir: string): Promise<void> {
   await mkdir(simDir, { recursive: true });
-  const have = (await readdir(simDir)).filter((f) => f.endsWith(".vehicle.json"));
-  if (have.length) return;
   let files: string[] = [];
   try { files = (await readdir(realDir)).filter((f) => f.endsWith(".vehicle.json")); } catch { return; }
-  for (const f of files) await copyFile(path.join(realDir, f), path.join(simDir, f));
+  for (const f of files) {
+    const real = await stat(path.join(realDir, f));
+    const sim = await stat(path.join(simDir, f)).catch(() => null);
+    if (!sim || real.mtimeMs > sim.mtimeMs) await copyFile(path.join(realDir, f), path.join(simDir, f));
+  }
 }
