@@ -21,7 +21,7 @@ import type {
   VerificationResult,
 } from "@ecu/core";
 import type { HexPreview } from "@ecu/dump-tools";
-import type { BenchModuleProfile, BusModuleKnowledge, CarInventory, IdentRecord, ModuleInventoryEntry, ModuleProfile, ModuleLabels, ModuleSweep, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
+import type { BenchModuleProfile, BusModuleKnowledge, CarInventory, IdentRecord, ModuleInventoryEntry, ModuleProfile, DtcMeaning, KnowledgeCard, KnowledgeSource, ModuleLabels, ModuleSweep, OnlineVinDecode, VehicleBrand, VehicleProfile } from "@ecu/vehicle-db";
 
 import type { IpcResponse } from "../../electron/ipc/channels";
 
@@ -594,6 +594,16 @@ export const Api = {
     post: <T = unknown>(host: string | undefined, path: string, body?: unknown) =>
       unwrap<T>(api.superDevice.post(host, path, body) as never),
     discover: () => unwrap<DiscoveredDevice[]>(api.superDevice.discover() as never),
+  },
+  /** Outside knowledge (OBDb, OBDex): status, download, what is known about a vehicle, fault-code meanings. */
+  knowledge: {
+    status: async () => unwrap<{ built: boolean; builtAt?: string; signals?: number; vehicles?: number; dtcs?: number; sources?: KnowledgeSource[] }>(api.knowledge.status() as never),
+    sync: async () => unwrap<{ repos: number; withSignals: number; failed: string[]; dtcs: number; ms: number; signals: number; vehicles: number }>(api.knowledge.sync() as never),
+    card: async (payload: { profileId: string }) => unwrap<KnowledgeCard>(api.knowledge.card(payload) as never),
+    dtcs: async (payload: { codes: string[] }) => unwrap<DtcMeaning[]>(api.knowledge.dtcs(payload) as never),
+    onEvent: (cb: (e: { done?: number; of?: number; text?: string }) => void): (() => void) => {
+      try { return api.knowledge.onEvent(cb) as () => void; } catch { return () => undefined; }
+    },
   },
   voltage: {
     /** Supply voltage now. `asked` = the operator clicked (may bring the bus up). Gives way to any scan. */

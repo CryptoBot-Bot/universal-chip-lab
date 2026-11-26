@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 
-import { CAPABILITY_CATALOG, readMethodFor } from "@ecu/vehicle-db";
+import { CAPABILITY_CATALOG, explorationFaults, readMethodFor } from "@ecu/vehicle-db";
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 
 import { CATEGORY_LABEL } from "../../lib/diag";
@@ -129,7 +129,7 @@ export function SystemDetail({ profile, m, deep, blocked, onClose }: {
           </details>
           <details className="vdb-list" open={k.counts.codes > 0 && k.counts.codes <= 8}>
             <summary>Fault codes <span className="ual-muted">· {k.counts.codes}</span></summary>
-            {k.counts.codes ? <ul>{x.dtcs!.map((d) => <li key={d.code}><span className="ual-mono">{d.code}</span> {d.desc}</li>)}</ul>
+            {k.counts.codes ? <ul>{explorationFaults(x.dtcs).map((d) => <li key={d.code}><span className="ual-mono">{d.code}</span> {d.desc}</li>)}</ul>
               : <p className="ual-muted">No fault codes learned yet.</p>}
           </details>
         </div>

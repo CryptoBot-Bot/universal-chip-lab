@@ -8,6 +8,7 @@ import { AgentPanel, LearnedList, type RunsOn } from "../components/vehicles/Dig
 import { VIcon } from "../components/vehicles/icons";
 import { useDeepMap } from "../components/vehicles/useDeepMap";
 import { SystemDetail, VehicleMapTiles, unaddressedNote } from "../components/vehicles/VehicleMap";
+import { KnowledgeCard } from "../components/vehicles/KnowledgeCard";
 import { AboutCard, CarsOnFile, ModulesCard } from "../components/vehicles/VehicleRecords";
 import {
   buildBuckets, busSpec, carsSeenSpec, engineSpec, fmtDate, gearboxSpec, lastActivity, lastReplay, makeKeyOf, modelKeyOf,
@@ -386,6 +387,8 @@ export function VehicleDatabase() {
                     <SpecBox label="Bus" spec={busSpec(profile)} fallback="none on file" />
                     <SpecBox label="Cars seen" spec={carsSeenSpec(bucket)} fallback="" />
                   </div>
+
+                  <KnowledgeCard profile={profile} />
 
                   <div className="vdb-maphead">
                     <h3 className="vdb-h3">Vehicle map · {learned} of {plural(systems.length, "system")} learned deeply</h3>

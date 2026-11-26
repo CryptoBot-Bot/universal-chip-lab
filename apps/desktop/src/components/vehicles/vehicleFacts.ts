@@ -3,7 +3,7 @@
  * year/make/model (its profile, its known VINs, the shop garage) into the facts the
  * B1 page shows. No React, no device access.
  */
-import { protectedModule } from "@ecu/vehicle-db";
+import { explorationFaults, protectedModule } from "@ecu/vehicle-db";
 import type { CarInventory, InventoryChange, ProtectedVerdict, VehicleModule, VehicleProfile, VehicleScanRecord } from "@ecu/vehicle-db";
 
 import type { GarageVehicle } from "../../lib/api";
@@ -155,7 +155,7 @@ export interface SystemKnowledge {
 export function knowledgeOf(m: VehicleModule): SystemKnowledge {
   const x = m.explored;
   const guard = guardOf(m);
-  const counts = { ident: x?.identification?.length ?? 0, live: x?.liveData?.length ?? 0, codes: x?.dtcs?.length ?? 0 };
+  const counts = { ident: x?.identification?.length ?? 0, live: x?.liveData?.length ?? 0, codes: explorationFaults(x?.dtcs).length };
   return {
     identity: !!(m.identity?.partNo || counts.ident || (x?.identity && x.identity !== "unknown")),
     live: counts.live > 0,

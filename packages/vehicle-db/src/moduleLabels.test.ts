@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { checkLabel, checkLabels, findTracks, labelSummary, luckOfTracks, readsOf, valueAt } from "./moduleLabels.js";
+import { checkLabel, checkLabels, findTracks, labelSummary, luckOfTracks, readsOf, stateCheck, valueAt } from "./moduleLabels.js";
 import type { LabelProposal, LabelValue, SweepRefs } from "./moduleLabels.js";
 import type { ModuleSweep } from "./moduleSweep.js";
 
@@ -99,4 +99,19 @@ test("a wrong number is rejected by itself; what holds in the same block stays (
   assert.equal(c.status, "confirmed");
   assert.deepEqual(c.readings.map((r) => r.status), ["confirmed", "contradicted"]);
   assert.ok(c.notes.some((n) => /rejected/.test(n)));
+});
+
+test("the car's state rejects what cannot be (real gearbox candidates, cold van at 21 °C)", () => {
+  const cold = { rpm: [0, 0] as [number, number], coolant: [21, 21] as [number, number] };
+  const idle = { rpm: [669, 689] as [number, number], kmh: [0, 0] as [number, number] };
+  assert.equal(stateCheck("Transmission oil temperature", "°C", [{ values: [31, 31], refs: cold }])?.verdict, undefined);        // 10 off: neither
+  assert.equal(stateCheck("Transmission fluid temperature, variant 3", "°C", [{ values: [0, 0], refs: cold }])?.verdict, "contradicted");
+  assert.equal(stateCheck("Transmission fluid temperature, variant 1", "fahrenheit", [{ values: [69.8], refs: cold }])?.verdict, "agrees");
+  assert.equal(stateCheck("Current gear", "scalar", [{ values: [221], refs: idle }])?.verdict, "contradicted");
+  assert.equal(stateCheck("Current gear", "scalar", [{ values: [0], refs: idle }]), null);
+  assert.equal(stateCheck("Output shaft speed", "rpm", [{ values: [646], refs: idle }])?.verdict, "contradicted");
+  assert.equal(stateCheck("Turbine speed", "rpm", [{ values: [646], refs: idle }]), null);
+  assert.equal(stateCheck("Turbine speed", "rpm", [{ values: [400], refs: cold }])?.verdict, "contradicted");
+  assert.equal(stateCheck("Desired oil temperature", "°C", [{ values: [90], refs: cold }]), null);             // a setpoint is not the state
+  assert.equal(stateCheck("Coolant temperature", "°C", [{ values: [88], refs: { rpm: [0, 0], coolant: [86, 86] } }]), null);   // warm engine: no cold-engine rule
 });

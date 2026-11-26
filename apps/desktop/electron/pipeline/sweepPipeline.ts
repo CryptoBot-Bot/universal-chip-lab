@@ -49,6 +49,22 @@ async function readRefs(o: SweepOptions, refs: SweepRefs): Promise<void> {
   widen("rpm", rpm === null ? null : rpm / 4); widen("kmh", kmh); widen("volts", mv ? mv / 1000 : null); widen("coolant", t === null ? null : t - 40);
 }
 
+/** The standard values (mode 01 PIDs) a module supports: 01 00, then 01 20… while the last bit says "more". */
+export async function readObdSupport(o: Pick<SweepOptions, "host" | "iface">, tx: string, rx: string): Promise<string[]> {
+  const out: string[] = [];
+  for (let base = 0; base <= 0xc0; base += 0x20) {
+    let it: SeqItem | undefined;
+    try { it = (await readSeq(o.host, o.iface, tx, rx, [`01${base.toString(16).toUpperCase().padStart(2, "0")}`], { timeout: TIMEOUT }))[0]; }
+    catch { break; }
+    const h = clean(it?.response);
+    if (!h.startsWith(`41${base.toString(16).toUpperCase().padStart(2, "0")}`) || h.length < 12) break;
+    const mask = parseInt(h.slice(4, 12), 16);
+    for (let i = 1; i <= 32; i++) if ((mask >>> (32 - i)) & 1) { const p = base + i; if (p % 0x20) out.push(p.toString(16).toUpperCase().padStart(2, "0")); }
+    if (!(mask & 1)) break;
+  }
+  return out;
+}
+
 /** Requests per sequence (the device takes at most 24, one is the session opener). */
 const CHUNK = 20;
 /** Seconds per request: modules answer a read (or refuse it) within ~50 ms. */
@@ -177,11 +193,13 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
   }
 
   if (o.refs !== false) await readRefs(o, refs);
+  const obd = o.refs !== false && /^7E[0-7]$/.test(tx) ? await readObdSupport(o, tx, rx) : [];
   const sweep: ModuleSweep = {
     at: new Date().toISOString(), condition: o.condition, protocol, sessions,
     ranges: plan.map((rg) => rangeLabel(rg, session)), hits,
     counts: { asked, answered: hits.filter((h) => !h.gated).length, moving: hits.filter((h) => h.moving).length, gated: hits.filter((h) => h.gated).length, ms: Date.now() - t0 },
     ...(Object.keys(refs).length ? { refs } : {}),
+    ...(obd.length ? { obd } : {}),
     ...(o.sim ? { sim: o.sim } : {}),
   };
   emit({ type: "sweep-module", moduleId: m.id, label: m.label, index, total, phase: "done", asked, of: all.length, answered: sweep.counts.answered, sweep });

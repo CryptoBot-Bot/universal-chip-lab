@@ -130,7 +130,9 @@ function checkValue(v: LabelValue, reads: ConditionReads[]): ValueReading {
     const r = against((x) => x.coolant, (x, lo, hi) => x >= lo - 4 && x <= hi + 4, (x, lo, hi) => x < lo - 12 || x > hi + 12, 15, "measured coolant temperature");
     if (r) return r;
   }
-  return out("consistent");
+  const st = stateCheck(v.name, v.unit, reads.map((r, i) => ({ values: at[i].values, refs: r.refs })));
+  if (st?.verdict === "contradicted") return out("contradicted", st.note);
+  return out("consistent", st?.note);
 }
 
 /** 5c: what the bytes say about a proposal. The proposal's author never saw the reference readings. */
@@ -184,6 +186,57 @@ export function labelSummary(l: ModuleLabels | undefined, sweeps: ModuleSweep[] 
     confirmed: n("confirmed"), consistent: n("consistent"), unchecked: n("unchecked"), contradicted: n("contradicted"),
     missing: Math.max(0, answered - (l?.labels ?? []).length),
   };
+}
+
+// ---- what the state of the car says about a value (can reject or agree, never prove) ----
+
+const NOT_ACTUAL = /desired|target|set ?point|threshold|limit|\bmax|\bmin\b|maximum|minimum|model(l)?ed|nominal|calculated|offset|adaptation|correction/i;
+const TEMP_NAME = /temp/i;
+const STANDSTILL_NAME = /vehicle speed|wheel speed|road speed|output (shaft )?speed/i;
+const STOPPED_NAME = /engine (speed|rpm)|turbine speed|input (shaft )?speed/i;
+const GEAR_NAME = /\bgear\b/i;
+const NOT_GEAR = /ratio|teeth|tooth|selector|lever|position sensor|count/i;
+
+/**
+ * The car's own state as a yardstick for any named value: with a cold engine every fluid, air
+ * and fuel temperature sits near the coolant; standing still, road speeds are 0; with the engine
+ * stopped, engine and turbine speeds are 0; a gear is a small whole number. Many values match
+ * such states by nature, so this can only reject ("contradicted") or agree — never prove.
+ */
+export function stateCheck(name: string, unit: string, at: { values: number[]; refs?: SweepRefs }[]): { verdict: "contradicted" | "agrees"; note: string } | null {
+  if (NOT_ACTUAL.test(name)) return null;
+  const u = unit.trim();
+  const isF = /^(°?f|fahrenheit)$/i.test(u), isC = /^(°?c|celsius|deg ?c)$/i.test(u);
+  if ((isC || isF) && TEMP_NAME.test(name)) {
+    let agreed = false;
+    for (const a of at) {
+      const stopped = a.refs?.rpm && a.refs.rpm[1] === 0;
+      const cool = a.refs?.coolant;
+      if (!stopped || !cool || cool[1] > 35) continue;
+      for (const v0 of a.values) {
+        const v = isF ? ((v0 - 32) * 5) / 9 : v0;
+        if (v < cool[0] - 15 || v > cool[1] + 15) return { verdict: "contradicted", note: `${Math.round(v * 10) / 10} °C while the cold engine's coolant was ${cool[0]} °C` };
+        if (v >= cool[0] - 6 && v <= cool[1] + 6) agreed = true;
+      }
+    }
+    return agreed ? { verdict: "agrees", note: "close to the coolant temperature of the cold engine" } : null;
+  }
+  if (STANDSTILL_NAME.test(name) && /^(km\/h|kilometersperhour|mph|rpm|1\/min)$/i.test(u)) {
+    for (const a of at) {
+      const still = (a.refs?.kmh && a.refs.kmh[1] === 0) || (a.refs?.rpm && a.refs.rpm[1] === 0);
+      if (still && a.values.some((v) => Math.abs(v) > (/rpm|min/i.test(u) ? 30 : 3))) return { verdict: "contradicted", note: `${a.values.join(" / ")} ${u} while the car stood still` };
+    }
+    return null;
+  }
+  if (STOPPED_NAME.test(name) && /^(rpm|1\/min)$/i.test(u)) {
+    for (const a of at) if (a.refs?.rpm && a.refs.rpm[1] === 0 && a.values.some((v) => Math.abs(v) > 30)) return { verdict: "contradicted", note: `${a.values.join(" / ")} rpm with the engine stopped` };
+    return null;
+  }
+  if (GEAR_NAME.test(name) && !NOT_GEAR.test(name)) {
+    const bad = at.flatMap((a) => a.values).find((v) => !Number.isInteger(v) || v < -2 || v > 10);
+    if (bad !== undefined) return { verdict: "contradicted", note: `${bad} is not a gear` };
+  }
+  return null;
 }
 
 // ---- no AI: which fields follow what the car measured? ----

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { checkRequest } from "@ecu/vehicle-db";
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 
-import { provenSessions, sweepModule, sweepTargets } from "./sweepPipeline";
+import { provenSessions, readObdSupport, sweepModule, sweepTargets } from "./sweepPipeline";
 
 function fakeEcm() {
   const sent: string[] = [];
@@ -126,4 +126,16 @@ test("the car's own readings are kept beside the sweep, and long data is compare
   const h = sw.hits.find((x) => x.id === "21 10")!;
   assert.equal(h.bytes.length, 512);
   assert.equal(h.moving, true);
+});
+
+test("an OBD-type module is asked which standard values it supports (real Sprinter engine masks)", async () => {
+  const masks: Record<string, string> = { "0100": "4100BE3FA813", "0120": "41209005B015", "0140": "4140FED00400", "0160": "416001800000" };
+  globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+    const b = JSON.parse(init?.body ?? "{}") as { requests: string[] };
+    return new Response(JSON.stringify({ ok: true, results: b.requests.map((q) => (masks[q] ? { request: q, response: masks[q] } : { request: q, response: "7F0112", negative: true, nrc: 0x12 })) }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const pids = await readObdSupport({ host: "fake:8080", iface: "can0" }, "7E0", "7E8");
+  assert.ok(pids.includes("0C") && pids.includes("42") && pids.includes("05"));
+  assert.ok(!pids.includes("20") && !pids.includes("40"));          // "more" bits are not values
+  assert.ok(!pids.some((p) => parseInt(p, 16) > 0x60 + 32));
 });

@@ -14,7 +14,9 @@ import {
 } from "@ecu/chip-db/store";
 import { JobEngine, ModuleJobEngine, SafetyEngine } from "@ecu/core";
 import { analysePatterns, hexPreview, shannonEntropyNormalised } from "@ecu/dump-tools";
-import { createModuleRegistry, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles } from "@ecu/vehicle-db";
+import {
+  createModuleRegistry, mergeBenchModules, mergeBusKnowledge, mergeVehicleProfiles, dtcMeaning, isMakerSpecificDtc, knowledgeCard,
+} from "@ecu/vehicle-db";
 import type { DiscoveredModuleInput } from "@ecu/vehicle-db";
 import type { BenchModuleProfile, BusModuleKnowledge, VehicleProfile } from "@ecu/vehicle-db";
 import {
@@ -53,9 +55,10 @@ import { identifyAndSave } from "../pipeline/identityPipeline";
 import { sweepAndSave } from "../pipeline/sweepPipeline";
 import { readVoltage, type VoltageSource } from "../pipeline/voltage";
 import { labelAndSave } from "../pipeline/labelPipeline";
+import { buildKnowledge, loadKnowledge, syncSources } from "../pipeline/knowledgeSources";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../pipeline/simLibrary";
 import {
-  captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, piGet, piPost, readVin, vinDecodeCacheFile,
+  captureDiagnostics, commitDiscovery, deepMapAndSave, discoverOnBus, loadLibrary, piGet, piPost, readVin, vinDecodeCacheFile,
 } from "../pipeline/vehiclePipeline";
 import { identifyVehicle, censusModules, type IdentifyInput, type CensusInput } from "../resolver/vehicleIdentifier";
 import { decodeVinOnline } from "../resolver/vinOnline";
@@ -300,6 +303,30 @@ export async function registerIpcHandlers(
       onEvent: (e: VehicleExplorerEvent) => { try { event.sender.send("vehicleExplorer:event", e); } catch { /* window gone */ } },
       shouldStop: () => vehicleExplorerStop,
     });
+  });
+
+  // Outside knowledge (OBDb, OBDex): downloaded into the workspace, used under their licences.
+  const knowledgeDir = path.join(layout.root, "knowledge");
+  register("knowledge:status", async () => {
+    const k = await loadKnowledge(knowledgeDir);
+    return k ? { built: true, builtAt: k.kb.builtAt, signals: k.kb.signals.length, vehicles: k.kb.vehicles.length, dtcs: k.kb.dtcs.length, sources: k.kb.sources } : { built: false };
+  });
+  register("knowledge:sync", async (event) => {
+    const send = (e: unknown) => { try { event.sender.send("knowledge:event", e); } catch { /* window gone */ } };
+    const r = await syncSources(knowledgeDir, { onProgress: (done, of) => send({ done, of }) });
+    send({ text: "Building the knowledge base…" });
+    const kb = await buildKnowledge(knowledgeDir);
+    return { ...r, signals: kb.signals.length, vehicles: kb.vehicles.length, dtcs: kb.dtcs.length };
+  });
+  register("knowledge:card", async (_e, p: { profileId: string }) => {
+    const profile = (await loadLibrary(libDir())).find((x) => x.id === p.profileId);
+    if (!profile) throw new Error(`no vehicle "${p.profileId}" in the library`);
+    const k = await loadKnowledge(knowledgeDir);
+    return knowledgeCard(profile, k?.kb ?? null, k?.dtcIndex);
+  });
+  register("knowledge:dtcs", async (_e, p: { codes: string[] }) => {
+    const k = await loadKnowledge(knowledgeDir);
+    return (p.codes ?? []).slice(0, 200).map((c) => (k ? dtcMeaning(k.kb, c, k.dtcIndex) : { code: c.toUpperCase().slice(0, 5), makerSpecific: isMakerSpecificDtc(c) }));
   });
 
   // AI labels for one module's swept identifiers, checked by code. Offline: nothing goes to a car.

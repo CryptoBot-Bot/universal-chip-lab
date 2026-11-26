@@ -8,6 +8,7 @@ import { CATEGORY_LABEL, CATEGORY_ORDER, addressedSystems, clean, clearDtcs, rea
 
 export { splitLabel };
 import { voltageView, voltsText } from "../../lib/voltage";
+import { dtcText, useDtcMeanings } from "../../lib/useDtcMeanings";
 import { useWorkbench } from "../../lib/workbench";
 import type { PendingWrite } from "../../lib/writeActions";
 import { WriteConfirmModal } from "../WriteConfirmModal";
@@ -97,6 +98,7 @@ export function VehicleHub(p: Props) {
   const shown = systems.map((m) => stateOf(m)).filter((r): r is SystemScanResult => !!r && r !== "scanning");
   const learned = systems.filter((m) => m.explored).length;
   const volt = useWorkbench().voltage;
+  const meanings = useDtcMeanings([...Object.values(rows), ...(profile.knownVins?.find((o) => o.vin === vin)?.scans ?? []).flatMap((s) => s.systems)].flatMap((r) => (r && typeof r === "object" && "dtcs" in r ? r.dtcs.map((d) => d.code) : [])));
   const { setModules } = volt;
   // modules that may report their own supply voltage (the main process keeps only the standard OBD addresses)
   const voltSources = systems.filter((m) => !protectedModule({ category: m.category, label: m.label })).map((m) => ({ id: m.id, req: clean(m.addressing?.request), resp: clean(m.addressing?.response) }));
@@ -425,7 +427,7 @@ export function VehicleHub(p: Props) {
                       {r.dtcs.map((d, k) => (
                         <div className="dg-fline" key={k}>
                           <span className="c">{d.code}</span>
-                          <span style={{ color: d.description ? "var(--ual-ink)" : "var(--ual-muted)" }}>{d.description || "No description on file yet — maker-specific code"}</span>
+                          {(() => { const t = dtcText(d.code, d.description, meanings); return <span title={t.title} style={{ color: t.muted ? "var(--ual-muted)" : "var(--ual-ink)" }}>{t.text}</span>; })()}
                           <span className="s">{d.status}</span>
                         </div>
                       ))}
@@ -496,7 +498,7 @@ export function VehicleHub(p: Props) {
                     {x.dtcs.map((d, k) => (
                       <div className="dg-fline" key={k} style={{ padding: "6px 0" }}>
                         <span className="c">{d.code}</span>
-                        <span>{d.description || <span className="ual-muted">no description on file</span>}</span>
+                        {(() => { const t = dtcText(d.code, d.description, meanings); return <span title={t.title} className={t.muted ? "ual-muted" : undefined}>{t.text}</span>; })()}
                         <span className="s">{d.status}</span>
                       </div>
                     ))}

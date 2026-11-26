@@ -46,6 +46,8 @@ export interface ModuleSweep {
   hits: SweepHit[];
   /** What the car itself measured meanwhile — the yardstick for labels (moduleLabels.ts). */
   refs?: SweepRefs;
+  /** Standard values (OBD-II mode 01 PIDs) this module says it supports, from its 01 00 / 20 / 40… answers. */
+  obd?: string[];
   counts: { asked: number; answered: number; moving: number; gated: number; ms: number };
 }
 

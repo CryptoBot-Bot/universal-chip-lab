@@ -119,6 +119,19 @@ const api = {
     post: (host: string | undefined, path: string, body?: unknown) => invoke("superDevice:post", { host, path, body }),
     discover: () => invoke("superDevice:discover"),
   },
+  knowledge: {
+    status: () => invoke("knowledge:status"),
+    sync: () => invoke("knowledge:sync"),
+    card: (payload: { profileId: string }) => invoke("knowledge:card", payload),
+    dtcs: (payload: { codes: string[] }) => invoke("knowledge:dtcs", payload),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onEvent: (cb: (e: any) => void) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handler = (_e: unknown, ev: any) => cb(ev);
+      ipcRenderer.on("knowledge:event", handler);
+      return () => ipcRenderer.removeListener("knowledge:event", handler);
+    },
+  },
   voltage: {
     read: (payload: { host?: string; iface: string; modules?: { id: string; req: string; resp: string }[]; asked?: boolean }) => invoke("voltage:read", payload),
   },

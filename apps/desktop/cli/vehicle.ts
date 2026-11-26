@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
-import { checkRequest, coverageOf, explorationFaults, labelSummary, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
+import { checkRequest, coverageOf, dtcMeaning, explorationFaults, knowledgeCard, labelSummary, protectedModule, resolveVehicleIdentity } from "@ecu/vehicle-db";
 import type { ProtectedKind } from "@ecu/vehicle-db";
 import { resolveWorkspaceRoot } from "@ecu/workspace";
 
@@ -31,6 +31,7 @@ import { identifyAndSave } from "../electron/pipeline/identityPipeline";
 import { sweepAndSave } from "../electron/pipeline/sweepPipeline";
 import { benchModules, PRICES, runBench, summarise, type TruthVehicle } from "../electron/pipeline/calibration";
 import { labelAndSave, labelPrompts, labelSweeps, recheckAndSave } from "../electron/pipeline/labelPipeline";
+import { buildKnowledge, loadKnowledge, syncSources } from "../electron/pipeline/knowledgeSources";
 import { ensureSimLibrary, isSimulatorTarget, realLibraryDir, simLibraryDir } from "../electron/pipeline/simLibrary";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { getApiKey } from "./settings";
@@ -64,6 +65,11 @@ Commands
                               --condition says what the car was doing ("engine off", "idling"); --wide adds 0400-0FFF
   coverage [<module>]         what the AI map knows of what each module answers (needs a sweep): coverage %,
                               moving values the map does not list as live data, identifiers it never mentions
+  sources [sync | build]      outside knowledge: "build" rebuilds offline from what was downloaded; "sync" downloads OBDb (community signal sets, CC BY-SA 4.0) and
+                              OBDex (fault-code meanings, CC0) into <workspace>/knowledge and builds one base
+  knowledge [--all]           what is known about the bound vehicle: modules, standard values, fault-code meanings,
+                              community definitions tested on this car's own recordings, our own mapping. Offline
+  dtc <code> [<code>…]        the public meaning of fault codes (OBDex). Offline
   label <module> [--dry [--show]] [--recheck | --missing]
                               AI names for every swept identifier of one module, then checked by code against the
                               car's own readings (which the AI is not shown). Offline: no device, no car. Costs API
@@ -508,6 +514,56 @@ async function cmdLabel(ctx: Ctx) {
   return { ok: true, module: m.id, summary: s, invented: labels.invented };
 }
 
+/** Outside knowledge: download (sync), list, and what is known about the bound vehicle. Offline except sync. */
+async function cmdSources(ctx: Ctx) {
+  const dir = path.join(ctx.ws, "knowledge");
+  if (ctx.args._[1] === "sync") {
+    say("Downloading OBDb (community signal sets) and OBDex (fault-code meanings)…");
+    let last = 0;
+    const r = await syncSources(dir, { onProgress: (d, n) => { if (d - last >= 100 || d === n) { last = d; say(`  ${d}/${n} OBDb sets`); } } });
+    say(`  ${r.withSignals} of ${r.repos} OBDb sets have signals · ${r.dtcs} fault codes · ${r.failed.length} failed · ${Math.round(r.ms / 1000)} s`);
+    for (const f of r.failed.slice(0, 8)) say(`  ! ${f}`);
+    const kb = await buildKnowledge(dir);
+    say(`Built: ${kb.signals.length} signal definitions for ${kb.vehicles.length} vehicle sets + the standard, ${kb.dtcs.length} fault codes → ${path.join(dir, "kb.json")}`);
+    return { ok: true, ...r, signals: kb.signals.length, vehicles: kb.vehicles.length };
+  }
+  if (ctx.args._[1] === "build") { const kb = await buildKnowledge(dir); say(`Rebuilt from the downloaded sources: ${kb.signals.length} signal definitions, ${kb.dtcs.length} fault codes.`); return { ok: true }; }
+  const k = await loadKnowledge(dir);
+  if (!k) { say(`No knowledge base yet — run "sources sync".`); return { ok: false }; }
+  const makes = new Map<string, number>();
+  for (const v of k.kb.vehicles) makes.set(v.make, (makes.get(v.make) ?? 0) + 1);
+  say(`Knowledge base built ${k.kb.builtAt}: ${k.kb.signals.length} signal definitions, ${k.kb.vehicles.length} vehicle sets, ${makes.size} makes, ${k.kb.dtcs.length} fault codes.`);
+  for (const s of k.kb.sources) say(`  ${s.name} — ${s.licence} — retrieved ${s.retrievedAt.slice(0, 10)}\n    ${s.terms}`);
+  return { ok: true, signals: k.kb.signals.length, vehicles: k.kb.vehicles.length, dtcs: k.kb.dtcs.length };
+}
+
+async function cmdKnowledge(ctx: Ctx) {
+  const profile = await currentProfile(ctx);
+  const k = await loadKnowledge(path.join(ctx.ws, "knowledge"));
+  const c = knowledgeCard(profile, k?.kb ?? null, k?.dtcIndex);
+  say(`What is known about this ${c.vehicle}`);
+  say(`  modules       ${c.modules.found} found · ${c.modules.identified} identified · ${c.modules.serials} serial numbers · fault memory read on ${c.modules.faultsRead} · ${c.modules.protected} protected`);
+  say(`  standard      ${c.standard.definitions} standard values defined (SAE J1979)${c.standard.modules.length ? ` · supported here: ${c.standard.modules.map((m) => `${m.module} ${m.supported}`).join(", ")}` : " · supported list not read yet (next sweep asks)"}`);
+  say(`  fault codes   ${c.faults.length ? c.faults.map((f) => `${f.code} (${f.module}) ${f.title ?? (f.makerSpecific ? "— maker-specific, no public meaning" : "— no public meaning found")}`).join("\n                ") : "none on file"}`);
+  const vd = c.community.verdicts;
+  say(`  community     sets for this model: ${c.community.modelSets.join(", ") || "none"} · make set: ${c.community.makeSet ?? "none"}`);
+  say(`                ${c.community.candidates} candidate definitions (this model, the make, other models) · ${c.community.tested} on modules this car has`);
+  say(`                on this car: ${vd.proven} proven · ${vd.fits} fit · ${vd["out-of-range"]} wrong · ${vd["too-short"]} longer than the answer · ${vd["no-answer"]} not answered · ${vd["not-swept"]} module not swept`);
+  for (const s of c.community.signals.slice(0, Number(ctx.args.flags.all ? 999 : 20))) say(`     ${s.verdict === "proven" ? "+" : s.verdict === "fits" ? "·" : "!"} ${s.module.padEnd(6)} ${s.request.padEnd(8)} ${oneLine(s.name, 44).padEnd(44)} ${s.values} ${s.unit}  [${s.sets.slice(0, 3).join(", ")}${s.sets.length > 3 ? "…" : ""}]`);
+  say(`  own mapping   ${c.own.swept} modules swept · ${c.own.answered} identifiers answer · ${c.own.changing} change · ${c.own.labelled} labelled: ${c.own.named} named, ${c.own.proven} proven`);
+  for (const s of c.sources) say(`  source        ${s.name} (${s.licence}), retrieved ${new Date(s.retrievedAt).toLocaleDateString()}`);
+  return { ok: true, card: c };
+}
+
+async function cmdDtc(ctx: Ctx) {
+  const k = await loadKnowledge(path.join(ctx.ws, "knowledge"));
+  if (!k) throw new Error(`No knowledge base yet — run "sources sync".`);
+  const codes = ctx.args._.slice(1);
+  const out = codes.map((c) => dtcMeaning(k.kb, c, k.dtcIndex));
+  for (const m of out) say(`${m.code}: ${m.title ?? (m.makerSpecific ? "maker-specific — no public meaning" : "no meaning in the open data")}${m.description ? `\n  ${oneLine(m.description, 400)}` : ""}`);
+  return { ok: true, codes: out };
+}
+
 /** Calibration bench on a virtual car (desk simulator). */
 async function cmdBench(ctx: Ctx) {
   needKey("The bench");
@@ -863,7 +919,7 @@ async function main(): Promise<number> {
 
   const root = findProjectRoot();
   loadEnvFile(root);
-  if (cmd === "audit" || cmd === "coverage" || cmd === "bench" || cmd === "label") args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
+  if (["audit", "coverage", "bench", "label", "sources", "knowledge", "dtc"].includes(cmd)) args.flags.host = typeof args.flags.host === "string" ? args.flags.host : "offline";
   const hostRaw = (typeof args.flags.host === "string" ? args.flags.host : process.env.SD_HOST ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!hostRaw) { process.stderr.write("Which device? Pass --host <address[:port]> (or set SD_HOST). Example: --host 100.91.185.100\n"); return 2; }
   const host = /:\d+$/.test(hostRaw) ? hostRaw : `${hostRaw}:8080`;
@@ -881,7 +937,7 @@ async function main(): Promise<number> {
 
   const commands: Record<string, (c: Ctx) => Promise<unknown>> = {
     status: cmdStatus, up: (c) => cmdUp(c, true), down: (c) => cmdUp(c, false), vin: cmdVin, discover: cmdDiscover,
-    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, label: cmdLabel, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
+    census: cmdCensus, identify: cmdIdentify, sweep: cmdSweep, coverage: cmdCoverage, label: cmdLabel, sources: cmdSources, knowledge: cmdKnowledge, dtc: cmdDtc, bench: cmdBench, audit: cmdAudit, modules: cmdModules, map: cmdMap, capture: (c) => runCapture(c, { cli: true }), run: cmdRun, rec: cmdRec, sim: cmdSim,
   };
   const fn = commands[cmd];
   if (!fn) { process.stderr.write(`Unknown command "${cmd}".\n\n${HELP}\n`); return 2; }
