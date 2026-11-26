@@ -5,7 +5,13 @@ import { test } from "node:test";
 import { checkRequest } from "@ecu/vehicle-db";
 import type { VehicleModule, VehicleProfile } from "@ecu/vehicle-db";
 
-import { provenSessions, readObdSupport, sweepModule, sweepTargets } from "./sweepPipeline";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { saveStoredVehicleProfile } from "@ecu/vehicle-db/vehicleStore";
+
+import { conditionProblem, normaliseCondition, provenSessions, readObdSupport, sweepAndSave, sweepModule, sweepTargets } from "./sweepPipeline";
 
 function fakeEcm() {
   const sent: string[] = [];
@@ -138,4 +144,39 @@ test("an OBD-type module is asked which standard values it supports (real Sprint
   assert.ok(pids.includes("0C") && pids.includes("42") && pids.includes("05"));
   assert.ok(!pids.includes("20") && !pids.includes("40"));          // "more" bits are not values
   assert.ok(!pids.some((p) => parseInt(p, 16) > 0x60 + 32));
+});
+
+test("whatever the words, sweeps are filed under the two states on file", () => {
+  for (const w of ["ignition on, engine off", "ignition on", "engine off", "Key on engine off", ""]) assert.equal(normaliseCondition(w), "engine off", w);
+  for (const w of ["engine idling", "idling", "Idle", "engine running"]) assert.equal(normaliseCondition(w), "idling", w);
+});
+
+test("the car's state is checked: engine, standstill, voltage", () => {
+  const off = { rpm: 0, kmh: 0, volts: 12.4 }, idle = { rpm: 680, kmh: 0, volts: 14.0 };
+  assert.equal(conditionProblem("engine off", off), null);
+  assert.equal(conditionProblem("idling", idle), null);
+  assert.match(conditionProblem("engine off", idle)!, /engine is running/);
+  assert.match(conditionProblem("idling", off)!, /not running/);
+  assert.match(conditionProblem("idling", { ...idle, kmh: 12 })!, /moving/);
+  assert.match(conditionProblem("engine off", { ...off, volts: 11.5 })!, /charger/);
+  assert.match(conditionProblem("engine off", { rpm: null, kmh: null, volts: null })!, /did not answer/);
+});
+
+test("a sweep refuses to start on a car in the wrong state, and sends nothing to the module", async () => {
+  const sent: string[] = [];
+  let rpm = "410C0AA0";                                        // 680 rpm
+  globalThis.fetch = (async (_url: string, init?: { body?: string }) => {
+    const b = JSON.parse(init?.body ?? "{}") as { tx: string; requests: string[] };
+    const a: Record<string, string> = { "010C": rpm, "010D": "410D00", "0142": "414236D8" };
+    return new Response(JSON.stringify({ ok: true, results: b.requests.map((q) => { if (b.tx !== "7E0" || !a[q]) sent.push(`${b.tx}:${q}`); return a[q] && b.tx === "7E0" ? { request: q, response: a[q] } : { request: q, response: "7F2112", negative: true, nrc: 0x12 }; }) }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ual-guard-"));
+  const p = { ...profile, buses: [{ id: "hs-can", label: "HS-CAN", protocol: "CAN", bitrate: 500000 }], modules: [mod("body", "Body module", "body", "72E", "4EE", "kwp2000")], provenance: { source: "user", confidence: 1, createdAt: "2026-11-26T00:00:00Z", updatedAt: "2026-11-26T00:00:00Z" } } as unknown as VehicleProfile;
+  await saveStoredVehicleProfile(dir, p, "2026-11-26T00:00:00Z");
+  await assert.rejects(sweepAndSave(dir, { host: "fake:8080", iface: "can0", profile: p, condition: "ignition on, engine off" }), /engine is running \(680 rpm\).*Nothing was swept/);
+  assert.equal(sent.length, 0);
+  rpm = "410C0000";
+  const r = await sweepAndSave(dir, { host: "fake:8080", iface: "can0", profile: p, condition: "ignition on, engine off" });
+  assert.equal(r.sweeps.body.condition, "engine off");
+  assert.ok(sent.length > 0);
 });

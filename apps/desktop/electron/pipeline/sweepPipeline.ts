@@ -30,6 +30,39 @@ export interface SweepOptions {
   shouldStop?: () => boolean;
   /** false: do not read the car's own readings beside the sweep (tests, replays). */
   refs?: boolean;
+  /** false: do not confirm the car's state before each module. Default: on for a car, off for a simulator. */
+  check?: boolean;
+}
+
+/** The two states sweeps are filed under. Whatever words the operator used map onto them. */
+export function normaliseCondition(s: string): "engine off" | "idling" {
+  const t = (s || "").trim().toLowerCase();
+  return /idl|running|engine on|engine run/.test(t) ? "idling" : "engine off";
+}
+
+export interface CarState { rpm: number | null; kmh: number | null; volts: number | null }
+
+/** Engine speed, road speed and supply voltage from the engine module (standard OBD reads). */
+export async function readCarState(o: Pick<SweepOptions, "host" | "iface">): Promise<CarState> {
+  let items: SeqItem[] = [];
+  try { items = await readSeq(o.host, o.iface, "7E0", "7E8", ["010C", "010D", "0142"], { timeout: 0.8 }); }
+  catch { /* nothing answers */ }
+  const raw = (k: number, want: string, n: number): number | null => {
+    const h = clean(items[k]?.response);
+    return h.startsWith(want) && h.length >= 4 + n * 2 ? parseInt(h.slice(4, 4 + n * 2), 16) : null;
+  };
+  const rpm = raw(0, "410C", 2), mv = raw(2, "4142", 2);
+  return { rpm: rpm === null ? null : rpm / 4, kmh: raw(1, "410D", 1), volts: mv === null ? null : mv / 1000 };
+}
+
+/** Why the car is not in a state to sweep as "condition" — or null when it is. */
+export function conditionProblem(condition: "engine off" | "idling", s: CarState, minVolts = 11.8): string | null {
+  if (s.rpm === null) return "the engine module did not answer, so the car's state cannot be confirmed (ignition on?)";
+  if (s.kmh !== null && s.kmh > 0) return `the car is moving (${s.kmh} km/h)`;
+  if (condition === "idling" && s.rpm < 300) return `the engine is not running (${s.rpm} rpm) but the chosen state is "engine idling"`;
+  if (condition === "engine off" && s.rpm >= 300) return `the engine is running (${s.rpm} rpm) but the chosen state is "engine off"`;
+  if (s.volts !== null && s.volts < minVolts) return `the supply voltage is ${s.volts} V, below ${minVolts} V — connect a charger first`;
+  return null;
 }
 
 /** Hex characters kept per identifier. */
@@ -207,7 +240,9 @@ export async function sweepModule(o: SweepOptions, m: VehicleModule, index: numb
 }
 
 /** Sweep the targets and file each result on the model's module (fresh profile from disk each time). */
-export async function sweepAndSave(vehicleLibDir: string, o: SweepOptions): Promise<{ profile: VehicleProfile; sweeps: Record<string, ModuleSweep>; skipped: string[] }> {
+export async function sweepAndSave(vehicleLibDir: string, o0: SweepOptions): Promise<{ profile: VehicleProfile; sweeps: Record<string, ModuleSweep>; skipped: string[] }> {
+  const o: SweepOptions = { ...o0, condition: normaliseCondition(o0.condition) };
+  const check = o.check ?? !o.sim;
   const targets = sweepTargets(o.profile, o.moduleIds);
   const skipped = o.profile.modules
     .filter((m) => clean(m.addressing?.response) && protectedModule({ category: m.category, label: m.label }) && (!o.moduleIds?.length || o.moduleIds.includes(m.id)))
@@ -217,6 +252,11 @@ export async function sweepAndSave(vehicleLibDir: string, o: SweepOptions): Prom
   for (let i = 0; i < targets.length; i++) {
     if (o.shouldStop?.()) break;
     const m = targets[i];
+    // the car must be in the chosen state, standing still, with enough voltage — before every module
+    if (check) {
+      const problem = conditionProblem(o.condition as "engine off" | "idling", await readCarState(o));
+      if (problem) throw new Error(`Sweep stopped before ${m.label}: ${problem}.${i ? ` ${i} module${i === 1 ? " was" : "s were"} swept and saved before this.` : " Nothing was swept."}`);
+    }
     const sw = await sweepModule(o, m, i, targets.length);
     sweeps[m.id] = sw;
     const fresh = (await loadLibrary(vehicleLibDir)).find((p) => p.id === o.profile.id) ?? current;

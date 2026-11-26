@@ -107,7 +107,7 @@ AI steps (census, map) need ANTHROPIC_API_KEY in the environment or in <repo>/.e
 // ---- small plumbing -------------------------------------------------------------
 
 interface Args { _: string[]; flags: Record<string, string | boolean> }
-const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide", "dry", "show", "recheck", "missing", "catalog"]);
+const BOOL_FLAGS = new Set(["deep", "no-deep", "ext", "no-ext", "json", "help", "no-census", "all", "wide", "dry", "show", "recheck", "missing", "catalog", "no-check"]);
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { _: [], flags: {} };
@@ -441,7 +441,7 @@ async function cmdSweep(ctx: Ctx) {
   say(`Completeness sweep on ${ctx.iface} for ${ymm(profile)} · condition "${condition}"${sim ? ` · SIMULATOR (${sim})` : ""}`);
   let last = "";
   const { profile: saved, sweeps, skipped } = await sweepAndSave(ctx.vehicleLibDir, {
-    host: ctx.host, iface: ctx.iface, profile, moduleIds: ids, condition, wide: !!ctx.args.flags.wide, sim,
+    host: ctx.host, iface: ctx.iface, profile, moduleIds: ids, condition, wide: !!ctx.args.flags.wide, sim, ...(ctx.args.flags["no-check"] ? { check: false } : {}),
     onEvent: (e) => {
       if (e.type !== "sweep-module") return;
       if (e.phase === "start") say(`\n  [${e.index + 1}/${e.total}] ${oneLine(e.label, 70)} — ${e.of} identifiers`);

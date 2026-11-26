@@ -13,13 +13,14 @@ import { fmtDate, plural } from "./vehicleFacts";
  * the module) against what the AI map knows. Shows the share covered, the moving
  * values the map does not list as live data, and lets the operator sweep again.
  */
-const CONDITIONS = ["ignition on, engine off", "engine idling"];
+/** The two states sweeps are filed under (value) and how they are shown (label). */
+const CONDITIONS = [{ value: "engine off", label: "ignition on, engine off" }, { value: "idling", label: "engine idling" }];
 
 export function Completeness({ profile, m, onProfile }: { profile: VehicleProfile; m: VehicleModule; onProfile?: (p: VehicleProfile) => void }) {
   const sd = useSuperDevice();
   const wb = useWorkbench();
   const online = sd.link === "online";
-  const [condition, setCondition] = useState(CONDITIONS[0]);
+  const [condition, setCondition] = useState(CONDITIONS[0].value);
   const [busy, setBusy] = useState<{ asked: number; of: number; answered: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -80,13 +81,13 @@ export function Completeness({ profile, m, onProfile }: { profile: VehicleProfil
         <label className="vdb-cov-cond">
           <span className="vdb-sr">What the car is doing</span>
           <select value={condition} onChange={(e) => setCondition(e.target.value)} disabled={!!busy}>
-            {CONDITIONS.map((x) => <option key={x} value={x}>{x}</option>)}
+            {CONDITIONS.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}
           </select>
         </label>
         <button type="button" disabled={!online || !!busy} onClick={() => void sweep()}>
           {busy ? (busy.of ? `Sweeping ${busy.asked}/${busy.of} · ${busy.answered} answered` : "Sweeping…") : last ? "Sweep again" : "Sweep this system"}
         </button>
-        <span className="ual-muted">{online ? "Read-only · about a minute · no AI" : "Connect a device to sweep"}</span>
+        <span className="ual-muted">{online ? "Read-only · about a minute · no AI · checks the car is in that state first" : "Connect a device to sweep"}</span>
       </div>
       {err && <div className="ual-note err">{err}</div>}
     </div>

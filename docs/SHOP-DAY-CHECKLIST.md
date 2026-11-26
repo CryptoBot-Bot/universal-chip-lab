@@ -39,8 +39,9 @@ cars that diagnose over Ethernet.
    and says how sure each one is (proven · standard · fits · AI guess). It cannot act.
 7. Mapping deeper (a model seen for the first time, or a module with gaps): Vehicles Database →
    the model → its system → **Completeness** → what the car is doing → **Sweep this system**.
-   Every module with the engine off first, then idling. **The app does not check the
-   condition for you — choose the true one.** Idling only parked, brake on, with extraction,
+   Every module with the engine off first, then idling. Before every module the sweep reads
+   engine speed, road speed and voltage and **stops if the car is not in the chosen state, is
+   moving, or is below 11.8 V**. Idling only parked, brake on, with extraction,
    nobody driving: a sweep keeps diagnostic sessions open on modules such as the gearbox.
    Airbag and immobiliser modules are never offered.
 8. Before unplugging: **Fault Scan** once more — the same codes as at the start, nothing new.
